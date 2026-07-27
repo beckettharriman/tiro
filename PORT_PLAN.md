@@ -27,7 +27,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 
 ## Phase 1 — core backend (CPU-only path first)
 
-- [ ] **1.1 Config.** `config.ini` load/save with the exact keys/defaults from
+- [x] **1.1 Config.** `config.ini` load/save with the exact keys/defaults from
   PORTING_NOTES §2, atomic write (temp + rename), missing-key backfill.
   Include `config.example.ini`. Unit tests for defaults + round-trip.
 - [ ] **1.2 Audio capture.** cpal input stream: device enumeration,
