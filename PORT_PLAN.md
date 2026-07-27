@@ -91,21 +91,25 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   load on AC→battery), GPU-crash → CPU retry of the same audio, engine chip
   truthfulness, beam 5 on GPU / 1 on CPU.
 
-## Phase 4 — Linux
+## Phase 4 — cross-OS verification
 
-- [ ] **4.1 Linux build.** In WSL2 Ubuntu: install webkit2gtk/libasound deps,
-  get `cargo build` + `cargo tauri build` green. Fix portability fallout.
-  Document build deps in README-dev notes.
-- [ ] **4.2 Linux runtime.** Run under WSLg: windows render, audio capture
-  works (PulseAudio via WSLg), clipboard works, transcription works. Fix what
-  doesn't. Note WSLg-specific quirks separately from real-Linux issues.
-- [ ] **4.3 Hotkeys on Linux.** Verify global shortcuts on X11; implement/
-  document the Wayland story (portal GlobalShortcuts where available; document
-  DE-level shortcut → `tiro --toggle` CLI fallback and implement the CLI
-  trigger via the single-instance IPC).
-- [ ] **4.4 Theme/power/autostart on Linux.** System theme detection, power
-  detection, autostart entry — all verified in WSL2/documented for real
-  distros.
+(Development is Linux-native in WSL2, so the Linux build/runtime is exercised
+continuously from Phase 0 onward. This phase closes the gaps on the other
+side and the hard platform corners.)
+
+- [ ] **4.1 Windows build.** Pull the repo in the Windows clone
+  (`C:\Users\becke\tiro`), get `cargo build` + `cargo tauri dev` green there.
+  Fix portability fallout. Document build prerequisites for both OSes.
+- [ ] **4.2 Windows runtime parity.** On Windows: hotkeys, tray, transparent
+  frameless windows, taskbar suppression, audio capture, clipboard, power
+  detection, autostart — all verified against PORTING_NOTES.
+- [ ] **4.3 Hotkeys on Wayland.** Global shortcuts work on X11/WSLg today;
+  implement/document the Wayland story (portal GlobalShortcuts where
+  available; DE-level shortcut → `tiro --toggle` CLI fallback wired through
+  the single-instance IPC).
+- [ ] **4.4 Platform features cross-check.** Theme detection, power
+  detection, autostart on both OSes; note WSLg-specific quirks separately
+  from real-Linux issues.
 
 ## Phase 5 — parity, packaging, release prep
 
