@@ -7,6 +7,7 @@ pub mod audio;
 pub mod clipboard;
 pub mod config;
 pub mod cues;
+pub mod transcribe;
 
 use std::sync::{Mutex, MutexGuard};
 

@@ -12,6 +12,7 @@ src-tauri/gen/
 # -- runtime artifacts -------------------------------------------------------
 *.log
 config.ini
+config.ini.*
 vocab.txt
 models/
 transcripts/

@@ -28,6 +28,9 @@ cpal = "0.18.1"
 rodio = "0.22.2"
 arboard = "3.6.1"
 regex = "1.13.1"
+whisper-rs = "0.16.0"
+ureq = "3.3.0"
+hound = "3.5.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

@@ -11,5 +11,13 @@ fn main() {
         tiro_lib::cues::cue_test();
         return;
     }
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--transcribe-test") {
+        match args.get(i + 1) {
+            Some(wav) => tiro_lib::transcribe::transcribe_test(wav),
+            None => eprintln!("usage: tiro --transcribe-test <wav>"),
+        }
+        return;
+    }
     tiro_lib::run()
 }

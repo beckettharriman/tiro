@@ -40,7 +40,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **1.4 Clipboard + cleanup.** arboard copy; port the `light`/`fillers`
   cleanup rules exactly (unit tests: casing, trailing period, standalone i,
   space-before-punctuation, filler stripping, empty-result fallback).
-- [ ] **1.5 Transcription (CPU).** whisper-rs: model manager that maps
+- [x] **1.5 Transcription (CPU).** whisper-rs: model manager that maps
   `base.en`/`small.en`(/`medium.en`) to GGUF files under `./models`, downloads
   from huggingface ggerganov/whisper.cpp on first use with progress logged;
   transcribe 16 kHz f32 with language=en, beam 1 on CPU, VAD enabled, vocab
