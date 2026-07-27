@@ -46,7 +46,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   transcribe 16 kHz f32 with language=en, beam 1 on CPU, VAD enabled, vocab
   from `vocab.txt` when `use_vocab_bias`; join+strip segments. Warm-up on 1 s
   silence. Verify: feed a recorded WAV, get sane text.
-- [ ] **1.6 Transcript store.** Daily JSONL + Markdown files in `vault_dir`
+- [x] **1.6 Transcript store.** Daily JSONL + Markdown files in `vault_dir`
   with fallback to app-local `logs/` when unwritable (match original file
   names/format — read the original's log-writing code first), entry ids
   `<iso>|<hash>`, 200-entry day list for the panel.
