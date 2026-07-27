@@ -131,8 +131,8 @@ impl Default for AppCtx {
     }
 }
 
-/// `engine_dict`: the chip payload. Reports the ACTUAL device; power
-/// detection lands in 3.3, until then the battery-safe default.
+/// `engine_dict`: the chip payload. Reports the ACTUAL device and the live
+/// power source.
 pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
     let engine = lock(&ctx.engine);
     let model = if engine.model_name.is_empty() {
@@ -141,7 +141,12 @@ pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
         engine.model_name.clone()
     };
     let device = if engine.device == "gpu" { "GPU" } else { "CPU" };
-    json!({ "model": model, "device": device, "power": "battery" })
+    let power = if crate::power::on_ac_power() {
+        "plugged"
+    } else {
+        "battery"
+    };
+    json!({ "model": model, "device": device, "power": power })
 }
 
 /// Call `window.<fn>(<json>)` in the panel — the original's `evaluate_js`.

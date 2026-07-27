@@ -77,7 +77,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   (Open, Start/Stop dictation, Restart, Quit).
 - [x] **3.2 Autostart.** tauri-plugin-autostart wired to the `launchAtLogin`
   setting on both OSes.
-- [ ] **3.3 Power detection.** AC/battery: `GetSystemPowerStatus` on Windows
+- [x] **3.3 Power detection.** AC/battery: `GetSystemPowerStatus` on Windows
   (via `windows` crate) and `/sys/class/power_supply` on Linux (or
   starship-battery if it's cleaner); 20 s watcher; battery default when
   unknown.

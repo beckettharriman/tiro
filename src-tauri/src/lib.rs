@@ -10,6 +10,7 @@ pub mod cues;
 pub mod flow;
 pub mod hotkeys;
 pub mod placement;
+pub mod power;
 pub mod store;
 pub mod transcribe;
 
@@ -75,27 +76,34 @@ fn rebind_shortcut(app: tauri::AppHandle, which: String, combo: Value) -> Value 
     api::rebind_shortcut(&app, &which, &combo)
 }
 
-/// Follow the OS light/dark setting while theme == "system", like the
-/// original's 20 s watcher tick. The ThemeChanged window event covers this
-/// natively on Windows, but on Linux tao emits the OS change with a dummy
-/// window id that never reaches on_window_event — so the poll is the
-/// portable signal (and matches the original's behavior exactly).
-fn theme_watcher(app: tauri::AppHandle) {
+/// The original's 20 s `power_watcher` tick: keep the engine chip's power
+/// label and the system theme in sync with the live machine state. (Theme
+/// polling is needed because on Linux tao emits OS ThemeChanged with a
+/// dummy window id that never reaches on_window_event; the device swap on
+/// power flips joins in task 3.5.)
+fn power_watcher(app: tauri::AppHandle) {
     use tauri::Manager;
     std::thread::spawn(move || {
-        let mut last: Option<String> = None;
+        let mut last_theme: Option<String> = None;
+        let mut last_power = power::on_ac_power();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(20));
             let ctx = app.state::<flow::AppCtx>();
+            let ac = power::on_ac_power();
+            if ac != last_power {
+                last_power = ac;
+                eprintln!("power flip -> {}", if ac { "plugged" } else { "battery" });
+                flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
+            }
             let eff = {
                 let cfg = flow::lock(&ctx.cfg);
                 api::effective_theme(&app, &cfg)
             };
-            if last.as_deref() != Some(eff.as_str()) {
-                if last.is_some() {
+            if last_theme.as_deref() != Some(eff.as_str()) {
+                if last_theme.is_some() {
                     flow::push_panel(&app, "tiroSetTheme", serde_json::json!(eff));
                 }
-                last = Some(eff);
+                last_theme = Some(eff);
             }
         }
     });
@@ -168,7 +176,6 @@ pub fn run() {
             // Follow the OS light/dark setting while theme == "system" (the
             // original polled the registry every 20 s; Tauri delivers events).
             if let tauri::WindowEvent::ThemeChanged(theme) = event {
-                eprintln!("ThemeChanged({theme:?}) on window '{}'", window.label());
                 if window.label() != "panel" {
                     return;
                 }
@@ -225,7 +232,7 @@ pub fn run() {
             }
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
-            theme_watcher(app.handle().clone());
+            power_watcher(app.handle().clone());
             if let Err(e) = build_tray(app) {
                 eprintln!("tray unavailable: {e}");
             }
