@@ -163,14 +163,25 @@ pub fn toggle_panel(app: &AppHandle) {
         });
     } else {
         let state = api::get_state(app);
-        let app = app.clone();
-        let _ = app.clone().run_on_main_thread(move || {
-            flow::push_panel(&app, "tiroApplyState", state);
-            if let Some(w) = app.get_webview_window("panel") {
+        // Drift check BEFORE repositioning: a user drag since the last
+        // summon turns auto-centering off for good.
+        let moved = crate::placement::panel_moved(app);
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            flow::push_panel(&app2, "tiroApplyState", state);
+            if let Some(w) = app2.get_webview_window("panel") {
                 let _ = w.show();
-                let _ = w.set_focus();
+            }
+            if moved && crate::placement::pinned(&app2) {
+                if let Some(w) = app2.get_webview_window("panel") {
+                    let _ = w.set_always_on_top(true);
+                }
             }
         });
+        if !moved {
+            crate::placement::reposition_burst(app, "panel");
+        }
+        crate::placement::summon_front(app);
     }
 }
 

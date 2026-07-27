@@ -64,7 +64,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **2.3 Global hotkeys.** Register the three hotkeys
   (tauri-plugin-global-shortcut), dispatch to toggle/panel/cancel, and
   `rebind_shortcut` with validation + persist + live re-register.
-- [ ] **2.4 Window placement.** Active-monitor detection (monitor with focus,
+- [x] **2.4 Window placement.** Active-monitor detection (monitor with focus,
   else monitor under cursor), work-area math: pill bottom-center ~110 px up,
   panel centered until user drags it; pin/summon behavior.
 - [ ] **2.5 Theme + transparency.** system/light/dark via Tauri theme events,

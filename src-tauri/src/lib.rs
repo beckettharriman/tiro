@@ -9,6 +9,7 @@ pub mod config;
 pub mod cues;
 pub mod flow;
 pub mod hotkeys;
+pub mod placement;
 pub mod store;
 pub mod transcribe;
 
@@ -50,8 +51,8 @@ fn cancel_record(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn set_pin(on: bool, window: WebviewWindow) -> Result<(), String> {
-    window.set_always_on_top(on).map_err(|e| e.to_string())
+fn set_pin(on: bool, app: tauri::AppHandle) {
+    placement::set_pin(&app, on);
 }
 
 #[tauri::command]
@@ -81,6 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(flow::AppCtx::new())
+        .manage(placement::Placement::default())
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
             // so GTK refuses to make the pill window its configured 72 px.
@@ -115,6 +117,7 @@ pub fn run() {
                 if let Some(w) = app.webview_windows().get("panel") {
                     let _ = w.show();
                 }
+                placement::reposition_burst(app.handle(), "panel");
             }
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());

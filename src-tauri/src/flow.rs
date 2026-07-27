@@ -178,7 +178,8 @@ fn show_pill(app: &AppHandle, ctx: &AppCtx, state: &str, payload: Option<&str>) 
         }
     });
     push_pill(app, state, payload);
-    // bottom-center placement joins in task 2.4
+    // dock bottom-center after the show settles
+    crate::placement::reposition_burst(app, "pill");
 }
 
 /// Play the pill's exit animation, then hide the window shortly after
