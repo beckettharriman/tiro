@@ -3,10 +3,8 @@
 //! rebinding, ported from the original's `Api` class and its config<->JS
 //! value-mapping helpers.
 //!
-//! Not yet live here (later tasks): `launchAtLogin` (autostart plugin, 3.2),
-//! the `powerMode` device swap (device orchestration, 3.5), and the hotkey
-//! re-register after `rebind_shortcut` (global hotkeys, 2.3) — the config
-//! writes are real, the side effects join with those tasks.
+//! Not yet live here: the `powerMode` device swap (device orchestration,
+//! task 3.5) — the config write is real, the side effect joins there.
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
@@ -242,9 +240,25 @@ pub fn resolve_mic_name(cfg: &ConfigStore) -> String {
         .unwrap_or_else(|| names[0].clone())
 }
 
-/// `launch_at_login_enabled`: inert until the autostart plugin (task 3.2).
-pub fn launch_at_login_enabled() -> bool {
-    false
+/// `launch_at_login_enabled`: whether the app is registered to start at
+/// login (the original checked for its Startup-folder .lnk).
+pub fn launch_at_login_enabled(app: &AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// `set_launch_at_login`: register/unregister the autostart entry;
+/// best-effort like the original (a failure just leaves the toggle off).
+pub fn set_launch_at_login(app: &AppHandle, on: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let result = if on {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    if let Err(e) = result {
+        eprintln!("launch-at-login update failed: {e}");
+    }
 }
 
 /// On Linux, ask the XDG Settings portal for the live color-scheme. The
@@ -360,7 +374,7 @@ pub fn get_state(app: &AppHandle) -> Value {
             "clipboardCleanup": cleanup_to_js(&cfg.get("clipboard_cleanup")),
             "smartVocab": cfg.get_bool("use_vocab_bias"),
             "micName": resolve_mic_name(&cfg),
-            "launchAtLogin": launch_at_login_enabled(),
+            "launchAtLogin": launch_at_login_enabled(app),
             "savePath": cfg.get("vault_dir"),
             "transparency": clamp_int_str(&cfg.get("panel_transparency"), 0, 100, 45),
             "storageFallback": !is_vault,
@@ -401,7 +415,7 @@ fn ack(app: &AppHandle, ctx: &AppCtx) -> Value {
         "engine": flow::engine_dict(ctx),
         "theme": theme,
         "effectiveTheme": effective,
-        "launchAtLogin": launch_at_login_enabled(),
+        "launchAtLogin": launch_at_login_enabled(app),
     })
 }
 
@@ -458,9 +472,7 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                     &clamp_int(value, 0, 100, 45).to_string(),
                 );
             }
-            "launchAtLogin" => {
-                // set_launch_at_login joins with the autostart plugin (3.2)
-            }
+            "launchAtLogin" => set_launch_at_login(app, truthy(value)),
             "theme" => {
                 let mut t = as_cfg_str(value).to_lowercase();
                 if !matches!(t.as_str(), "system" | "light" | "dark") {

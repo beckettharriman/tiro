@@ -75,7 +75,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **3.1 Single instance + tray.** tauri-plugin-single-instance (second
   launch summons panel); tray icon: left-click toggles panel, right-click menu
   (Open, Start/Stop dictation, Restart, Quit).
-- [ ] **3.2 Autostart.** tauri-plugin-autostart wired to the `launchAtLogin`
+- [x] **3.2 Autostart.** tauri-plugin-autostart wired to the `launchAtLogin`
   setting on both OSes.
 - [ ] **3.3 Power detection.** AC/battery: `GetSystemPowerStatus` on Windows
   (via `windows` crate) and `/sys/class/power_supply` on Linux (or
