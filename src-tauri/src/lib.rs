@@ -75,6 +75,32 @@ fn rebind_shortcut(app: tauri::AppHandle, which: String, combo: Value) -> Value 
     api::rebind_shortcut(&app, &which, &combo)
 }
 
+/// Follow the OS light/dark setting while theme == "system", like the
+/// original's 20 s watcher tick. The ThemeChanged window event covers this
+/// natively on Windows, but on Linux tao emits the OS change with a dummy
+/// window id that never reaches on_window_event — so the poll is the
+/// portable signal (and matches the original's behavior exactly).
+fn theme_watcher(app: tauri::AppHandle) {
+    use tauri::Manager;
+    std::thread::spawn(move || {
+        let mut last: Option<String> = None;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            let ctx = app.state::<flow::AppCtx>();
+            let eff = {
+                let cfg = flow::lock(&ctx.cfg);
+                api::effective_theme(&app, &cfg)
+            };
+            if last.as_deref() != Some(eff.as_str()) {
+                if last.is_some() {
+                    flow::push_panel(&app, "tiroSetTheme", serde_json::json!(eff));
+                }
+                last = Some(eff);
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -83,6 +109,29 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(flow::AppCtx::new())
         .manage(placement::Placement::default())
+        .on_window_event(|window, event| {
+            // Follow the OS light/dark setting while theme == "system" (the
+            // original polled the registry every 20 s; Tauri delivers events).
+            if let tauri::WindowEvent::ThemeChanged(theme) = event {
+                eprintln!("ThemeChanged({theme:?}) on window '{}'", window.label());
+                if window.label() != "panel" {
+                    return;
+                }
+                use tauri::Manager;
+                let app = window.app_handle();
+                let ctx = app.state::<flow::AppCtx>();
+                let cfg_theme = flow::lock(&ctx.cfg).get("theme").to_lowercase();
+                if matches!(cfg_theme.as_str(), "light" | "dark") {
+                    return; // a fixed theme ignores the OS
+                }
+                let eff = if *theme == tauri::Theme::Light {
+                    "light"
+                } else {
+                    "dark"
+                };
+                flow::push_panel(app, "tiroSetTheme", serde_json::json!(eff));
+            }
+        })
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
             // so GTK refuses to make the pill window its configured 72 px.
@@ -121,6 +170,7 @@ pub fn run() {
             }
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
+            theme_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

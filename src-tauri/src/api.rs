@@ -247,28 +247,61 @@ pub fn launch_at_login_enabled() -> bool {
     false
 }
 
-/// `effective_theme`: resolve "system" to the OS setting via the panel
-/// window's detected theme (the original read the Windows registry).
+/// On Linux, ask the XDG Settings portal for the live color-scheme. The
+/// windowing layer can't be trusted here: tao latches the boot-time portal
+/// value into the window's preferred theme, and its OS ThemeChanged events
+/// carry a dummy window id that never reaches handlers — so a direct portal
+/// read is the only current signal. `dbus-send` ships with D-Bus itself.
+/// Returns None when the portal is unavailable (e.g. stock WSLg).
+#[cfg(target_os = "linux")]
+fn portal_color_scheme() -> Option<bool> {
+    let out = std::process::Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply=literal",
+            "--dest=org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings.Read",
+            "string:org.freedesktop.appearance",
+            "string:color-scheme",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let reply = String::from_utf8_lossy(&out.stdout);
+    let value = reply.split("uint32").nth(1)?.trim().parse::<u32>().ok()?;
+    Some(value == 1) // 1 = prefer dark; 0 (no preference) and 2 = light
+}
+
+/// The OS light/dark answer: portal on Linux (see above), the windowing
+/// layer's live report elsewhere (the original read the Windows registry).
+fn os_prefers_dark(app: &AppHandle) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(dark) = portal_color_scheme() {
+        return dark;
+    }
+    app.get_webview_window("panel")
+        .and_then(|w| w.theme().ok())
+        .is_none_or(|theme| !matches!(theme, tauri::Theme::Light))
+}
+
+/// `effective_theme`: resolve "system" to the OS setting.
 pub fn effective_theme(app: &AppHandle, cfg: &ConfigStore) -> String {
     let t = cfg.get("theme").to_lowercase();
     match t.as_str() {
         "light" | "dark" => t,
-        _ => {
-            // "system" (and the empty/unknown fallback chain ends in dark,
-            // matching read_system_theme's default)
-            let detected = app
-                .get_webview_window("panel")
-                .and_then(|w| w.theme().ok())
-                .map(|theme| matches!(theme, tauri::Theme::Light));
-            if t == "system" || t.is_empty() {
-                match detected {
-                    Some(true) => "light".into(),
-                    _ => "dark".into(),
-                }
-            } else {
+        // "system" (the empty/unknown fallback chain ends in dark, matching
+        // the original read_system_theme's default)
+        _ if t == "system" || t.is_empty() => {
+            if os_prefers_dark(app) {
                 "dark".into()
+            } else {
+                "light".into()
             }
         }
+        _ => "dark".into(),
     }
 }
 

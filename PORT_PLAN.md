@@ -67,7 +67,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **2.4 Window placement.** Active-monitor detection (monitor with focus,
   else monitor under cursor), work-area math: pill bottom-center ~110 px up,
   panel centered until user drags it; pin/summon behavior.
-- [ ] **2.5 Theme + transparency.** system/light/dark via Tauri theme events,
+- [x] **2.5 Theme + transparency.** system/light/dark via Tauri theme events,
   `tiroSetTheme` push, `panel_transparency` mapping 0–100 → 0.95–0.30.
 
 ## Phase 3 — platform integration
