@@ -5,6 +5,7 @@
   "windows": ["panel", "pill"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "dialog:default"
   ]
 }

@@ -72,7 +72,7 @@ pub fn app_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
+pub(crate) fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 

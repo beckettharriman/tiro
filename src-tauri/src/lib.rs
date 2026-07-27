@@ -1,8 +1,8 @@
-//! Stub backend for the UI import phase (PORT_PLAN 0.2): the commands mirror
-//! the pywebview api surface (see PORTING_NOTES §3) but serve an in-memory
-//! dummy state so the panel renders and settings interactions round-trip.
-//! Real config/audio/transcription backends replace these in later tasks.
+//! Tauri entry point: window setup and the pywebview-shaped command surface
+//! (PORTING_NOTES §3). The commands are thin wrappers — the real api logic
+//! lives in `api`, the recording state machine in `flow`.
 
+pub mod api;
 pub mod audio;
 pub mod clipboard;
 pub mod config;
@@ -11,92 +11,12 @@ pub mod flow;
 pub mod store;
 pub mod transcribe;
 
-use std::sync::{Mutex, MutexGuard};
-
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
-struct AppState(Mutex<Value>);
-
-fn default_state() -> Value {
-    json!({
-        "entries": [],
-        "settings": {
-            "powerMode": "auto",
-            "modelBattery": "base.en",
-            "modelPlugged": "small.en",
-            "soundCues": true,
-            "volume": 67,
-            "recordingPill": true,
-            "clipboardCleanup": "light",
-            "smartVocab": true,
-            "micName": "",
-            "launchAtLogin": false,
-            "savePath": "~/Documents/Tiro",
-            "transparency": 45,
-            "storageFallback": false,
-            "storagePath": ""
-        },
-        "engine": { "model": "base.en", "device": "CPU", "power": "battery" },
-        "mics": [],
-        "shortcuts": {
-            "dictate": { "ctrl": true, "alt": true, "shift": false, "meta": false,
-                         "code": "Space", "keys": ["Ctrl", "Alt", "Space"] },
-            "panel":   { "ctrl": true, "alt": true, "shift": false, "meta": false,
-                         "code": "KeyV", "keys": ["Ctrl", "Alt", "V"] },
-            "cancel":  { "ctrl": true, "alt": true, "shift": false, "meta": false,
-                         "code": "KeyX", "keys": ["Ctrl", "Alt", "X"] }
-        },
-        "theme": "system",
-        "effectiveTheme": "dark"
-    })
-}
-
-fn lock_state(state: &AppState) -> MutexGuard<'_, Value> {
-    // A poisoned lock only means another command panicked; the state itself
-    // is plain JSON and still usable.
-    state.0.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Mirror of the original's engine derivation: device follows the power mode
-/// (auto = GPU when plugged, CPU on battery), model follows the power source.
-fn derive_engine(root: &mut Value) {
-    let settings = &root["settings"];
-    let power = root["engine"]["power"]
-        .as_str()
-        .unwrap_or("battery")
-        .to_owned();
-    let power_mode = settings["powerMode"].as_str().unwrap_or("auto");
-    let device = match power_mode {
-        "auto" => {
-            if power == "plugged" {
-                "GPU"
-            } else {
-                "CPU"
-            }
-        }
-        "gpu" => "GPU",
-        _ => "CPU",
-    };
-    let model = if power == "plugged" {
-        settings["modelPlugged"].clone()
-    } else {
-        settings["modelBattery"].clone()
-    };
-    root["engine"] = json!({ "model": model, "device": device, "power": power });
-}
-
-fn effective_theme(theme: &str) -> &str {
-    match theme {
-        "light" => "light",
-        // "system" resolves via Tauri's theme API in a later task; dark for now.
-        _ => "dark",
-    }
-}
-
 #[tauri::command]
-fn get_state(state: State<'_, AppState>) -> Value {
-    lock_state(&state).clone()
+fn get_state(app: tauri::AppHandle) -> Value {
+    api::get_state(&app)
 }
 
 #[tauri::command]
@@ -105,33 +25,17 @@ fn copy_text(text: String, ctx: State<'_, flow::AppCtx>) {
     if let Err(err) = clipboard::copy(&text) {
         eprintln!("clipboard copy failed: {err}");
     }
-    cues::play_cue(&ctx.cfg.lock().unwrap_or_else(|e| e.into_inner()), "copy");
+    cues::play_cue(&flow::lock(&ctx.cfg), "copy");
 }
 
 #[tauri::command]
-fn set_setting(key: String, value: Value, state: State<'_, AppState>) -> Value {
-    let mut root = lock_state(&state);
-    if key == "theme" {
-        root["theme"] = value;
-    } else {
-        root["settings"][&key] = value;
-    }
-    derive_engine(&mut root);
-    let theme = root["theme"].as_str().unwrap_or("system").to_owned();
-    let effective = effective_theme(&theme).to_owned();
-    root["effectiveTheme"] = json!(effective);
-    json!({
-        "ok": true,
-        "engine": root["engine"],
-        "theme": theme,
-        "effectiveTheme": effective,
-        "launchAtLogin": root["settings"]["launchAtLogin"]
-    })
+fn set_setting(app: tauri::AppHandle, key: String, value: Value) -> Value {
+    api::set_setting(&app, &key, &value)
 }
 
 #[tauri::command]
-fn list_mics(state: State<'_, AppState>) -> Value {
-    lock_state(&state)["mics"].clone()
+fn list_mics() -> Vec<String> {
+    audio::list_mic_names()
 }
 
 #[tauri::command]
@@ -160,28 +64,20 @@ fn begin_drag(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pick_folder() -> Option<Value> {
-    // Real folder picker (tauri dialog plugin) lands in task 2.2.
-    None
+async fn pick_folder(app: tauri::AppHandle) -> Option<Value> {
+    api::pick_folder(&app)
 }
 
 #[tauri::command]
-fn rebind_shortcut(which: String, combo: Value, state: State<'_, AppState>) -> Value {
-    let keys = combo["keys"].clone();
-    let mut root = lock_state(&state);
-    if matches!(which.as_str(), "dictate" | "panel" | "cancel") {
-        root["shortcuts"][&which] = combo;
-        json!({ "ok": true, "keys": keys })
-    } else {
-        json!({ "ok": false, "keys": keys })
-    }
+fn rebind_shortcut(app: tauri::AppHandle, which: String, combo: Value) -> Value {
+    api::rebind_shortcut(&app, &which, &combo)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState(Mutex::new(default_state())))
+        .plugin(tauri_plugin_dialog::init())
         .manage(flow::AppCtx::new())
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,

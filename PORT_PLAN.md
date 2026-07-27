@@ -56,7 +56,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **2.1 Recording state machine.** toggle/cancel semantics, session ids,
   stale-finish protection, the full flow from PORTING_NOTES §1 including pill
   states, beeps, engine chip updates, verbatim-vs-clean split.
-- [ ] **2.2 Bridge, for real.** Implement every JS→backend method and
+- [x] **2.2 Bridge, for real.** Implement every JS→backend method and
   backend→JS push from PORTING_NOTES §3 (real state snapshot, `set_setting`
   side effects, `list_mics`, `pick_folder` via tauri dialog plugin,
   `set_pin`, `close_panel`, `begin_drag` → `start_dragging`). Verify: panel
