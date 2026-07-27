@@ -459,8 +459,8 @@ pub fn pick_folder(app: &AppHandle) -> Option<Value> {
     Some(json!({ "path": path }))
 }
 
-/// `rebind_shortcut`: validate + persist a new hotkey. The live re-register
-/// joins with global hotkeys in task 2.3.
+/// `rebind_shortcut`: validate + persist a new hotkey, then re-register all
+/// hotkeys live (the original's `_request_rebind`).
 pub fn rebind_shortcut(app: &AppHandle, which: &str, combo: &Value) -> Value {
     let keys = combo.get("keys").cloned().unwrap_or_else(|| json!([]));
     let cfg_key = match which {
@@ -475,6 +475,7 @@ pub fn rebind_shortcut(app: &AppHandle, which: &str, combo: &Value) -> Value {
     }
     let ctx = app.state::<AppCtx>();
     lock(&ctx.cfg).set(cfg_key, &hotkey);
+    crate::hotkeys::register_all(app);
     json!({ "ok": true, "keys": keys })
 }
 

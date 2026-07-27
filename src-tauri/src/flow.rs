@@ -169,9 +169,14 @@ fn show_pill(app: &AppHandle, ctx: &AppCtx, state: &str, payload: Option<&str>) 
         return;
     }
     ctx.pill_gen.fetch_add(1, Ordering::SeqCst);
-    if let Some(w) = app.get_webview_window("pill") {
-        let _ = w.show();
-    }
+    // GTK window ops must run on the main thread (callers include hotkey
+    // dispatch and transcription workers).
+    let a = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = a.get_webview_window("pill") {
+            let _ = w.show();
+        }
+    });
     push_pill(app, state, payload);
     // bottom-center placement joins in task 2.4
 }
@@ -186,9 +191,12 @@ fn hide_pill(app: &AppHandle, ctx: &AppCtx) {
         std::thread::sleep(Duration::from_millis(320));
         let ctx = app.state::<AppCtx>();
         if ctx.pill_gen.load(Ordering::SeqCst) == gen {
-            if let Some(w) = app.get_webview_window("pill") {
-                let _ = w.hide();
-            }
+            let a = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(w) = a.get_webview_window("pill") {
+                    let _ = w.hide();
+                }
+            });
         }
     });
 }

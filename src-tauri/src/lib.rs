@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod config;
 pub mod cues;
 pub mod flow;
+pub mod hotkeys;
 pub mod store;
 pub mod transcribe;
 
@@ -78,6 +79,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(flow::AppCtx::new())
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
@@ -115,6 +117,7 @@ pub fn run() {
                 }
             }
             flow::boot_engine(app.handle().clone());
+            hotkeys::register_all(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

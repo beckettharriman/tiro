@@ -61,7 +61,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   side effects, `list_mics`, `pick_folder` via tauri dialog plugin,
   `set_pin`, `close_panel`, `begin_drag` → `start_dragging`). Verify: panel
   fully functional against the real backend.
-- [ ] **2.3 Global hotkeys.** Register the three hotkeys
+- [x] **2.3 Global hotkeys.** Register the three hotkeys
   (tauri-plugin-global-shortcut), dispatch to toggle/panel/cancel, and
   `rebind_shortcut` with validation + persist + live re-register.
 - [ ] **2.4 Window placement.** Active-monitor detection (monitor with focus,
