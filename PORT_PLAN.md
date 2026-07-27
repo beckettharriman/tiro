@@ -20,7 +20,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   `pywebviewready` event) over Tauri `invoke`/`listen`, with stub commands in
   Rust so the panel renders with dummy state. Verify: panel window shows the
   real UI, settings page slides, no console errors.
-- [ ] **0.3 Two windows.** Configure `panel` (400×560) and `pill` (300×72):
+- [x] **0.3 Two windows.** Configure `panel` (400×560) and `pill` (300×72):
   frameless, transparent, fixed-size, skip-taskbar, hidden at start; pill
   always-on-top. Verify: both windows can be shown/hidden from Rust, look
   right, no taskbar buttons.

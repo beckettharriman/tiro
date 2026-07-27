@@ -169,6 +169,47 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState(Mutex::new(default_state())))
+        .setup(|app| {
+            // On Linux the WebKitGTK widget reports a ~200 px minimum height,
+            // so GTK refuses to make the pill window its configured 72 px.
+            // Clear the size request on every descendant widget and re-apply
+            // the intended size at the GTK level.
+            #[cfg(target_os = "linux")]
+            {
+                use gtk::prelude::*;
+                use tauri::Manager;
+                fn clear_size_request(widget: &gtk::Widget) {
+                    widget.set_size_request(-1, -1);
+                    if let Some(container) = widget.dynamic_cast_ref::<gtk::Container>() {
+                        for child in container.children() {
+                            clear_size_request(&child);
+                        }
+                    }
+                }
+                if let Some(pill) = app.webview_windows().get("pill") {
+                    if let Ok(gtk_win) = pill.gtk_window() {
+                        clear_size_request(gtk_win.upcast_ref::<gtk::Widget>());
+                        gtk_win.resize(300, 72);
+                    }
+                }
+            }
+            // Both windows are configured hidden (the panel is summoned by
+            // hotkey/tray, the pill only during takes). Until those exist,
+            // dev builds show the windows at startup so there is something
+            // to work against.
+            #[cfg(debug_assertions)]
+            {
+                use tauri::Manager;
+                for label in ["panel", "pill"] {
+                    if let Some(w) = app.webview_windows().get(label) {
+                        let _ = w.show();
+                    }
+                }
+            }
+            #[cfg(all(not(debug_assertions), not(target_os = "linux")))]
+            let _ = app;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_state,
             copy_text,

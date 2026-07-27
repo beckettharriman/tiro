@@ -10,9 +10,39 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "tiro",
-        "width": 800,
-        "height": 600
+        "label": "panel",
+        "title": "Tiro",
+        "url": "index.html",
+        "width": 400,
+        "height": 560,
+        "minWidth": 400,
+        "minHeight": 560,
+        "maxWidth": 400,
+        "maxHeight": 560,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visible": false
+      },
+      {
+        "label": "pill",
+        "title": "Tiro Pill",
+        "url": "pill.html",
+        "width": 300,
+        "height": 72,
+        "minWidth": 300,
+        "minHeight": 72,
+        "maxWidth": 300,
+        "maxHeight": 72,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "alwaysOnTop": true
       }
     ],
     "security": {
