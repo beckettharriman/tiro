@@ -101,9 +101,60 @@ fn theme_watcher(app: tauri::AppHandle) {
     });
 }
 
+/// Tray icon: a control/recovery surface for the otherwise-invisible app.
+/// Left-click toggles the panel; the right-click menu covers Open,
+/// Start/Stop dictation, Restart, and Quit. Menu/click actions go through
+/// the hotkey dispatcher so a slow action never blocks the main thread
+/// (the original's `_tray_dispatch`). A tray failure is logged, never
+/// fatal — the panel hotkey still works without it.
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let open = MenuItem::with_id(app, "open", "Open Tiro", true, None::<&str>)?;
+    let dictate = MenuItem::with_id(app, "dictate", "Start/Stop dictation", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "Restart Tiro", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Tiro", true, None::<&str>)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&open, &dictate, &restart, &quit])
+        .build()?;
+    let mut tray = TrayIconBuilder::with_id("tiro")
+        .tooltip("Tiro")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => hotkeys::dispatch(app, "panel"),
+            "dictate" => hotkeys::dispatch(app, "dictate"),
+            "restart" => app.restart(),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                hotkeys::dispatch(tray.app_handle(), "panel");
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // LIFECYCLE-1: a second launch summons the running instance's
+            // panel instead of starting another app.
+            eprintln!("second instance launch -> summoning panel");
+            hotkeys::summon_panel(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -171,6 +222,9 @@ pub fn run() {
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
             theme_watcher(app.handle().clone());
+            if let Err(e) = build_tray(app) {
+                eprintln!("tray unavailable: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

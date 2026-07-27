@@ -72,7 +72,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 
 ## Phase 3 — platform integration
 
-- [ ] **3.1 Single instance + tray.** tauri-plugin-single-instance (second
+- [x] **3.1 Single instance + tray.** tauri-plugin-single-instance (second
   launch summons panel); tray icon: left-click toggles panel, right-click menu
   (Open, Start/Stop dictation, Restart, Quit).
 - [ ] **3.2 Autostart.** tauri-plugin-autostart wired to the `launchAtLogin`

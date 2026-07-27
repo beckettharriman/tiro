@@ -119,8 +119,9 @@ fn inflight() -> &'static Mutex<HashSet<&'static str>> {
 }
 
 /// `_dispatch_hotkey`: run the action OFF the listener thread; drop a repeat
-/// press of the same action while the prior one is still running.
-fn dispatch(app: &AppHandle, which: &'static str) {
+/// press of the same action while the prior one is still running. The tray
+/// reuses this (the original's `_tray_dispatch` had the same shape).
+pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
     {
         let mut set = inflight().lock().unwrap_or_else(|e| e.into_inner());
         if !set.insert(which) {
@@ -182,6 +183,19 @@ pub fn toggle_panel(app: &AppHandle) {
             crate::placement::reposition_burst(app, "panel");
         }
         crate::placement::summon_front(app);
+    }
+}
+
+/// Summon (never hide): a second app launch must always end with the panel
+/// visible and in front.
+pub fn summon_panel(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    if w.is_visible().unwrap_or(false) {
+        crate::placement::summon_front(app);
+    } else {
+        toggle_panel(app);
     }
 }
 
