@@ -59,12 +59,13 @@ Data-loss guarantees to preserve:
 - `none`: verbatim
 
 ### Sound cues (synthesized sine waves, 44.1 kHz, non-blocking, 6 ms attack + cosine release; volume × `sound_volume` clamped 0.0–1.5)
-- `start`: C5 523.25 Hz 55 ms (0.016) + G5 783.99 Hz 75 ms (0.018) — rising
-- `stop`: G5 55 ms (0.015) + D5 587.33 Hz 85 ms (0.015) — settling
-- `done`: E5+B5 chord 659.25+987.77 Hz 180 ms (0.17) — soft bell
-- `cancel`: A4 440 Hz 70 ms (0.11) + E4 329.63 Hz 110 ms (0.09) — low fall
-- `copy`: C6 1046.50 Hz 45 ms (0.13) — tiny tick
-- `error`: A4 70 ms (0.15) + E4 120 ms (0.15) — calm attention
+- `start`: C5 523.25 Hz 55 ms (0.16) + G5 783.99 Hz 75 ms (0.18) — rising
+- `stop`: G5 55 ms (0.15) + D5 587.33 Hz 85 ms (0.15) — settling
+- `done`: E5+B5 chord 659.25+987.77 Hz 180 ms (0.17) — soft bell, no gap
+- `cancel`: G4 392.00 Hz 70 ms (0.11) + Eb4 311.13 Hz 110 ms (0.09) — low fall
+- `copy`: C6 1046.50 Hz 45 ms (0.13) — tiny tick, no gap
+- `error`: A4 440.00 Hz 70 ms (0.15) + E4 329.63 Hz 120 ms (0.15) — calm attention
+- multi-note cues insert a 12 ms silence gap after each note
 
 ### Single instance
 - Original: bind localhost:53117 + `tiro.pid` with stale-owner reclaim (probe, verify pid is a live pythonw running main.py, terminate, retry bind 15×200 ms).

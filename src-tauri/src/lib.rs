@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod config;
+pub mod cues;
 
 use std::sync::{Mutex, MutexGuard};
 

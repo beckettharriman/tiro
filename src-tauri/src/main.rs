@@ -7,5 +7,9 @@ fn main() {
         tiro_lib::audio::record_test();
         return;
     }
+    if std::env::args().any(|a| a == "--cue-test") {
+        tiro_lib::cues::cue_test();
+        return;
+    }
     tiro_lib::run()
 }

@@ -34,7 +34,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   `mic_name` substring match, native-rate capture with 48k/44.1k/16k fallback,
   f32 mono frames into a buffer, resample to 16 kHz, <0.3 s rejection.
   Verify with a temporary test command that records 2 s and logs sample count.
-- [ ] **1.3 Sound cues.** Synthesize the six cues exactly per PORTING_NOTES §1
+- [x] **1.3 Sound cues.** Synthesize the six cues exactly per PORTING_NOTES §1
   (freqs/durations/volumes, 6 ms attack, cosine release, 44.1 kHz), play
   non-blocking via cpal/rodio, `sound_volume` clamp 0.0–1.5, `beeps` toggle.
 - [ ] **1.4 Clipboard + cleanup.** arboard copy; port the `light`/`fillers`
