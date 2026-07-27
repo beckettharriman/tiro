@@ -7,6 +7,7 @@ pub mod audio;
 pub mod clipboard;
 pub mod config;
 pub mod cues;
+pub mod flow;
 pub mod store;
 pub mod transcribe;
 
@@ -99,11 +100,12 @@ fn get_state(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-fn copy_text(text: String) {
-    // Best-effort like the original bridge method; the copy cue joins in 2.2.
+fn copy_text(text: String, ctx: State<'_, flow::AppCtx>) {
+    // Best-effort like the original bridge method, then the copy tick.
     if let Err(err) = clipboard::copy(&text) {
         eprintln!("clipboard copy failed: {err}");
     }
+    cues::play_cue(&ctx.cfg.lock().unwrap_or_else(|e| e.into_inner()), "copy");
 }
 
 #[tauri::command]
@@ -133,12 +135,14 @@ fn list_mics(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-fn toggle_record() {
-    // Recording state machine lands in task 2.1.
+fn toggle_record(app: tauri::AppHandle) {
+    flow::toggle_record(&app);
 }
 
 #[tauri::command]
-fn cancel_record() {}
+fn cancel_record(app: tauri::AppHandle) {
+    flow::cancel_record(&app);
+}
 
 #[tauri::command]
 fn set_pin(on: bool, window: WebviewWindow) -> Result<(), String> {
@@ -178,6 +182,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(AppState(Mutex::new(default_state())))
+        .manage(flow::AppCtx::new())
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
             // so GTK refuses to make the pill window its configured 72 px.
@@ -202,21 +207,18 @@ pub fn run() {
                     }
                 }
             }
-            // Both windows are configured hidden (the panel is summoned by
-            // hotkey/tray, the pill only during takes). Until those exist,
-            // dev builds show the windows at startup so there is something
-            // to work against.
+            // The panel is configured hidden (summoned by hotkey/tray, which
+            // land in phase 2/3); dev builds show it at startup so there is
+            // something to work against. The pill is driven by the recording
+            // state machine.
             #[cfg(debug_assertions)]
             {
                 use tauri::Manager;
-                for label in ["panel", "pill"] {
-                    if let Some(w) = app.webview_windows().get(label) {
-                        let _ = w.show();
-                    }
+                if let Some(w) = app.webview_windows().get("panel") {
+                    let _ = w.show();
                 }
             }
-            #[cfg(all(not(debug_assertions), not(target_os = "linux")))]
-            let _ = app;
+            flow::boot_engine(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

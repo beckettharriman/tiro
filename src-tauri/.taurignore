@@ -1,0 +1,7 @@
+# Runtime artifacts the app writes into its working directory during
+# `tauri dev` — must not retrigger the dev watcher.
+config.ini
+config.ini.*
+models/
+logs/
+vocab.txt

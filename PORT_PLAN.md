@@ -53,7 +53,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 
 ## Phase 2 — wire the app together
 
-- [ ] **2.1 Recording state machine.** toggle/cancel semantics, session ids,
+- [x] **2.1 Recording state machine.** toggle/cancel semantics, session ids,
   stale-finish protection, the full flow from PORTING_NOTES §1 including pill
   states, beeps, engine chip updates, verbatim-vs-clean split.
 - [ ] **2.2 Bridge, for real.** Implement every JS→backend method and

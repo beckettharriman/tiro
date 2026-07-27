@@ -1,9 +1,10 @@
 /* bridge.js — pywebview-shaped shim over Tauri.
    The original app ran under pywebview: app.js/pill.html call
    `window.pywebview.api.*` and the backend pushes via evaluate_js into global
-   functions (tiroApplyState, pillSet, ...). This shim recreates that exact
-   surface on top of Tauri's `invoke` + event system so the original UI files
-   stay verbatim. Loaded before app.js in index.html (and in pill.html). */
+   functions (tiroApplyState, pillSet, ...). This shim recreates the api
+   surface on top of Tauri's `invoke`; pushes come in via WebviewWindow::eval
+   from Rust, mirroring evaluate_js. Loaded before app.js in index.html (and
+   in pill.html). */
 (function () {
   "use strict";
 
@@ -14,7 +15,6 @@
     return;
   }
   var invoke = TAURI.core.invoke;
-  var listen = TAURI.event.listen;
 
   /* ── JS -> backend: every pywebview api method, same names & signatures ── */
   window.pywebview = {
@@ -33,24 +33,9 @@
     }
   };
 
-  /* ── backend -> JS: Tauri events forwarded to the original global functions.
-     The globals are resolved at event time (app.js / pill.html define them
-     after this script runs). ── */
-  var PUSHES = {
-    "tiro://state":     function (p) { if (window.tiroApplyState) window.tiroApplyState(p); },
-    "tiro://entry":     function (p) { if (window.tiroAddEntry) window.tiroAddEntry(p); },
-    "tiro://engine":    function (p) { if (window.tiroSetEngine) window.tiroSetEngine(p); },
-    "tiro://theme":     function (p) { if (window.tiroSetTheme) window.tiroSetTheme(p); },
-    "tiro://recording": function (p) { if (window.tiroSetRecording) window.tiroSetRecording(p); },
-    "tiro://storage":   function (p) { if (window.tiroSetStorage) window.tiroSetStorage(p); },
-    // pill payload: { state: "recording"|..., payload?: string }
-    "tiro://pill":      function (p) {
-      if (window.pillSet) window.pillSet(p && p.state, p && p.payload);
-    }
-  };
-  Object.keys(PUSHES).forEach(function (name) {
-    listen(name, function (event) { PUSHES[name](event.payload); });
-  });
+  /* Backend -> JS pushes arrive exactly like pywebview's evaluate_js: the
+     Rust side calls window.tiroApplyState(...)/window.pillSet(...)/etc.
+     directly via WebviewWindow::eval, so no event plumbing is needed here. */
 
   /* pywebview fires this once the bridge is live; app.js boots on it. */
   window.dispatchEvent(new Event("pywebviewready"));
