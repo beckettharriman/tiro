@@ -1,112 +1,478 @@
-.logo.vanilla:hover {
-  filter: drop-shadow(0 0 2em #ffe21c);
-}
+/* ───────────────────────────────────────────────────────────────────────
+   TIRO — design tokens + surfaces  (OFFLINE vanilla build)
+   iOS-26-inspired: flat, calm, large soft radii, one restrained accent.
+   ─────────────────────────────────────────────────────────────────────── */
+
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+  --accent-base: #8E8E93;           /* baked gray accent */
+  --accent-on: #ffffff;
+  --r-window: 14px;                 /* baked panel corner */
+  --entry-gap: 22px;                /* density */
+  --panel-alpha: 0.66;              /* panel opacity — driven live by the Transparency slider */
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+  --r-card: 14px;
+  --r-pill: 980px;
+  --r-btn: 9px;
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+          system-ui, "Segoe UI", sans-serif;
+
+  /* spacing scale */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px;
+
+  --ease: cubic-bezier(.32, .72, 0, 1);     /* iOS-ish settle */
+  --ease-soft: cubic-bezier(.4, 0, .2, 1);
+}
+
+/* ── DARK (default) ──────────────────────────────────────────────────── */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --accent: var(--accent-base);
+  --pill-bg: rgba(28, 28, 30, .82);
+  --pill-text: #ffffff;
+  --pill-border: rgba(255, 255, 255, .10);
+  --pill-wave: rgba(255, 255, 255, .85);
+  --pill-spin-track: rgba(255, 255, 255, .20);
+  --pill-spin-head: rgba(255, 255, 255, .92);
+  --pill-shadow: 0 1px 0 rgba(255,255,255,.06) inset,
+                 0 18px 40px -12px rgba(0,0,0,.6),
+                 0 6px 16px -8px rgba(0,0,0,.5);
+  --ok: #30d158;
+  --warn: #e6a23c;          /* muted amber — calm error accent, not loud */
+  --backdrop-a: #18181b;
+  --backdrop-b: #050506;
+  --panel-bg: rgba(30, 30, 33, var(--panel-alpha));
+  --panel-border: rgba(255, 255, 255, .09);
+  --panel-hi: rgba(255, 255, 255, .07);     /* inner top highlight */
+  --panel-shadow: 0 40px 90px -30px rgba(0,0,0,.8), 0 12px 30px -12px rgba(0,0,0,.6);
+
+  --fill-1: rgba(255, 255, 255, .055);       /* mic pill, hover */
+  --fill-2: rgba(255, 255, 255, .10);        /* active / pressed */
+  --separator: rgba(255, 255, 255, .075);
+
+  --txt-1: rgba(255, 255, 255, .96);
+  --txt-2: rgba(235, 235, 245, .58);
+  --txt-3: rgba(235, 235, 245, .34);
+  --txt-4: rgba(235, 235, 245, .22);
+  --seg-thumb: rgba(255, 255, 255, .14);     /* segmented selection */
+  --group-bg: rgba(255, 255, 255, .045);     /* settings group card */
+}
+
+/* ── LIGHT ───────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  color-scheme: light;
+  --accent: color-mix(in srgb, var(--accent-base) 72%, #000);
+  --pill-bg: rgba(252, 252, 254, .86);
+  --pill-text: #1c1c1e;
+  --pill-border: rgba(0, 0, 0, .06);
+  --pill-wave: rgba(0, 0, 0, .52);
+  --pill-spin-track: rgba(0, 0, 0, .14);
+  --pill-spin-head: rgba(0, 0, 0, .60);
+  --pill-shadow: 0 1px 0 rgba(255,255,255,.7) inset,
+                 0 18px 40px -14px rgba(30,30,40,.26),
+                 0 6px 16px -10px rgba(30,30,40,.18);
+  --ok: #248a3d;
+  --warn: #b9772a;          /* muted amber — calm error accent, not loud */
+  --backdrop-a: #f4f4f6;
+  --backdrop-b: #e3e3e7;
+  --panel-bg: rgba(252, 252, 254, var(--panel-alpha));
+  --panel-border: rgba(0, 0, 0, .06);
+  --panel-hi: rgba(255, 255, 255, .9);
+  --panel-shadow: 0 40px 80px -32px rgba(30,30,40,.30), 0 10px 24px -14px rgba(30,30,40,.18);
+
+  --fill-1: rgba(0, 0, 0, .035);
+  --fill-2: rgba(0, 0, 0, .07);
+  --separator: rgba(0, 0, 0, .07);
+
+  --txt-1: rgba(0, 0, 0, .90);
+  --txt-2: rgba(60, 60, 67, .70);
+  --txt-3: rgba(60, 60, 67, .50);
+  --txt-4: rgba(60, 60, 67, .40);
+  --seg-thumb: #ffffff;
+  --group-bg: rgba(255, 255, 255, .7);
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  font-family: var(--font);
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  color: var(--txt-1);
+  background: transparent;              /* frameless transparent OS window */
 }
 
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+/* ════════════════════════════════════════════════════════════════════════
+   SURFACE 1 — THE PANEL
+   ════════════════════════════════════════════════════════════════════════ */
+.panel {
+  position: relative;
+  width: 100%; height: 100%;            /* fill the frameless window */
+  display: flex; flex-direction: column;
+  background: var(--panel-bg);
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  backdrop-filter: blur(34px) saturate(180%);
+  border: .5px solid var(--panel-border);
+  border-radius: var(--r-window);
+  box-shadow: none;                     /* HARD RULE: no drop shadow on .panel */
+  overflow: hidden;
+  transition: background .5s var(--ease-soft);
+}
+/* concentric inner highlight ring (KEEP) */
+.panel::after {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 .5px 0 var(--panel-hi);
+  pointer-events: none;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+/* ── header ──────────────────────────────────────────────────────────── */
+.hd {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 14px 12px 18px;
 }
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
+.hd-title {
+  font-size: 15px; font-weight: 600; letter-spacing: -.012em;
+  color: var(--txt-1);
 }
+.hd-actions { display: flex; align-items: center; gap: 2px; }
 
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
+/* ghost icon button */
+.ico {
+  appearance: none; border: 0; background: transparent;
+  width: 32px; height: 32px;
+  display: grid; place-items: center;
   border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
+  color: var(--txt-2);
   cursor: pointer;
+  transition: background .16s var(--ease-soft), color .16s, transform .12s var(--ease);
+}
+.ico svg { width: 19px; height: 19px; display: block; }
+.ico:hover { background: var(--fill-1); color: var(--txt-1); }
+.ico:active { background: var(--fill-2); transform: scale(.92); }
+.ico[data-on="1"] { color: var(--accent); }
+/* pinned pin button — clear "active toggle" affordance: accent tint + ring border */
+.ico.pin[data-on="1"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.ico.pin[data-on="1"]:hover {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.ico.rec[data-on="1"] {
+  color: #fff; background: var(--accent);
+}
+.ico.rec[data-on="1"]:hover { background: var(--accent); filter: brightness(1.06); }
+.ico.sm { width: 28px; height: 28px; border-radius: 8px; }
+.ico.sm svg { width: 17px; height: 17px; }
+
+/* ── mic selector ────────────────────────────────────────────────────── */
+.mic-wrap {
+  flex: 0 0 auto; padding: 0 12px 12px 14px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.mic {
+  appearance: none; border: 0; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 8px;
+  flex: 0 1 auto; min-width: 0;
+  padding: 7px 11px 7px 10px;
+  border-radius: var(--r-pill);
+  background: var(--fill-1);
+  color: var(--txt-2);
+  font-family: var(--font); font-size: 13px; font-weight: 500;
+  letter-spacing: -.005em;
+  transition: background .16s var(--ease-soft), color .16s;
+}
+.mic:hover { background: var(--fill-2); color: var(--txt-1); }
+.mic-led {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #34c759; flex: 0 0 auto;
+  box-shadow: 0 0 6px rgba(52,199,89,.7);
+}
+.mic-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mic svg { width: 13px; height: 13px; color: var(--txt-3); flex: 0 0 auto; }
+
+/* native select overlaid invisibly on the mic pill so it works in pywebview */
+.mic-wrap .mic-native {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; border: 0; margin: 0;
+  font-family: var(--font);
+}
+.mic-shell { position: relative; flex: 0 1 auto; min-width: 0; display: inline-flex; }
+.mic-shell .mic { width: 100%; }
+
+/* ── transcript list ─────────────────────────────────────────────────── */
+.list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 18px 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--txt-4) transparent;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 12px,
+                       #000 calc(100% - 14px), transparent 100%);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 12px,
+                       #000 calc(100% - 14px), transparent 100%);
+}
+.list::-webkit-scrollbar { width: 7px; }
+.list::-webkit-scrollbar-track { background: transparent; }
+.list::-webkit-scrollbar-thumb {
+  background: var(--txt-4); border-radius: 4px;
+  border: 2px solid transparent; background-clip: content-box;
 }
 
-button:hover {
-  border-color: #396cd8;
+.entry {
+  position: relative;
+  padding: var(--s3) 12px;
+  margin: 0 -12px;
+  border-radius: var(--r-card);
+  cursor: pointer;
+  transition: background .18s var(--ease-soft);
 }
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.list-inner { display: flex; flex-direction: column; gap: var(--entry-gap); padding: 6px 0 4px; }
+
+.entry:hover { background: var(--fill-1); }
+.entry:active { background: var(--fill-2); }
+.entry.copied { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+
+.entry-time {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 600;
+  letter-spacing: .015em;
+  color: var(--txt-3);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 6px;
+}
+.entry-dur { color: var(--txt-4); font-weight: 500; }
+.entry-text {
+  font-size: 16px; font-weight: 400;
+  line-height: 1.46; letter-spacing: -.011em;
+  color: var(--txt-1);
+  text-wrap: pretty;
 }
 
-input,
-button {
-  outline: none;
+/* ── long-transcript fold ────────────────────────────────────────────────
+   Long entries clamp to ~6 lines by default with a soft fade at the bottom;
+   a distinct "Show more" control (.entry-expand) toggles the full text.
+   app.js flags overflowing entries with .has-overflow so the control only
+   shows when it's actually useful. */
+.entry-text.clamped {
+  position: relative;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  /* fallback cap for engines that ignore line-clamp: 6 lines * 1.46em */
+  max-height: 8.76em;
+  overflow: hidden;
+}
+/* soft bottom fade hint — only while clamped AND actually overflowing */
+.entry.has-overflow .entry-text.clamped::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0; height: 1.6em;
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--panel-bg) 0%, transparent),
+    var(--panel-bg));
+  pointer-events: none;
+}
+.entry-text.clamped.expanded {
+  display: block;
+  -webkit-line-clamp: none;
+  max-height: none;
+  overflow: visible;
+}
+.entry-text.clamped.expanded::after { content: none; }
+
+/* "Show more" / "Show less" — calm, gray accent, hidden unless it's needed.
+   Shown when the text overflows (.has-overflow) OR when expanded (so it can
+   be collapsed again). stopPropagation in app.js keeps copy-on-click intact. */
+.entry-expand {
+  display: none;
+  appearance: none; border: 0; background: transparent;
+  margin: 6px 0 0; padding: 2px 0;
+  font-family: var(--font);
+  font-size: 12.5px; font-weight: 600; letter-spacing: -.005em;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: var(--r-btn);
+  transition: color .14s var(--ease-soft);
+}
+.entry.has-overflow .entry-expand,
+.entry-text.clamped.expanded ~ .entry-expand {
+  display: inline-block;
+}
+.entry-expand:hover { color: var(--txt-1); }
+.entry-expand:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
 }
 
-#greet-input {
-  margin-right: 5px;
+/* copied confirmation chip */
+.copied-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; letter-spacing: .01em;
+  color: var(--accent);
+  opacity: 0; transform: translateY(2px);
+  animation: chipIn .2s var(--ease) forwards;
+}
+.copied-chip svg { width: 12px; height: 12px; }
+@keyframes chipIn { to { opacity: 1; transform: none; } }
+
+/* freshly-recorded entry entrance */
+@keyframes entryIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+.entry.fresh { animation: entryIn .42s var(--ease) both; }
+
+/* ── footer ──────────────────────────────────────────────────────────── */
+.ft {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 16px 14px;
+  border-top: .5px solid var(--separator);
+  font-size: 11.5px; font-weight: 500; letter-spacing: -.003em;
+  color: var(--txt-3);
+}
+.ft-sep { color: var(--txt-4); }
+.ft-loc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* empty state */
+.empty {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px;
+  text-align: center; padding: 0 40px;
+}
+.empty-kbd {
+  display: inline-flex; gap: 4px; align-items: center;
+}
+.kbd {
+  font: 600 12px var(--font);
+  padding: 3px 7px; border-radius: 6px;
+  background: var(--fill-1); color: var(--txt-2);
+  border: .5px solid var(--separator);
+}
+.empty-msg { font-size: 13.5px; color: var(--txt-3); line-height: 1.4; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   SURFACE 2 — THE PILL  (theme-aware floating island, separate OS window)
+   ════════════════════════════════════════════════════════════════════════ */
+.pill-dock {
+  position: fixed; left: 50%; bottom: 38px;
+  transform: translateX(-50%);
+  z-index: 50;
+  pointer-events: none;
+}
+.pill {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; gap: 11px;
+  height: 44px; padding: 0 18px 0 16px;
+  border-radius: var(--r-pill);
+  background: var(--pill-bg);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  border: .5px solid var(--pill-border);
+  box-shadow: none;                     /* HARD RULE: no drop shadow on .pill */
+  color: var(--pill-text);
+  font-size: 14px; font-weight: 510; letter-spacing: -.005em;
+  transform-origin: bottom center;
+}
+.pill-label { white-space: nowrap; }
+
+/* enter / exit */
+@keyframes pillIn {
+  from { opacity: 0; transform: translateY(16px) scale(.86); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+@keyframes pillOut {
+  from { opacity: 1; transform: translateY(0)   scale(1); }
+  to   { opacity: 0; transform: translateY(12px) scale(.9); }
+}
+.pill.in  { animation: pillIn  .34s var(--ease) both; }
+.pill.out { animation: pillOut .26s var(--ease-soft) both; }
+
+/* recording: pulsing accent dot */
+.rec-dot {
+  position: relative;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent); flex: 0 0 auto;
+}
+.rec-dot::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.6s var(--ease-soft) infinite;
+}
+@keyframes pulse {
+  0%   { transform: scale(1);   opacity: .7; }
+  70%  { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
+/* live waveform */
+.wave { display: flex; align-items: center; gap: 2.5px; height: 20px; }
+.wave i {
+  width: 2.5px; border-radius: 980px;
+  background: var(--pill-wave);
+  height: 20%;
+  transition: height .09s linear;
+}
 
-  a:hover {
-    color: #24c8db;
-  }
+/* transcribing: rotating ring + shimmer label */
+.spinner {
+  width: 15px; height: 15px; flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid var(--pill-spin-track);
+  border-top-color: var(--pill-spin-head);
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.shimmer {
+  background: linear-gradient(100deg,
+     color-mix(in srgb, var(--pill-text) 45%, transparent) 30%,
+     var(--pill-text) 50%,
+     color-mix(in srgb, var(--pill-text) 45%, transparent) 70%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
+/* small "done" check flourish */
+.pill .done-check { width: 17px; height: 17px; color: var(--ok); }
+
+/* error state — calm + distinct from "done": muted amber accent, no shadow,
+   same surface tokens as the other pill states (gray, 14px family radii). */
+.pill.pill-error {
+  /* hairline amber-tinted ring so the island reads as "something's off"
+     without a loud fill; base pill bg/blur are untouched. */
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--pill-border));
+}
+/* restrained error glyph: small amber dot (matches rec-dot sizing, no pulse) */
+.pill .err-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--warn); flex: 0 0 auto;
+}
+/* inline triangle/alert glyph alternative — also amber, also calm */
+.pill .err-glyph { width: 16px; height: 16px; color: var(--warn); flex: 0 0 auto; }
+/* error message text — slightly dimmed so it stays soft, not shouty */
+.pill .pill-msg {
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--pill-text) 82%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the FUNCTIONAL status indicators alive even when the OS "reduce motion"
+     setting is on — a recording pulse / spinning loader / shimmer that froze
+     would read as broken. Only the decorative entrance flourishes are dropped.
+     (The live waveform is JS-driven and unaffected either way.) */
+  .pill.in, .pill.out, .entry.fresh { animation: none !important; }
+  /* Drop the heaviest sliding/sweeping transitions too — these are purely
+     positional (elements still jump to their final spot), so killing them is
+     safe and not a functional indicator. .page/.segm-thumb live in
+     settings.css; reduced-motion policy is centralized here intentionally. */
+  .page, .segm .segm-thumb { transition: none !important; }
 }

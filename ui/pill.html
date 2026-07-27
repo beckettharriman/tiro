@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tiro — Pill</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- The pill is its OWN frameless, transparent OS window. The dock just
+       centers the floating island; .pill carries the live state. -->
+  <div class="pill-dock" id="pillDock"></div>
+
+  <script src="bridge.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    /* ── Icons used by the pill (ported verbatim from components.jsx) ──── */
+    const SVG_CHECKCIRCLE =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+      ' stroke-linecap="round" stroke-linejoin="round" class="done-check">' +
+      '<circle cx="12" cy="12" r="9"></circle>' +
+      '<path d="M8 12.4l2.6 2.6L16 9.4"></path></svg>';
+
+    /* calm warning glyph for the "error" state — circled "!", uses gray accent
+       (styled via .err-mark in styles.css), deliberately NOT the green check. */
+    const SVG_WARN =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
+      ' stroke-linecap="round" stroke-linejoin="round" class="err-mark">' +
+      '<circle cx="12" cy="12" r="9"></circle>' +
+      '<path d="M12 7.5v5.2"></path>' +
+      '<circle cx="12" cy="16.4" r=".4" fill="currentColor" stroke="none"></circle></svg>';
+
+    const dock = document.getElementById("pillDock");
+    const BARS = 14;
+
+    let waveRAF = null;          // requestAnimationFrame handle for the waveform
+    let curState = "off";        // recording | transcribing | done | error | off
+
+    /* ── live waveform (ported from the Waveform RAF logic in components.jsx) */
+    function startWave(waveEl) {
+      stopWave();
+      const els = waveEl ? Array.from(waveEl.children) : [];
+      const phase = els.map((_, i) => i * 0.7);
+      let t = 0;
+      const tick = () => {
+        t += 0.16;
+        els.forEach((el, i) => {
+          const env = 0.5 + 0.5 * Math.sin(t * 0.6);
+          const v = Math.abs(Math.sin(t * 1.9 + phase[i])) *
+                    Math.abs(Math.cos(t * 1.1 + phase[i] * 0.6));
+          const h = 16 + (v * env + Math.random() * 0.12) * 84;
+          el.style.height = Math.min(100, h) + "%";
+        });
+        waveRAF = requestAnimationFrame(tick);
+      };
+      waveRAF = requestAnimationFrame(tick);
+    }
+    function stopWave() {
+      if (waveRAF) { cancelAnimationFrame(waveRAF); waveRAF = null; }
+    }
+
+    function el(tag, cls, html) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (html != null) n.innerHTML = html;
+      return n;
+    }
+
+    /* build the .pill contents for a given state, returns the .pill node.
+       payload is an optional string used by the "error" state for its message. */
+    function buildPill(state, payload) {
+      const pill = el("div", "pill in");
+      pill.setAttribute("role", "status");
+      pill.setAttribute("aria-live", "polite");
+
+      if (state === "recording") {
+        pill.appendChild(el("span", "rec-dot"));
+        pill.appendChild(el("span", "pill-label", "Recording"));
+        const wave = el("div", "wave");
+        for (let i = 0; i < BARS; i++) wave.appendChild(el("i"));
+        pill.appendChild(wave);
+        pill._wave = wave;
+      } else if (state === "transcribing") {
+        pill.appendChild(el("span", "spinner"));
+        pill.appendChild(el("span", "pill-label shimmer", "Transcribing…"));
+      } else if (state === "done") {
+        const wrap = document.createElement("span");
+        wrap.innerHTML = SVG_CHECKCIRCLE;
+        pill.appendChild(wrap.firstChild);
+        pill.appendChild(el("span", "pill-label", "Copied to clipboard"));
+      } else if (state === "error") {
+        // calm, distinct error pill: warning glyph + message text.
+        // Unknown/missing payload falls back to a generic line.
+        pill.classList.add("pill-error");
+        pill.setAttribute("aria-live", "assertive");
+        const wrap = document.createElement("span");
+        wrap.innerHTML = SVG_WARN;
+        pill.appendChild(wrap.firstChild);
+        const msg = (typeof payload === "string" && payload.trim())
+          ? payload.trim() : "Something went wrong";
+        // textContent (via el's html arg is innerHTML) would risk markup, so set
+        // the message as text explicitly to stay safe with arbitrary payloads.
+        const label = el("span", "pill-label pill-msg");
+        label.textContent = msg;
+        pill.appendChild(label);
+      }
+      return pill;
+    }
+
+    /* ── window.pillSet(state, payload) — the contract the Python backend calls ─ */
+    //  "recording"    : pulsing rec-dot + live waveform + "Recording"
+    //  "transcribing" : spinner + shimmer "Transcribing…"
+    //  "done"         : green check + "Copied to clipboard"
+    //  "error"        : warning glyph + payload text ("Something went wrong" default)
+    //  "off"          : play .pill.out exit animation, then leave blank
+    //  payload is optional; only the "error" state reads it. Single-arg callers
+    //  (e.g. pillSet("done")) keep working unchanged.
+    function pillSet(state, payload) {
+      stopWave();
+
+      if (state === "off") {
+        const existing = dock.querySelector(".pill");
+        if (!existing) { dock.innerHTML = ""; curState = "off"; return; }
+        existing.classList.remove("in");
+        existing.classList.add("out");
+        const done = () => { dock.innerHTML = ""; };
+        existing.addEventListener("animationend", done, { once: true });
+        // safety fallback if animationend doesn't fire
+        setTimeout(done, 320);
+        curState = "off";
+        return;
+      }
+
+      dock.innerHTML = "";
+      const pill = buildPill(state, payload);
+      dock.appendChild(pill);
+      if (state === "recording" && pill._wave) startWave(pill._wave);
+      curState = state;
+    }
+
+    window.pillSet = pillSet;
+
+    // start blank
+    pillSet("off");
+  })();
+  </script>
+</body>
+</html>

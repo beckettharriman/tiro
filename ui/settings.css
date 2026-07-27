@@ -1,0 +1,215 @@
+/* settings.css — slide-over Settings surface + iOS-style controls
+   Reuses the same tokens defined in styles.css. */
+
+/* ── slide-over: absolutely-stacked pages, each slides on its own ─────── */
+.slidebox {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.page {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 100%;
+  display: flex; flex-direction: column; min-height: 0;
+  transition: left .44s var(--ease);
+}
+.page[aria-hidden="true"] { pointer-events: none; }
+
+/* ── settings header ─────────────────────────────────────────────────── */
+.set-hd {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 4px;
+  padding: 15px 16px 11px 8px;
+}
+.back {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 1px;
+  padding: 6px 8px 6px 4px; border-radius: 9px;
+  color: var(--accent);
+  font: 500 15px var(--font); letter-spacing: -.01em;
+  transition: opacity .15s;
+}
+.back svg { width: 21px; height: 21px; }
+.back:hover { opacity: .65; }
+.set-title { font-size: 16px; font-weight: 640; letter-spacing: -.015em; color: var(--txt-1); }
+
+/* ── settings body ───────────────────────────────────────────────────── */
+.set-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 16px 22px;
+  display: flex; flex-direction: column; gap: 22px;
+  scrollbar-width: thin; scrollbar-color: var(--txt-4) transparent;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10px,
+                       #000 calc(100% - 12px), transparent 100%);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 10px,
+                       #000 calc(100% - 12px), transparent 100%);
+}
+.set-body::-webkit-scrollbar { width: 7px; }
+.set-body::-webkit-scrollbar-thumb {
+  background: var(--txt-4); border-radius: 4px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.set-body > :first-child { margin-top: 6px; }
+
+.grp-h {
+  font-size: 11px; font-weight: 600; letter-spacing: .055em;
+  text-transform: uppercase; color: var(--txt-3);
+  padding: 0 6px 7px;
+}
+.card {
+  background: var(--group-bg);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 .5px var(--separator);
+}
+.row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; min-height: 47px; padding: 9px 14px;
+  position: relative;
+}
+.row + .row::before {
+  content: ""; position: absolute; left: 14px; right: 0; top: 0;
+  height: .5px; background: var(--separator);
+}
+.row.col { flex-direction: column; align-items: stretch; gap: 11px; }
+.row-l { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.row-label { font-size: 14.5px; font-weight: 450; letter-spacing: -.01em; color: var(--txt-1); }
+.row-sub { font-size: 12px; line-height: 1.35; color: var(--txt-3); }
+.grp-helper { font-size: 12px; line-height: 1.4; color: var(--txt-3); padding: 8px 8px 0; }
+
+/* live "now" status row inside Engine */
+.now-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.now-row .now-ico {
+  width: 26px; height: 26px; border-radius: 7px; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: var(--accent); color: #fff;
+}
+.now-row .now-ico svg { width: 15px; height: 15px; }
+.now-row .now-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.now-row .now-lab { font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: color-mix(in srgb, var(--accent) 75%, var(--txt-2)); }
+.now-row .now-val { font-size: 14px; font-weight: 600; letter-spacing: -.01em; color: var(--txt-1); }
+.now-row .now-val b { color: var(--accent); font-weight: 700; }
+
+/* ── controls ────────────────────────────────────────────────────────── */
+/* switch */
+.sw {
+  appearance: none; border: 0; cursor: pointer; flex: 0 0 auto;
+  position: relative; width: 42px; height: 25px; padding: 0;
+  border-radius: 980px; background: var(--fill-2);
+  transition: background .22s var(--ease-soft);
+}
+.sw[data-on="1"] { background: var(--accent); }
+.sw i {
+  position: absolute; top: 2px; left: 2px; width: 21px; height: 21px;
+  border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 1px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.28);
+  transition: transform .22s var(--ease);
+}
+.sw[data-on="1"] i { transform: translateX(17px); }
+
+/* segmented */
+.segm {
+  position: relative; display: flex; width: 100%;
+  padding: 2px; border-radius: 9px; background: var(--fill-2);
+  user-select: none;
+}
+.segm .segm-thumb {
+  position: absolute; top: 2px; bottom: 2px; border-radius: 7px;
+  background: var(--seg-thumb);
+  box-shadow: 0 1px 3px rgba(0,0,0,.18), inset 0 .5px 0 rgba(255,255,255,.4);
+  transition: left .24s var(--ease), width .24s var(--ease);
+}
+.segm button {
+  position: relative; z-index: 1; flex: 1 1 0; min-width: 0;
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--txt-2); font: 500 13px var(--font); letter-spacing: -.01em;
+  padding: 7px 6px; border-radius: 7px; white-space: nowrap;
+  transition: color .18s, font-weight .18s;
+}
+.segm button[data-on="1"] { color: var(--txt-1); font-weight: 600; }
+
+/* slider */
+.sldr-wrap { display: flex; align-items: center; gap: 12px; width: 100%; }
+.sldr-wrap svg { width: 17px; height: 17px; color: var(--txt-3); flex: 0 0 auto; }
+.sldr {
+  -webkit-appearance: none; appearance: none; flex: 1 1 auto;
+  height: 6px; border-radius: 980px; outline: none; cursor: pointer;
+  background: var(--fill-2);
+}
+.sldr::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 22px; height: 22px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.18), 0 2px 7px rgba(0,0,0,.3);
+}
+.sldr::-moz-range-thumb {
+  width: 22px; height: 22px; border: 0; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.18), 0 2px 7px rgba(0,0,0,.3);
+}
+
+/* select (pull-down) */
+.sel-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
+.sel {
+  appearance: none; -webkit-appearance: none; border: 0; outline: none;
+  background: transparent; cursor: pointer;
+  color: var(--txt-2); font: 500 14.5px var(--font); letter-spacing: -.01em;
+  text-align: right; text-align-last: right;
+  padding: 4px 20px 4px 6px;
+}
+.sel:hover { color: var(--txt-1); }
+.sel option { color: #000; }
+.sel-chev {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 11px; height: 15px; color: var(--txt-3); pointer-events: none;
+}
+
+/* shortcut keys */
+.keys { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.keys.listening { animation: keyspulse 1.1s var(--ease-soft) infinite; }
+@keyframes keyspulse { 50% { opacity: .5; } }
+.kbd2 {
+  font: 600 12.5px var(--font);
+  min-width: 26px; text-align: center;
+  padding: 4px 8px; border-radius: 7px;
+  background: var(--fill-2); color: var(--txt-1);
+  box-shadow: inset 0 0 0 .5px var(--separator);
+}
+.keys-edit {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  font: 600 12.5px var(--font); color: var(--accent);
+  padding: 4px 6px; border-radius: 7px;
+}
+.keys-edit:hover { opacity: .65; }
+.keys-listen-lbl { font: 500 13px var(--font); color: var(--accent); padding: 4px 2px; }
+
+/* mini button (Change…) */
+.btn-mini {
+  appearance: none; border: 0; cursor: pointer; flex: 0 0 auto;
+  font: 600 13px var(--font); color: var(--accent);
+  padding: 6px 12px; border-radius: 9px; background: var(--fill-2);
+  transition: background .15s;
+}
+.btn-mini:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+.path-val {
+  font: 500 12px ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--txt-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* footer engine chip (also used on panel) */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px 4px 7px; border-radius: 980px;
+  background: var(--fill-1);
+  font-size: 11.5px; font-weight: 550; letter-spacing: -.003em;
+  color: var(--txt-2);
+  transition: background .2s;
+}
+.chip svg { width: 12px; height: 12px; color: var(--txt-3); flex: 0 0 auto; }
+.chip .dev { color: var(--accent); font-weight: 650; }
+.chip .pwr { color: var(--txt-3); font-weight: 500; }

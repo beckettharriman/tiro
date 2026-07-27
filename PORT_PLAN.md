@@ -14,7 +14,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   as `ui/` (frontend) + `src-tauri/`. No frontend framework, no bundler
   (Tauri's plain static-dir mode). Verify: `cargo tauri dev` opens a window on
   Windows.
-- [ ] **0.2 Import original UI.** Copy `ui/index.html`, `ui/pill.html`,
+- [x] **0.2 Import original UI.** Copy `ui/index.html`, `ui/pill.html`,
   `ui/app.js`, `ui/styles.css` from the original repo. Add `ui/bridge.js`
   implementing the pywebview-shaped API (`window.pywebview.api.*` +
   `pywebviewready` event) over Tauri `invoke`/`listen`, with stub commands in
