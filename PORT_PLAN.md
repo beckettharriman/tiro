@@ -9,7 +9,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 
 ## Phase 0 — scaffold
 
-- [ ] **0.1 Scaffold Tauri 2 app.** `npm create tauri-app@latest` (vanilla JS
+- [x] **0.1 Scaffold Tauri 2 app.** `npm create tauri-app@latest` (vanilla JS
   template, app name `tiro`, identifier `dev.tiro.app`) in this repo, laid out
   as `ui/` (frontend) + `src-tauri/`. No frontend framework, no bundler
   (Tauri's plain static-dir mode). Verify: `cargo tauri dev` opens a window on
