@@ -4,6 +4,7 @@
 //! Real config/audio/transcription backends replace these in later tasks.
 
 pub mod audio;
+pub mod clipboard;
 pub mod config;
 pub mod cues;
 
@@ -97,8 +98,10 @@ fn get_state(state: State<'_, AppState>) -> Value {
 
 #[tauri::command]
 fn copy_text(text: String) {
-    // Real clipboard lands in task 1.4 (arboard).
-    let _ = text;
+    // Best-effort like the original bridge method; the copy cue joins in 2.2.
+    if let Err(err) = clipboard::copy(&text) {
+        eprintln!("clipboard copy failed: {err}");
+    }
 }
 
 #[tauri::command]

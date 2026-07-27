@@ -37,7 +37,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **1.3 Sound cues.** Synthesize the six cues exactly per PORTING_NOTES §1
   (freqs/durations/volumes, 6 ms attack, cosine release, 44.1 kHz), play
   non-blocking via cpal/rodio, `sound_volume` clamp 0.0–1.5, `beeps` toggle.
-- [ ] **1.4 Clipboard + cleanup.** arboard copy; port the `light`/`fillers`
+- [x] **1.4 Clipboard + cleanup.** arboard copy; port the `light`/`fillers`
   cleanup rules exactly (unit tests: casing, trailing period, standalone i,
   space-before-punctuation, filler stripping, empty-result fallback).
 - [ ] **1.5 Transcription (CPU).** whisper-rs: model manager that maps
