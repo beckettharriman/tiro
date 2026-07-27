@@ -30,7 +30,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 - [x] **1.1 Config.** `config.ini` load/save with the exact keys/defaults from
   PORTING_NOTES §2, atomic write (temp + rename), missing-key backfill.
   Include `config.example.ini`. Unit tests for defaults + round-trip.
-- [ ] **1.2 Audio capture.** cpal input stream: device enumeration,
+- [x] **1.2 Audio capture.** cpal input stream: device enumeration,
   `mic_name` substring match, native-rate capture with 48k/44.1k/16k fallback,
   f32 mono frames into a buffer, resample to 16 kHz, <0.3 s rejection.
   Verify with a temporary test command that records 2 s and logs sample count.

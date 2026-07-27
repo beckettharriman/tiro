@@ -3,6 +3,7 @@
 //! dummy state so the panel renders and settings interactions round-trip.
 //! Real config/audio/transcription backends replace these in later tasks.
 
+pub mod audio;
 pub mod config;
 
 use std::sync::{Mutex, MutexGuard};
