@@ -1,0 +1,25 @@
+# -- local-only working files: never commit these ---------------------------
+CLAUDE.md
+.claude/
+*.local.md
+
+# -- build output ------------------------------------------------------------
+target/
+node_modules/
+dist/
+src-tauri/gen/
+
+# -- runtime artifacts -------------------------------------------------------
+*.log
+config.ini
+vocab.txt
+models/
+transcripts/
+*.pid
+
+# -- editor/os noise ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
