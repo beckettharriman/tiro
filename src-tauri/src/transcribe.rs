@@ -133,9 +133,19 @@ impl Transcriber {
     /// Load the GGUF at `model_path` on CPU. `vad_model` enables Silero VAD
     /// for every transcription (mirroring the original's vad_filter=True).
     pub fn load(model_path: &Path, vad_model: Option<PathBuf>) -> Result<Self, String> {
-        let mut params = WhisperContextParameters::default();
         // The main process must NEVER touch a GPU (PORTING_NOTES §6).
-        params.use_gpu(false);
+        Self::load_on(model_path, vad_model, false)
+    }
+
+    /// Load with an explicit GPU choice. `use_gpu` is only ever true inside
+    /// the `--gpu-worker` child process (PORTING_NOTES §6).
+    pub fn load_on(
+        model_path: &Path,
+        vad_model: Option<PathBuf>,
+        use_gpu: bool,
+    ) -> Result<Self, String> {
+        let mut params = WhisperContextParameters::default();
+        params.use_gpu(use_gpu);
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()
@@ -208,6 +218,37 @@ impl Transcriber {
 /// `tiro --transcribe-test <wav>`: temporary 1.5 verification — loads the
 /// battery model per config, downloads on first use, warms up, then
 /// transcribes the given WAV (any rate/channels; converted like a live take).
+/// Read a WAV as mono f32 at its native rate (int formats normalized,
+/// channels averaged).
+pub fn read_wav_mono(wav_path: &str) -> Result<(Vec<f32>, u32), String> {
+    let reader =
+        hound::WavReader::open(wav_path).map_err(|e| format!("cannot read {wav_path}: {e}"))?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(Result::ok)
+            .collect(),
+        hound::SampleFormat::Int => {
+            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .into_samples::<i32>()
+                .filter_map(Result::ok)
+                .map(|s| s as f32 / max)
+                .collect()
+        }
+    };
+    let mono: Vec<f32> = if spec.channels > 1 {
+        samples
+            .chunks_exact(spec.channels as usize)
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect()
+    } else {
+        samples
+    };
+    Ok((mono, spec.sample_rate))
+}
+
 pub fn transcribe_test(wav_path: &str) {
     let app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cfg = ConfigStore::load(app_dir.join("config.ini"), &app_dir);
@@ -234,41 +275,17 @@ pub fn transcribe_test(wav_path: &str) {
             None
         }
     };
-    let reader = match hound::WavReader::open(wav_path) {
-        Ok(r) => r,
+    let (mono, rate) = match read_wav_mono(wav_path) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("ERROR: cannot read {wav_path}: {e}");
+            eprintln!("ERROR: {e}");
             return;
         }
     };
-    let spec = reader.spec();
-    let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .into_samples::<f32>()
-            .filter_map(Result::ok)
-            .collect(),
-        hound::SampleFormat::Int => {
-            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .into_samples::<i32>()
-                .filter_map(Result::ok)
-                .map(|s| s as f32 / max)
-                .collect()
-        }
-    };
-    let mono: Vec<f32> = if spec.channels > 1 {
-        samples
-            .chunks_exact(spec.channels as usize)
-            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-            .collect()
-    } else {
-        samples
-    };
-    let audio = crate::audio::resample_to_16k(&mono, spec.sample_rate);
+    let audio = crate::audio::resample_to_16k(&mono, rate);
     eprintln!(
-        "wav: {} Hz x{} -> {} samples @ 16 kHz ({:.2} s)",
-        spec.sample_rate,
-        spec.channels,
+        "wav: {} Hz -> {} samples @ 16 kHz ({:.2} s)",
+        rate,
         audio.len(),
         audio.len() as f32 / SAMPLE_RATE as f32
     );

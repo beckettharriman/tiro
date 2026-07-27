@@ -8,6 +8,8 @@ pub mod clipboard;
 pub mod config;
 pub mod cues;
 pub mod flow;
+pub mod gpu;
+pub mod gpu_worker;
 pub mod hotkeys;
 pub mod placement;
 pub mod power;

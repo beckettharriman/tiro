@@ -81,7 +81,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   (via `windows` crate) and `/sys/class/power_supply` on Linux (or
   starship-battery if it's cleaner); 20 s watcher; battery default when
   unknown.
-- [ ] **3.4 GPU worker.** `tiro --gpu-worker` subcommand: whisper-rs with
+- [x] **3.4 GPU worker.** `tiro --gpu-worker` subcommand: whisper-rs with
   Vulkan feature, framed stdin/stdout protocol, readiness line, timeouts,
   EOF-exit orphan safety (PORTING_NOTES §6 — read POWER_AND_DGPU.md in the
   original first; the main process must NEVER initialize a GPU context).

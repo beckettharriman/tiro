@@ -5,3 +5,4 @@ config.ini.*
 models/
 logs/
 vocab.txt
+gpu_worker.log
