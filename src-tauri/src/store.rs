@@ -203,7 +203,7 @@ pub fn entry_from_rec(rec: &Rec, cfg: &ConfigStore) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Datelike, TimeZone};
     use tempfile::TempDir;
 
     fn cfg_in(dir: &TempDir) -> ConfigStore {
@@ -215,6 +215,16 @@ mod tests {
 
     fn at(h: u32, m: u32, s: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 7, 27, h, m, s).unwrap()
+    }
+
+    /// A timestamp on the REAL current day — for tests that read back via
+    /// `read_today_entries`, which always resolves "today" at call time (a
+    /// fixed date here breaks the suite at midnight).
+    fn today_at(h: u32, m: u32, s: u32) -> DateTime<Local> {
+        let d = Local::now().date_naive();
+        Local
+            .with_ymd_and_hms(d.year(), d.month(), d.day(), h, m, s)
+            .unwrap()
     }
 
     #[test]
@@ -325,7 +335,7 @@ mod tests {
                 "m",
                 "cpu",
                 1.0,
-                at(10, 0, 0),
+                today_at(10, 0, 0),
             )
             .unwrap();
         }
@@ -339,12 +349,13 @@ mod tests {
     fn corrupt_jsonl_lines_are_skipped() {
         let dir = TempDir::new().unwrap();
         let cfg = cfg_in(&dir);
-        write_log_at(&cfg, "good", "", "", "m", "cpu", 1.0, at(10, 0, 0)).unwrap();
-        let path = dir.path().join("vault").join("2026-07-27.jsonl");
+        write_log_at(&cfg, "good", "", "", "m", "cpu", 1.0, today_at(10, 0, 0)).unwrap();
+        let day = Local::now().format("%Y-%m-%d").to_string();
+        let path = dir.path().join("vault").join(format!("{day}.jsonl"));
         let mut raw = fs::read_to_string(&path).unwrap();
         raw.push_str("not json at all\n");
         fs::write(&path, raw).unwrap();
-        write_log_at(&cfg, "after", "", "", "m", "cpu", 1.0, at(10, 1, 0)).unwrap();
+        write_log_at(&cfg, "after", "", "", "m", "cpu", 1.0, today_at(10, 1, 0)).unwrap();
         let entries = read_today_entries(&cfg, 200);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].text, "after");

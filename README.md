@@ -73,7 +73,7 @@ cp vocab.example.txt vocab.txt
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Alt+Space` | Toggle dictation — talk, then press again to transcribe to the clipboard. Hold it instead for push-to-talk: recording stops when you let go |
-| `Ctrl+Alt+V` | Paste at cursor — stop the current take (or replay the last one), copy it, and type Ctrl+V into the app you're in |
+| `Ctrl+Alt+V` | Paste-mode toggle — press to start a take, press again to stop and paste the text at your cursor (it is copied to the clipboard too). The finishing key decides: end a take with `Space` and it stays clipboard-only; end it with `V` and it also pastes |
 | `Ctrl+Alt+C` | Open / close the Tiro panel |
 | `Ctrl+Alt+X` | Cancel the current recording without transcribing |
 

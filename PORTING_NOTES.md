@@ -246,3 +246,11 @@ from the original in these ways:
   the pill's top 10 px — a latent bug there. The extra height is transparent
   headroom; the pill's on-screen position and size are unchanged (placement
   anchors the window's bottom edge).
+- **Panel position is remembered** (config key `panel_pos`): the panel reopens
+  wherever it was last left, across summons and restarts, centering only when
+  it has never been placed or its spot is off every current monitor. The
+  original centered until the first drag within a session only.
+- **Paste key semantics**: `Ctrl+Alt+V` is a paste-mode toggle (start a take /
+  stop-and-paste-at-cursor); the finishing key picks the destination. There is
+  no replay-last-take action. (Not in the original at all — post-parity
+  feature.)

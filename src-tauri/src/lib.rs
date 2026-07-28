@@ -61,7 +61,18 @@ fn set_pin(on: bool, app: tauri::AppHandle) {
 
 #[tauri::command]
 fn close_panel(window: WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|e| e.to_string())
+    // Capture the panel's spot while it is still mapped (mirrors the hotkey
+    // hide path) so closing via the X button also remembers the position.
+    use tauri::Manager;
+    let app = window.app_handle().clone();
+    window
+        .run_on_main_thread(move || {
+            placement::remember_panel_now(&app);
+            if let Some(w) = app.get_webview_window("panel") {
+                let _ = w.hide();
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -288,66 +299,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tray_icon_tests {
-    use super::stamp_status_dot;
-
-    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * w + x) * 4) as usize;
-        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
-    }
-
-    #[test]
-    fn dot_stamps_bottom_right_and_leaves_corners_alone() {
-        const W: u32 = 32;
-        const H: u32 = 32;
-        let mut buf = vec![0u8; (W * H * 4) as usize];
-        stamp_status_dot(&mut buf, W, H, [0xE5, 0x48, 0x4D]);
-        // radius = 32*0.175 = 5.6, margin 0.64 -> center ~ (25.76, 25.76)
-        assert_eq!(
-            px(&buf, W, 25, 25),
-            [0xE5, 0x48, 0x4D, 255],
-            "dot center is the fill color, opaque"
-        );
-        for (x, y) in [(0, 0), (W - 1, 0), (0, H - 1)] {
-            assert_eq!(
-                px(&buf, W, x, y),
-                [0, 0, 0, 0],
-                "corner ({x},{y}) untouched"
-            );
-        }
-        assert_eq!(
-            px(&buf, W, W - 1, H - 1),
-            [0, 0, 0, 0],
-            "the very bottom-right corner sits outside the circle"
-        );
-        // a rim pixel exists: darker than fill, still opaque
-        let rim = [
-            (0xE5 as f32 * 0.55) as u8,
-            (0x48 as f32 * 0.55) as u8,
-            (0x4D as f32 * 0.55) as u8,
-            255,
-        ];
-        let has_rim = (0..H).any(|y| (0..W).any(|x| px(&buf, W, x, y) == rim));
-        assert!(has_rim, "rim ring pixels present");
-        // dot covers roughly pi*r^2 pixels (r=5.6 -> ~98), sanity band
-        let colored = (0..H)
-            .flat_map(|y| (0..W).map(move |x| (x, y)))
-            .filter(|&(x, y)| px(&buf, W, x, y)[3] == 255)
-            .count();
-        assert!(
-            (70..=130).contains(&colored),
-            "dot area ~ pi*r^2, got {colored}"
-        );
-    }
-
-    #[test]
-    fn dot_survives_tiny_icons_without_panicking() {
-        let mut buf = vec![0u8; 4 * 4 * 4];
-        stamp_status_dot(&mut buf, 4, 4, [0xF5, 0xA5, 0x24]);
-        // just must not panic; something near bottom-right may be colored
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -469,4 +420,65 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tray_icon_tests {
+    use super::stamp_status_dot;
+
+    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    #[test]
+    fn dot_stamps_bottom_right_and_leaves_corners_alone() {
+        const W: u32 = 32;
+        const H: u32 = 32;
+        let mut buf = vec![0u8; (W * H * 4) as usize];
+        stamp_status_dot(&mut buf, W, H, [0xE5, 0x48, 0x4D]);
+        // radius = 32*0.175 = 5.6, margin 0.64 -> center ~ (25.76, 25.76)
+        assert_eq!(
+            px(&buf, W, 25, 25),
+            [0xE5, 0x48, 0x4D, 255],
+            "dot center is the fill color, opaque"
+        );
+        for (x, y) in [(0, 0), (W - 1, 0), (0, H - 1)] {
+            assert_eq!(
+                px(&buf, W, x, y),
+                [0, 0, 0, 0],
+                "corner ({x},{y}) untouched"
+            );
+        }
+        assert_eq!(
+            px(&buf, W, W - 1, H - 1),
+            [0, 0, 0, 0],
+            "the very bottom-right corner sits outside the circle"
+        );
+        // a rim pixel exists: darker than fill, still opaque
+        let rim = [
+            (0xE5 as f32 * 0.55) as u8,
+            (0x48 as f32 * 0.55) as u8,
+            (0x4D as f32 * 0.55) as u8,
+            255,
+        ];
+        let has_rim = (0..H).any(|y| (0..W).any(|x| px(&buf, W, x, y) == rim));
+        assert!(has_rim, "rim ring pixels present");
+        // dot covers roughly pi*r^2 pixels (r=5.6 -> ~98), sanity band
+        let colored = (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| px(&buf, W, x, y)[3] == 255)
+            .count();
+        assert!(
+            (70..=130).contains(&colored),
+            "dot area ~ pi*r^2, got {colored}"
+        );
+    }
+
+    #[test]
+    fn dot_survives_tiny_icons_without_panicking() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        stamp_status_dot(&mut buf, 4, 4, [0xF5, 0xA5, 0x24]);
+        // just must not panic; something near bottom-right may be colored
+    }
 }
