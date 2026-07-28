@@ -107,6 +107,14 @@ impl AppCtx {
         self.recording.load(Ordering::SeqCst)
     }
 
+    /// Whether a transcription is in flight (read-only view for the hotkey
+    /// layer: a paste press during transcription ARMS the in-flight take
+    /// instead of starting a recording, so such a press must not count as a
+    /// take-starting press for push-to-talk).
+    pub fn is_transcribing(&self) -> bool {
+        self.xscribing.load(Ordering::SeqCst)
+    }
+
     pub fn new() -> Self {
         let (tx, rx) = channel::<RecCmd>();
         std::thread::spawn(move || {
@@ -491,6 +499,11 @@ pub fn toggle_record(app: &AppHandle) {
 ///   always) AND pasted at the cursor. (The dictation key stopping the same
 ///   take makes it clipboard-only instead — see `toggle_record`.)
 /// - while transcribing: arm the in-flight take to paste on completion
+///
+/// Like the dictation key, holding it past the push-to-talk threshold
+/// records while held; the hotkey layer re-dispatches here on the release,
+/// which lands in the mid-recording arm above — stop, transcribe, copy,
+/// paste (see `hotkeys::hold_event`).
 pub fn paste_take(app: &AppHandle) {
     let ctx = app.state::<AppCtx>();
     if ctx.busy.load(Ordering::SeqCst) {

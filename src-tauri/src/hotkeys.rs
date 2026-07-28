@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -131,96 +131,196 @@ fn inflight() -> &'static Mutex<HashSet<&'static str>> {
     INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-// ---- push-to-talk on the dictate key ---------------------------------------
+// ---- push-to-talk on the recording keys ------------------------------------
 //
-// Tap (press+release under HOLD_MS) keeps the classic toggle: recording
-// starts on the press and continues until the next tap. Holding the key
-// longer than HOLD_MS turns the same press into push-to-talk: the release
-// stops the take and transcribes.
+// Both the dictate AND the paste key get the same tap/hold treatment, one
+// HoldCore per key, differing only in what `dispatch(which)` does:
+//
+// - dictate: tap keeps the classic toggle (press starts a clipboard take,
+//   the next tap stops it); holding past HOLD_MS makes the same press
+//   push-to-talk — the release stops the take and transcribes to the
+//   clipboard.
+// - paste: tap keeps its toggle too (an idle press starts a take; a press
+//   while recording is the FINISHING press and stops-copies-pastes right
+//   there); holding past HOLD_MS records while held and the release stops
+//   the take, transcribes, copies AND pastes at the cursor.
+//
+// A hold-release finishes the take by re-dispatching the key's own action,
+// so the FINISHING interaction decides the destination either way: a held
+// Space release is clipboard-only, a held V release pastes at the cursor —
+// no matter which key started the take.
 //
 // Platform delivery of ShortcutState (global-hotkey 0.8.0 sources):
 // - Windows registers with MOD_NOREPEAT (no repeat Pressed) and synthesizes
 //   Released by polling GetAsyncKeyState every 50 ms — both states arrive.
 // - X11 forwards real KeyPress/KeyRelease. Key AUTOREPEAT arrives as
-//   release+press pairs a few ms apart, so a Released only counts as the real
-//   release if no Pressed of the same shortcut follows within REPEAT_MS.
-// If a platform never delivered Released, the release logic simply never
-// runs and the key degrades to the plain toggle.
+//   release+press pairs a few ms apart, so a Released only counts as the
+//   real release if no Pressed of the same shortcut follows within
+//   REPEAT_MS, and a Pressed while the hold is live only counts as
+//   autorepeat if a Released preceded it within REPEAT_MS.
+// - A platform that never delivers Released degrades to the plain toggle:
+//   with no Released ever seen, every press looks like (and is treated as)
+//   a fresh press, and the release logic simply never runs.
 
 /// Hold this long (press -> release) to make the press push-to-talk.
 const HOLD_MS: u64 = 400;
 
-/// A Released followed by a Pressed within this window is X11 autorepeat.
+/// A Released and a Pressed of the same shortcut within this window are an
+/// X11 autorepeat pair, not a real release + re-press.
 const REPEAT_MS: u64 = 50;
 
+/// What a Pressed event should do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PressAction {
+    /// X11 autorepeat while the hold is live — do nothing.
+    Swallow,
+    /// Real press: run the key's action.
+    Dispatch,
+}
+
+/// What a debounced Released event should do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReleaseAction {
+    /// Tap, voided autorepeat, non-starting press, or the take already
+    /// ended — do nothing.
+    Inert,
+    /// Hold-release of the press that started the live take: run the key's
+    /// action again to finish it.
+    Finish,
+}
+
+/// Snapshot of a Released, resolved after the REPEAT_MS debounce.
+struct PendingRelease {
+    generation: u64,
+    held: bool,
+    starts_take: bool,
+}
+
+/// Tap-vs-hold decision core for one hotkey. Pure — timestamps and live
+/// recording state are passed in — so the decision table is unit-testable.
 #[derive(Default)]
-struct Ptt {
+struct HoldCore {
     /// When the live press started; None = key is (logically) up.
-    press_at: Option<std::time::Instant>,
+    press_at: Option<Instant>,
     /// Whether that press is the one that STARTED the recording — only such
-    /// a press may stop it on hold-release (a stop-tap held long, or a press
-    /// that failed to open the mic, must not re-toggle).
+    /// a press may stop the take on hold-release (a finishing press held
+    /// long, or a press that failed to open the mic, must not re-toggle).
     starts_take: bool,
     /// Bumped on every Pressed; lets a pending release check detect that an
-    /// autorepeat Pressed swallowed its Released.
+    /// autorepeat Pressed voided its paired Released.
     generation: u64,
+    /// When the last Released arrived; a Pressed hot on its heels is X11
+    /// autorepeat rather than a new press.
+    release_at: Option<Instant>,
 }
 
-fn ptt() -> &'static Mutex<Ptt> {
-    static PTT: OnceLock<Mutex<Ptt>> = OnceLock::new();
-    PTT.get_or_init(|| Mutex::new(Ptt::default()))
+impl HoldCore {
+    /// A Pressed arrived. `starts_take` is whether dispatching this key
+    /// right now would START a recording (sampled by the caller just before
+    /// the dispatch).
+    fn press(&mut self, now: Instant, starts_take: bool) -> PressAction {
+        self.generation += 1; // voids any pending release check
+        if self.press_at.is_some()
+            && self
+                .release_at
+                .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(REPEAT_MS))
+        {
+            // Autorepeat Pressed while the hold is live — swallow it (the
+            // bump above already voided its paired Released).
+            return PressAction::Swallow;
+        }
+        // Either the key was up, or a press is "live" with no recent
+        // Released — meaning the platform never delivered the previous
+        // release (degrade-to-toggle). Both are a fresh press.
+        self.press_at = Some(now);
+        self.starts_take = starts_take;
+        PressAction::Dispatch
+    }
+
+    /// A Released arrived: snapshot it for resolution after the debounce.
+    /// None = stray release (e.g. the shortcut registered mid-hold).
+    fn release(&mut self, now: Instant) -> Option<PendingRelease> {
+        let press_at = self.press_at?;
+        self.release_at = Some(now);
+        Some(PendingRelease {
+            generation: self.generation,
+            held: now.duration_since(press_at) >= Duration::from_millis(HOLD_MS),
+            starts_take: self.starts_take,
+        })
+    }
+
+    /// REPEAT_MS after the Released: commit it unless an autorepeat Pressed
+    /// superseded it, and decide whether it finishes the take. `recording`
+    /// is the live state — a take that already ended (mic-open failure,
+    /// another key finished it) must not be re-toggled by this release.
+    fn resolve(&mut self, pending: &PendingRelease, recording: bool) -> ReleaseAction {
+        if self.generation != pending.generation {
+            return ReleaseAction::Inert; // autorepeat — the hold is still live
+        }
+        self.press_at = None; // the real release
+        if pending.held && pending.starts_take && recording {
+            ReleaseAction::Finish
+        } else {
+            // A quick tap keeps recording — today's toggle; the next tap
+            // stops it.
+            ReleaseAction::Inert
+        }
+    }
 }
 
-/// Dictate-key state handler: toggle on tap, push-to-talk on hold.
-fn dictate_event(app: &AppHandle, state: ShortcutState) {
+fn hold_core(which: &str) -> &'static Mutex<HoldCore> {
+    static DICTATE: OnceLock<Mutex<HoldCore>> = OnceLock::new();
+    static PASTE: OnceLock<Mutex<HoldCore>> = OnceLock::new();
+    let cell = match which {
+        "paste" => &PASTE,
+        _ => &DICTATE,
+    };
+    cell.get_or_init(|| Mutex::new(HoldCore::default()))
+}
+
+/// Would dispatching `which` right now START a recording? Dictate also
+/// starts one during a transcription (overlap is legal; session ids keep
+/// takes apart), while paste ARMS the in-flight take instead of starting
+/// anything — so a paste press during transcription is not take-starting
+/// and its hold-release must stay inert.
+fn press_starts_take(ctx: &AppCtx, which: &str) -> bool {
+    match which {
+        "paste" => !ctx.is_recording() && !ctx.is_transcribing(),
+        _ => !ctx.is_recording(),
+    }
+}
+
+/// Shared state handler for the dictate and paste keys: toggle on tap,
+/// push-to-talk on hold.
+fn hold_event(app: &AppHandle, which: &'static str, state: ShortcutState) {
     match state {
         ShortcutState::Pressed => {
-            {
-                let mut s = ptt().lock().unwrap_or_else(|e| e.into_inner());
-                s.generation += 1; // cancels any pending release check
-                if s.press_at.is_some() {
-                    // Autorepeat Pressed while the hold is live — swallow it
-                    // (the bump above already voided its paired Released).
-                    return;
-                }
-                s.press_at = Some(std::time::Instant::now());
+            let action = {
                 let ctx = app.state::<AppCtx>();
-                s.starts_take = !ctx.is_recording();
+                let starts = press_starts_take(&ctx, which);
+                lock(hold_core(which)).press(Instant::now(), starts)
+            };
+            if action == PressAction::Dispatch {
+                eprintln!("hotkey fired: {which}");
+                dispatch(app, which);
             }
-            eprintln!("hotkey fired: dictate");
-            dispatch(app, "dictate");
         }
         ShortcutState::Released => {
-            let released_at = std::time::Instant::now();
-            let (generation, held, starts_take) = {
-                let s = ptt().lock().unwrap_or_else(|e| e.into_inner());
-                let Some(press_at) = s.press_at else {
-                    return; // stray release (e.g. registered mid-hold)
-                };
-                let held = released_at.duration_since(press_at)
-                    >= std::time::Duration::from_millis(HOLD_MS);
-                (s.generation, held, s.starts_take)
+            let Some(pending) = lock(hold_core(which)).release(Instant::now()) else {
+                return;
             };
             // Don't act yet: X11 autorepeat delivers release+press pairs a
             // few ms apart. Wait REPEAT_MS; a Pressed arriving meanwhile
             // bumps the generation and this release turns out to be fake.
             let app = app.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(REPEAT_MS));
-                {
-                    let mut s = ptt().lock().unwrap_or_else(|e| e.into_inner());
-                    if s.generation != generation {
-                        return; // autorepeat — the hold is still live
-                    }
-                    s.press_at = None; // the real release
+                std::thread::sleep(Duration::from_millis(REPEAT_MS));
+                let recording = app.state::<AppCtx>().is_recording();
+                let action = lock(hold_core(which)).resolve(&pending, recording);
+                if action == ReleaseAction::Finish {
+                    eprintln!("{which} released after hold: push-to-talk finish");
+                    dispatch(&app, which);
                 }
-                let ctx = app.state::<AppCtx>();
-                if held && starts_take && ctx.is_recording() {
-                    eprintln!("dictate released after hold: push-to-talk stop");
-                    dispatch(&app, "dictate");
-                }
-                // A quick tap keeps recording — today's toggle; the next tap
-                // stops it.
             });
         }
     }
@@ -479,9 +579,9 @@ pub fn register_all(app: &AppHandle) {
             continue;
         };
         let result = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
-            if which == "dictate" {
+            if which == "dictate" || which == "paste" {
                 // Tap = toggle, hold = push-to-talk; needs both states.
-                dictate_event(app, event.state);
+                hold_event(app, which, event.state);
             } else if event.state == ShortcutState::Pressed {
                 eprintln!("hotkey fired: {which}");
                 dispatch(app, which);
@@ -676,5 +776,136 @@ mod tests {
                 front: false
             }
         );
+    }
+
+    // ---- tap/hold state machine (shared by the dictate and paste keys) ----
+    //
+    // The same HoldCore drives both keys; only the dispatched action
+    // differs (dictate = clipboard toggle/stop, paste = stop-and-paste), so
+    // one set of decision-table tests covers both.
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn tap_dispatches_on_press_and_its_release_is_inert() {
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch); // starts the take
+        let p = c.release(t0 + ms(120)).expect("live press");
+        assert!(!p.held);
+        // recording is live (the tap started it) but a tap never PTT-stops:
+        // today's toggle — the NEXT tap stops it
+        assert_eq!(c.resolve(&p, true), ReleaseAction::Inert);
+        assert_eq!(c.press(t0 + ms(2000), false), PressAction::Dispatch);
+    }
+
+    #[test]
+    fn hold_release_finishes_the_take_it_started() {
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        let p = c.release(t0 + ms(HOLD_MS)).expect("live press");
+        assert!(p.held);
+        // dictate: clipboard stop; paste: stop-copy-paste — same decision
+        assert_eq!(c.resolve(&p, true), ReleaseAction::Finish);
+        // and the core is ready for the next take
+        assert_eq!(c.press(t0 + ms(HOLD_MS + 500), true), PressAction::Dispatch);
+    }
+
+    #[test]
+    fn finishing_press_held_long_has_an_inert_release() {
+        // Edge 1: V pressed while a take (started by Space or an earlier V
+        // tap) is live stops-and-pastes ON PRESS (starts_take = false);
+        // holding that press and releasing must not fire anything more.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, false), PressAction::Dispatch); // the finishing press
+        let p = c.release(t0 + ms(700)).expect("live press");
+        assert!(p.held);
+        // by release time the press's dispatch has stopped the take
+        assert_eq!(c.resolve(&p, false), ReleaseAction::Inert);
+        // ...and even if ANOTHER key started a new take meanwhile, a
+        // non-starting press's release still must not touch it
+        let mut c2 = HoldCore::default();
+        assert_eq!(c2.press(t0, false), PressAction::Dispatch);
+        let p2 = c2.release(t0 + ms(700)).expect("live press");
+        assert_eq!(c2.resolve(&p2, true), ReleaseAction::Inert);
+    }
+
+    #[test]
+    fn tap_then_later_hold_finishes_on_the_second_press() {
+        // Edge 2 as a sequence: tap V starts the take; a later hold of V is
+        // a finishing press (recording is live, so starts_take = false) —
+        // stop-and-paste fires on the press, the release stays inert.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch); // tap: starts take
+        let p = c.release(t0 + ms(100)).expect("live press");
+        assert_eq!(c.resolve(&p, true), ReleaseAction::Inert); // still recording
+        let t1 = t0 + ms(3000);
+        assert_eq!(c.press(t1, false), PressAction::Dispatch); // finishing press
+        let p = c.release(t1 + ms(900)).expect("live press");
+        assert!(p.held);
+        assert_eq!(c.resolve(&p, false), ReleaseAction::Inert);
+    }
+
+    #[test]
+    fn hold_through_mic_failure_release_is_inert() {
+        // Edge 3: the idle press claimed starts_take, but the mic never
+        // opened, so recording is false at release time — nothing to stop,
+        // and the release must not toggle a fresh recording on.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        let p = c.release(t0 + ms(600)).expect("live press");
+        assert!(p.held);
+        assert_eq!(c.resolve(&p, false), ReleaseAction::Inert);
+    }
+
+    #[test]
+    fn autorepeat_never_stops_the_take_early() {
+        // Edge 4: X11 autorepeat while held arrives as release+press pairs
+        // a few ms apart. Every repeat Released is voided by its paired
+        // Pressed's generation bump; every repeat Pressed is swallowed; the
+        // eventual real release still finishes the take.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        let mut t = t0 + ms(500); // autorepeat kicks in
+        let mut voided = Vec::new();
+        for _ in 0..5 {
+            let p = c.release(t).expect("hold is live");
+            assert_eq!(c.press(t + ms(3), false), PressAction::Swallow);
+            voided.push(p);
+            t += ms(35);
+        }
+        for p in &voided {
+            assert_eq!(c.resolve(p, true), ReleaseAction::Inert, "voided repeat");
+        }
+        // the real release (no paired Pressed follows) finishes the take
+        let p = c.release(t).expect("hold still live");
+        assert!(p.held);
+        assert_eq!(c.resolve(&p, true), ReleaseAction::Finish);
+    }
+
+    #[test]
+    fn missing_released_degrades_to_toggle() {
+        // A platform that never delivers Released: no Released ever
+        // precedes a press, so every press is a fresh press and the key
+        // behaves as the plain toggle.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch); // starts the take
+        assert_eq!(c.press(t0 + ms(5000), false), PressAction::Dispatch); // stops it
+        assert_eq!(c.press(t0 + ms(9000), true), PressAction::Dispatch); // starts again
+    }
+
+    #[test]
+    fn stray_release_is_ignored() {
+        // e.g. the shortcut registered while the key was already down
+        let mut c = HoldCore::default();
+        assert!(c.release(Instant::now()).is_none());
     }
 }
