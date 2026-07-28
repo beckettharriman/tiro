@@ -79,9 +79,6 @@ pub struct AppCtx {
     /// Bumping this stops the previous take's level-pusher thread, so a
     /// stale pusher can never drive a newer take's pill.
     level_gen: AtomicU64,
-    /// The last successful take's clipboard text, for "paste again" when the
-    /// paste hotkey fires idle (the user may have copied other things since).
-    last_clean: Mutex<Option<String>>,
     /// Session id whose completed take should also be pasted at the cursor
     /// (0 = none). Consumed by `finish` ONLY while that session is current —
     /// a superseded take must never paste.
@@ -157,7 +154,6 @@ impl AppCtx {
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
             level_gen: AtomicU64::new(0),
-            last_clean: Mutex::new(None),
             paste_session: AtomicU64::new(0),
             gpu_ok: AtomicBool::new(true),
             gpu_probe: Mutex::new(None),
@@ -487,11 +483,14 @@ pub fn toggle_record(app: &AppHandle) {
     ctx.busy.store(false, Ordering::SeqCst);
 }
 
-/// The paste hotkey ("put my words here"). Three behaviors:
+/// The paste hotkey ("put my words here"). The key that FINISHES a take
+/// decides its destination, regardless of which key started it:
+/// - idle: start a recording, identical to the dictation key (same pill,
+///   cues, level meter) — whether it pastes is decided at stop time
 /// - mid-recording: stop the take now; when it completes it is copied (as
-///   always) AND pasted at the cursor
+///   always) AND pasted at the cursor. (The dictation key stopping the same
+///   take makes it clipboard-only instead — see `toggle_record`.)
 /// - while transcribing: arm the in-flight take to paste on completion
-/// - idle: re-copy the LAST take's clipboard text and paste it
 pub fn paste_take(app: &AppHandle) {
     let ctx = app.state::<AppCtx>();
     if ctx.busy.load(Ordering::SeqCst) {
@@ -517,29 +516,9 @@ pub fn paste_take(app: &AppHandle) {
         eprintln!("paste armed for the in-flight take");
         return;
     }
-    // Idle: replay the last take.
-    let Some(text) = lock(&ctx.last_clean).clone() else {
-        play(&ctx, "error");
-        show_pill(app, &ctx, "error", Some("Nothing to paste"));
-        arm_pill_hide(app, &ctx, 2000);
-        eprintln!("paste: no last take");
-        return;
-    };
-    if let Err(e) = clipboard::copy(&text) {
-        eprintln!("paste: clipboard copy failed: {e}");
-        play(&ctx, "error");
-        show_pill(app, &ctx, "error", Some("Copy failed"));
-        arm_pill_hide(app, &ctx, 2000);
-        return;
-    }
-    play(&ctx, "done");
-    if inject_paste(app, &ctx) {
-        eprintln!("✓ Re-pasted last take");
-        show_pill(app, &ctx, "done", None);
-    } else {
-        show_pill(app, &ctx, "error", Some("On clipboard"));
-    }
-    arm_pill_hide(app, &ctx, 1100);
+    // Idle: start a take (paste intent). The stop key decides the
+    // destination, so this start is exactly a normal start.
+    start_recording(app, &ctx);
 }
 
 /// Deliver the synthetic Ctrl+V, persisting a refreshed portal restore token
@@ -739,8 +718,6 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             return Outcome::CopyFail;
         }
         clean = Some(text.clone());
-        // Remember the clipboard text for the paste hotkey's idle replay.
-        *lock(&ctx.last_clean) = Some(text.clone());
         let cfg = lock(&ctx.cfg);
         let model_for_log = if model_name.is_empty() {
             cfg.get("model")
