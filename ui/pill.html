@@ -38,6 +38,14 @@
     let waveRAF = null;          // requestAnimationFrame handle for the waveform
     let curState = "off";        // recording | transcribing | done | error | off
 
+    /* ── live mic level (fed by the backend via window.pillLevel) ─────────
+       levelSeen flips true on the first push of a take; until then the
+       waveform keeps its original self-driven animation, so an older
+       backend (no pillLevel evals) renders exactly as before. */
+    let levelSeen = false;
+    let levelTarget = 0;         // latest pushed level, 0..1
+    let levelSmooth = 0;         // eased value the bars render
+
     /* ── live waveform (ported from the Waveform RAF logic in components.jsx) */
     function startWave(waveEl) {
       stopWave();
@@ -46,11 +54,22 @@
       let t = 0;
       const tick = () => {
         t += 0.16;
+        let env, jitter;
+        if (levelSeen) {
+          /* live level drives the envelope: fast attack, slower release,
+             and a small floor so the bars look idle-but-alive at level 0 */
+          levelSmooth += (levelTarget - levelSmooth) *
+                         (levelTarget > levelSmooth ? 0.55 : 0.18);
+          env = 0.06 + 0.94 * levelSmooth;
+          jitter = 0.04;
+        } else {
+          env = 0.5 + 0.5 * Math.sin(t * 0.6);
+          jitter = 0.12;
+        }
         els.forEach((el, i) => {
-          const env = 0.5 + 0.5 * Math.sin(t * 0.6);
           const v = Math.abs(Math.sin(t * 1.9 + phase[i])) *
                     Math.abs(Math.cos(t * 1.1 + phase[i] * 0.6));
-          const h = 16 + (v * env + Math.random() * 0.12) * 84;
+          const h = 16 + (v * env + Math.random() * jitter) * 84;
           el.style.height = Math.min(100, h) + "%";
         });
         waveRAF = requestAnimationFrame(tick);
@@ -136,11 +155,26 @@
       dock.innerHTML = "";
       const pill = buildPill(state, payload);
       dock.appendChild(pill);
-      if (state === "recording" && pill._wave) startWave(pill._wave);
+      if (state === "recording" && pill._wave) {
+        // fresh take: forget the previous take's level until pushes arrive
+        levelSeen = false;
+        levelTarget = 0;
+        levelSmooth = 0;
+        startWave(pill._wave);
+      }
       curState = state;
     }
 
     window.pillSet = pillSet;
+
+    /* ── window.pillLevel(x) — live input level from the backend, 0..1 ────
+       Pushed ~15x/s while recording. Optional: if it never fires, the
+       waveform above keeps the original self-driven look. */
+    window.pillLevel = function (x) {
+      if (typeof x !== "number" || !isFinite(x)) return;
+      levelTarget = Math.max(0, Math.min(1, x));
+      levelSeen = true;
+    };
 
     // start blank
     pillSet("off");
