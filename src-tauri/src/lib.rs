@@ -11,6 +11,7 @@ pub mod flow;
 pub mod gpu;
 pub mod gpu_worker;
 pub mod hotkeys;
+pub mod inject;
 pub mod placement;
 pub mod power;
 pub mod store;
@@ -363,6 +364,9 @@ pub fn run() {
             } else if argv.iter().any(|a| a == "--cancel") {
                 eprintln!("second instance: --cancel");
                 hotkeys::dispatch(app, "cancel");
+            } else if argv.iter().any(|a| a == "--paste") {
+                eprintln!("second instance: --paste");
+                hotkeys::dispatch(app, "paste");
             } else if argv.iter().any(|a| a == "--panel") {
                 eprintln!("second instance: --panel");
                 hotkeys::dispatch(app, "panel");

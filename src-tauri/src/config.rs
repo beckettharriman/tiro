@@ -52,7 +52,8 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
     let fallback = app_dir.join("logs");
     vec![
         ("dictation_hotkey", "ctrl+alt+space".into()),
-        ("panel_hotkey", "ctrl+alt+v".into()),
+        ("paste_hotkey", "ctrl+alt+v".into()),
+        ("panel_hotkey", "ctrl+alt+c".into()),
         ("model", "base.en".into()),
         ("model_battery", "base.en".into()),
         ("model_ac", "small.en".into()),
@@ -71,6 +72,9 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("fallback_dir", fallback.to_string_lossy().into_owned()),
         ("save_transcripts", "true".into()),
         ("auto_restart", "true".into()),
+        // RemoteDesktop-portal restore token for paste injection on Wayland
+        // (set after the user approves the one-time permission dialog).
+        ("portal_restore_token", String::new()),
     ]
 }
 
@@ -90,6 +94,22 @@ impl ConfigStore {
         let ini = if path.exists() {
             match Ini::load_from_file_opt(&path, PARSE_OPTION) {
                 Ok(mut ini) => {
+                    // ONE-TIME migration to the split panel/paste scheme: a
+                    // file from before `paste_hotkey` existed with the panel
+                    // still on its old default (ctrl+alt+v) moves the panel to
+                    // ctrl+alt+c so paste can take V. A deliberately rebound
+                    // panel is left alone, and once `paste_hotkey` is present
+                    // (backfilled below) this can never fire again.
+                    if ini.get_from(Some(SECTION), "paste_hotkey").is_none()
+                        && ini.get_from(Some(SECTION), "panel_hotkey") == Some("ctrl+alt+v")
+                    {
+                        ini.set_to(
+                            Some(SECTION),
+                            "panel_hotkey".to_string(),
+                            "ctrl+alt+c".to_string(),
+                        );
+                        changed = true;
+                    }
                     for (key, value) in &defaults {
                         if ini.get_from(Some(SECTION), key).is_none() {
                             ini.set_to(Some(SECTION), (*key).to_string(), value.clone());
@@ -209,8 +229,10 @@ mod tests {
         let cfg = load_in(&dir);
         assert!(cfg.path().exists(), "config.ini should be created");
         assert_eq!(cfg.get("dictation_hotkey"), "ctrl+alt+space");
-        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+v");
+        assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+v");
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
         assert_eq!(cfg.get("cancel_hotkey"), "ctrl+alt+x");
+        assert_eq!(cfg.get("portal_restore_token"), "");
         assert_eq!(cfg.get("device"), "auto");
         assert_eq!(cfg.get("compute_type"), "int8");
         assert_eq!(cfg.get("model_battery"), "base.en");
@@ -329,6 +351,84 @@ mod tests {
             !dir.path().join("config.ini.tmp").exists(),
             "tmp cleaned up"
         );
+    }
+
+    #[test]
+    fn migration_moves_old_default_panel_to_c() {
+        // A pre-paste_hotkey file with the panel on its old default gets the
+        // new scheme: panel -> ctrl+alt+c, paste backfilled to ctrl+alt+v.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(&path, "[general]\npanel_hotkey = ctrl+alt+v\n").unwrap();
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
+        assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+v");
+        let raw = fs::read_to_string(cfg.path()).unwrap();
+        assert!(
+            raw.contains("panel_hotkey = ctrl+alt+c"),
+            "persisted: {raw}"
+        );
+        assert!(
+            raw.contains("paste_hotkey = ctrl+alt+v"),
+            "persisted: {raw}"
+        );
+    }
+
+    #[test]
+    fn migration_leaves_custom_panel_binding_alone() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(&path, "[general]\npanel_hotkey = ctrl+shift+p\n").unwrap();
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+shift+p", "custom kept");
+        assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+v", "paste backfilled");
+    }
+
+    #[test]
+    fn migration_fires_exactly_once() {
+        // After the first migration the file has paste_hotkey, so a user who
+        // then rebinds paste elsewhere and panel BACK to ctrl+alt+v keeps it.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(&path, "[general]\npanel_hotkey = ctrl+alt+v\n").unwrap();
+        let mut cfg = ConfigStore::load(path.clone(), dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
+        cfg.set("paste_hotkey", "ctrl+alt+b");
+        cfg.set("panel_hotkey", "ctrl+alt+v");
+        drop(cfg);
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+v", "stable on reload");
+        assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+b");
+    }
+
+    #[test]
+    fn migrated_file_reloads_stably() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(&path, "[general]\npanel_hotkey = ctrl+alt+v\n").unwrap();
+        drop(ConfigStore::load(path.clone(), dir.path()));
+        let before = fs::read_to_string(&path).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let cfg = ConfigStore::load(path.clone(), dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            mtime,
+            "second load after migration must not rewrite the file"
+        );
+    }
+
+    #[test]
+    fn fresh_file_and_backfill_use_new_defaults() {
+        // Backfill of a partial file (no panel_hotkey at all) is NOT the
+        // migration path: both keys land on the new defaults.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(&path, "[general]\ntheme = light\n").unwrap();
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
+        assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+v");
     }
 
     #[test]

@@ -72,11 +72,15 @@ cp vocab.example.txt vocab.txt
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Alt+Space` | Toggle dictation — talk, then press again to transcribe to the clipboard |
-| `Ctrl+Alt+V` | Open / close the Tiro panel |
+| `Ctrl+Alt+Space` | Toggle dictation — talk, then press again to transcribe to the clipboard. Hold it instead for push-to-talk: recording stops when you let go |
+| `Ctrl+Alt+V` | Paste at cursor — stop the current take (or replay the last one), copy it, and type Ctrl+V into the app you're in |
+| `Ctrl+Alt+C` | Open / close the Tiro panel |
 | `Ctrl+Alt+X` | Cancel the current recording without transcribing |
 
-All three are rebindable in **Settings → Shortcuts**.
+All four are rebindable in **Settings → Shortcuts**. Everything still lands
+on the clipboard exactly as before — paste-at-cursor is an extra delivery,
+not a replacement. If the keystroke can't be injected, the text simply stays
+on the clipboard and the pill says so.
 
 ### Wayland
 
@@ -86,6 +90,7 @@ running instance:
 
 ```
 tiro --toggle   # start/stop dictation
+tiro --paste    # paste the take at the cursor
 tiro --panel    # show/hide the panel
 tiro --cancel   # cancel the current recording
 ```
@@ -94,7 +99,12 @@ GNOME: Settings → Keyboard → Custom Shortcuts; KDE: System Settings →
 Shortcuts; sway/hyprland: `bindsym`/`bind`. Details in
 [BUILDING.md](BUILDING.md).
 
-## The panel (`Ctrl+Alt+V`)
+Paste-at-cursor on Wayland goes through the desktop's remote-desktop
+permission portal: the first paste pops a one-time "allow remote input"
+dialog (on KDE: allow and choose to remember). Tiro stores the permission
+token so the dialog doesn't come back.
+
+## The panel (`Ctrl+Alt+C`)
 
 A frameless, draggable panel summoned on top of whatever you're doing:
 

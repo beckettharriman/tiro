@@ -65,6 +65,7 @@ CLI**. A second `tiro` launch is forwarded to the running instance
 | Command         | Action                                |
 |-----------------|---------------------------------------|
 | `tiro --toggle` | start / stop dictation                |
+| `tiro --paste`  | paste the take at the cursor          |
 | `tiro --panel`  | show / hide the panel                 |
 | `tiro --cancel` | cancel the current recording          |
 | `tiro`          | summon the panel (bring to front)     |
