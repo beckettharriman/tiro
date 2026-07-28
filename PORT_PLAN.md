@@ -128,4 +128,9 @@ side and the hard platform corners.)
 
 ## Blockers
 
-(none yet)
+- **5.2 AppImage**: tauri-bundler hardcodes `/usr/bin/xdg-open` when
+  assembling the AppImage and the WSL box lacks `xdg-utils` (no
+  passwordless sudo in the work session). Everything else in 5.2 is done
+  (.deb, NSIS, MSI all built). To clear: `sudo apt-get install -y
+  xdg-utils`, then re-run `npx @tauri-apps/cli build` in `src-tauri`
+  and check 5.2 off.

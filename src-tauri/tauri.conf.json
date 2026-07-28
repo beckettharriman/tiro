@@ -51,7 +51,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage", "nsis", "msi"],
+    "shortDescription": "Always-on offline dictation to your clipboard",
+    "longDescription": "Tiro listens on a global hotkey, transcribes speech locally with Whisper, and puts the text on your clipboard. Fully offline.",
+    "category": "Utility",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
