@@ -198,6 +198,28 @@
 }
 .btn-mini:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 
+/* model manager rows (Models group) — reuses .row/.btn-mini language */
+.model-slot { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.model-state {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 12.5px var(--font); color: var(--txt-2);
+}
+.model-state.ok { color: var(--ok); }
+.model-state.ok svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.model-state.pct {
+  color: var(--accent);
+  min-width: 40px; justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+.model-err { color: var(--warn); }
+.row.models-toggle { justify-content: center; min-height: 42px; }
+.models-more {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  font: 600 12.5px var(--font); color: var(--accent);
+  padding: 4px 6px; border-radius: 7px;
+}
+.models-more:hover { opacity: .65; }
+
 .path-val {
   font: 500 12px ui-monospace, "SF Mono", Menlo, monospace;
   color: var(--txt-2);

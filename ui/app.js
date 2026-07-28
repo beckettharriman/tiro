@@ -141,7 +141,22 @@
       panel:   { ctrl: true, alt: true, shift: false, meta: false, code: "KeyV", keys: ["Ctrl", "Alt", "V"] },
       cancel:  { ctrl: true, alt: true, shift: false, meta: false, code: "KeyX", keys: ["Ctrl", "Alt", "X"] }
     },
-    theme: "dark", effectiveTheme: "dark"
+    theme: "dark", effectiveTheme: "dark",
+    // list_models() shape (mock preview only; the real list comes from Rust)
+    models: [
+      { name: "tiny",           hint: "Fastest — very low accuracy, all languages", curated: false, sizeBytes: 43537433,   installed: false, downloading: false },
+      { name: "tiny.en",        hint: "Fastest — very low accuracy",                curated: true,  sizeBytes: 43550795,   installed: false, downloading: false },
+      { name: "base",           hint: "Fast — all languages",                       curated: false, sizeBytes: 81768585,   installed: false, downloading: false },
+      { name: "base.en",        hint: "Fast — battery default",                     curated: true,  sizeBytes: 81781811,   installed: true,  downloading: false },
+      { name: "small",          hint: "Balanced — all languages",                   curated: false, sizeBytes: 264464607,  installed: false, downloading: false },
+      { name: "small.en",       hint: "Balanced — plugged default",                 curated: true,  sizeBytes: 264477561,  installed: true,  downloading: false },
+      { name: "medium",         hint: "Accurate — slower on CPU, all languages",    curated: false, sizeBytes: 823369779,  installed: false, downloading: false },
+      { name: "medium.en",      hint: "Accurate — slower on CPU",                   curated: true,  sizeBytes: 823382461,  installed: false, downloading: false },
+      { name: "large-v1",       hint: "Original large — all languages",             curated: false, sizeBytes: 3094623691, installed: false, downloading: false },
+      { name: "large-v2",       hint: "Very accurate — all languages",              curated: false, sizeBytes: 1656129691, installed: false, downloading: false },
+      { name: "large-v3",       hint: "Very accurate — all languages",              curated: false, sizeBytes: 3095033483, installed: false, downloading: false },
+      { name: "large-v3-turbo", hint: "Most accurate — GPU recommended, all languages", curated: true, sizeBytes: 874188075, installed: false, downloading: false }
+    ]
   };
 
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -188,6 +203,26 @@
     rebind_shortcut(which, combo) {
       this._state.shortcuts[which] = combo;
       return Promise.resolve({ ok: true, keys: combo.keys });
+    },
+    list_models() { return Promise.resolve(clone(this._state.models)); },
+    download_model(name) {
+      // Simulate a download: ~1.6 s of 10% progress pushes, then done.
+      const m = this._state.models.find((x) => x.name === name);
+      if (!m || m.installed) return Promise.resolve({ ok: true, installed: true });
+      let pct = 0;
+      const tick = () => {
+        pct += 10;
+        if (pct >= 100) {
+          m.installed = true;
+          m.installedBytes = m.sizeBytes;
+          if (window.tiroModelProgress) window.tiroModelProgress({ model: name, pct: 100, done: true, error: null });
+        } else {
+          if (window.tiroModelProgress) window.tiroModelProgress({ model: name, pct: pct, done: false, error: null });
+          setTimeout(tick, 160);
+        }
+      };
+      setTimeout(tick, 160);
+      return Promise.resolve({ ok: true, started: true });
     }
   };
 
@@ -207,6 +242,9 @@
     recording: false,
     pinned: false,
     view: "panel",        // panel | settings
+    models: [],           // list_models() snapshot (model manager)
+    modelsExpanded: false, // "Show all models" fold state
+    modelProgress: {},    // model name -> latest tiroModelProgress payload
     copiedId: null,
     expandedIds: new Set(),  // entry ids whose transcript fold is expanded
     editing: null,        // shortcut key being captured: dictate | panel | cancel
@@ -503,7 +541,88 @@
     ]);
   }
 
-  const MODELS = ["base.en", "small.en", "medium.en"];
+  /* ── model manager (Models group + selector options) ─────────────────── */
+  function fmtSize(bytes) {
+    if (!bytes) return "";
+    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
+    return Math.round(bytes / 1e6) + " MB";
+  }
+
+  // Battery/plugged selector options: installed models (catalog order) plus
+  // the currently-configured values even when not installed.
+  function modelOptions() {
+    const opts = App.models.filter((m) => m.installed).map((m) => m.name);
+    [App.settings.modelBattery, App.settings.modelPlugged].forEach((v) => {
+      if (v && opts.indexOf(v) < 0) opts.push(v);
+    });
+    if (!opts.length) opts.push("base.en");
+    return opts;
+  }
+
+  function refreshModels() {
+    Promise.resolve(api.list_models && api.list_models()).then((list) => {
+      if (!Array.isArray(list)) return;
+      App.models = list;
+      renderSettings();
+    }).catch(() => {});
+  }
+
+  function startDownload(name) {
+    App.modelProgress[name] = { model: name, pct: 0, done: false, error: null };
+    updateModelRow(name);
+    Promise.resolve(api.download_model(name)).then((res) => {
+      if (res && res.ok === false) {
+        App.modelProgress[name] = { model: name, pct: 0, done: false, error: res.error || "Download failed" };
+        updateModelRow(name);
+      } else if (res && res.installed) {
+        // already on disk (race with another path) — no pushes will come
+        delete App.modelProgress[name];
+        refreshModels();
+      }
+    }).catch(() => {
+      App.modelProgress[name] = { model: name, pct: 0, done: false, error: "Download failed" };
+      updateModelRow(name);
+    });
+  }
+
+  // The right-hand state cell of one model row: ✓ installed, Download,
+  // live percent, or error + Retry.
+  function modelStateEl(m) {
+    const p = App.modelProgress[m.name];
+    if (p && p.error) {
+      return h("span", { class: "model-state" }, [
+        h("span", { class: "model-err", title: p.error, text: "Failed" }),
+        h("button", { class: "btn-mini", text: "Retry", onclick: () => startDownload(m.name) })
+      ]);
+    }
+    if (p && !p.done) {
+      return h("span", { class: "model-state pct", text: p.pct + "%" });
+    }
+    if (m.installed) {
+      return h("span", { class: "model-state ok", title: "Installed" }, [Icon.Check(), "Installed"]);
+    }
+    if (m.downloading) {
+      return h("span", { class: "model-state pct", text: "…" });
+    }
+    return h("button", { class: "btn-mini", text: "Download", onclick: () => startDownload(m.name) });
+  }
+
+  function modelRow(m) {
+    const sub = m.hint + (m.sizeBytes ? " · " + fmtSize(m.sizeBytes) : "");
+    const node = row(m.name, sub, h("span", { class: "model-slot" }, [modelStateEl(m)]));
+    node.setAttribute("data-model", m.name);
+    return node;
+  }
+
+  // Update one row's state cell in place — a full renderSettings() per 1%
+  // progress tick would tear down open dropdowns and reset scroll.
+  function updateModelRow(name) {
+    const slot = els.settingsPage.querySelector('.row[data-model="' + name + '"] .model-slot');
+    const m = App.models.find((x) => x.name === name);
+    if (!slot || !m) return;
+    slot.innerHTML = "";
+    slot.appendChild(modelStateEl(m));
+  }
 
   function renderSettings() {
     const page = els.settingsPage;
@@ -545,9 +664,29 @@
         { value: "cpu", label: "Always CPU" },
         { value: "gpu", label: "Always GPU" }
       ], (v) => setSetting("powerMode", v))),
-      row("Model on battery", null, selectControl(s.modelBattery, MODELS, (v) => setSetting("modelBattery", v))),
-      row("Model when plugged in", null, selectControl(s.modelPlugged, MODELS, (v) => setSetting("modelPlugged", v)))
+      row("Model on battery", null, selectControl(s.modelBattery, modelOptions(), (v) => setSetting("modelBattery", v))),
+      row("Model when plugged in", null, selectControl(s.modelPlugged, modelOptions(), (v) => setSetting("modelPlugged", v)))
     ], "Auto uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power."));
+
+    /* MODELS — curated rows always visible; "Show all models" reveals the rest */
+    const curated = App.models.filter((m) => m.curated);
+    const extras = App.models.filter((m) => !m.curated);
+    const modelRows = curated.map(modelRow);
+    if (App.modelsExpanded) extras.forEach((m) => modelRows.push(modelRow(m)));
+    if (extras.length) {
+      modelRows.push(h("div", { class: "row models-toggle" }, [
+        h("button", {
+          type: "button", class: "models-more",
+          "aria-expanded": String(App.modelsExpanded),
+          text: App.modelsExpanded ? "Hide extra models" : "Show all models",
+          onclick: () => { App.modelsExpanded = !App.modelsExpanded; renderSettings(); }
+        })
+      ]));
+    }
+    if (modelRows.length) {
+      body.appendChild(group("Models", modelRows,
+        "Models download once and run fully offline. Downloaded models appear in the selectors above."));
+    }
 
     /* AUDIO */
     body.appendChild(group("Audio", [
@@ -869,6 +1008,23 @@
     renderSettings();
   };
 
+  // window.tiroModelProgress({ model, pct, done, error }) — pushed by the
+  // backend while a model downloads (~every 1%). Progress updates the row in
+  // place; completion re-queries list_models so the row flips to Installed
+  // and the battery/plugged selectors pick the model up.
+  window.tiroModelProgress = function (p) {
+    if (!p || !p.model) return;
+    if (p.done) {
+      delete App.modelProgress[p.model];
+      const m = App.models.find((x) => x.name === p.model);
+      if (m) { m.installed = true; m.downloading = false; }
+      refreshModels();
+      return;
+    }
+    App.modelProgress[p.model] = p;
+    updateModelRow(p.model);
+  };
+
   /* ════════════════════════════════════════════════════════════════════
      BOOT
      ════════════════════════════════════════════════════════════════════ */
@@ -887,6 +1043,7 @@
       ingestState(state);
       renderPanel();
       renderSettings();
+      refreshModels();
     }).catch((err) => {
       // last-resort: render with whatever defaults we have
       ingestState(MOCK_STATE);

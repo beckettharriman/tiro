@@ -78,6 +78,16 @@ fn rebind_shortcut(app: tauri::AppHandle, which: String, combo: Value) -> Value 
     api::rebind_shortcut(&app, &which, &combo)
 }
 
+#[tauri::command]
+fn list_models(app: tauri::AppHandle) -> Value {
+    api::list_models(&app)
+}
+
+#[tauri::command]
+fn download_model(app: tauri::AppHandle, name: String) -> Value {
+    api::download_model(&app, &name)
+}
+
 /// The original's 20 s `power_watcher` tick: keep the engine chip's power
 /// label and the system theme in sync with the live machine state. (Theme
 /// polling is needed because on Linux tao emits OS ThemeChanged with a
@@ -449,7 +459,9 @@ pub fn run() {
             close_panel,
             begin_drag,
             pick_folder,
-            rebind_shortcut
+            rebind_shortcut,
+            list_models,
+            download_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
