@@ -257,6 +257,18 @@ pub fn register_all(app: &AppHandle) {
             }
         }
     }
+    // Global hotkeys are X11 grabs on Linux; in a Wayland session they can
+    // only fire while an XWayland window has focus (or not at all with no
+    // X server). Point at the documented DE-shortcut fallback.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        eprintln!(
+            "Wayland session detected: global hotkeys use X11 grabs and may \
+             not fire while native Wayland apps have focus. Bind DE-level \
+             shortcuts to `tiro --toggle` / `tiro --panel` / `tiro --cancel` \
+             instead (see BUILDING.md)."
+        );
+    }
 }
 
 #[cfg(test)]

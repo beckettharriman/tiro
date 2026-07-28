@@ -103,7 +103,7 @@ side and the hard platform corners.)
 - [x] **4.2 Windows runtime parity.** On Windows: hotkeys, tray, transparent
   frameless windows, taskbar suppression, audio capture, clipboard, power
   detection, autostart — all verified against PORTING_NOTES.
-- [ ] **4.3 Hotkeys on Wayland.** Global shortcuts work on X11/WSLg today;
+- [x] **4.3 Hotkeys on Wayland.** Global shortcuts work on X11/WSLg today;
   implement/document the Wayland story (portal GlobalShortcuts where
   available; DE-level shortcut → `tiro --toggle` CLI fallback wired through
   the single-instance IPC).

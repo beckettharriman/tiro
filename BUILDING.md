@@ -50,8 +50,32 @@ sudo apt install build-essential cmake pkg-config \
 - `libwebkit2gtk-4.1-dev` / `libgtk-3-dev` — the Tauri webview shell.
 - `libayatana-appindicator3-dev` — tray icon.
 - `libasound2-dev` — ALSA, for microphone capture (cpal).
-- X11 is the supported session for global hotkeys today; Wayland notes
-  live in PORT_PLAN phase 4.
+
+### Global hotkeys on Wayland
+
+Global hotkeys are X11 keyboard grabs. In an X11 session they just work.
+In a **Wayland** session the compositor owns the keyboard: the grabs only
+fire while an XWayland window has focus, and not at all without an X
+server — Tiro logs a notice at startup when it detects this.
+
+The supported Wayland setup is a **desktop-level shortcut bound to Tiro's
+CLI**. A second `tiro` launch is forwarded to the running instance
+(single-instance IPC), so these commands act as a remote control:
+
+| Command         | Action                                |
+|-----------------|---------------------------------------|
+| `tiro --toggle` | start / stop dictation                |
+| `tiro --panel`  | show / hide the panel                 |
+| `tiro --cancel` | cancel the current recording          |
+| `tiro`          | summon the panel (bring to front)     |
+
+Examples: GNOME → Settings → Keyboard → Custom Shortcuts; KDE → System
+Settings → Shortcuts → Add Command; sway/hyprland → `bindsym`/`bind`
+to `tiro --toggle`.
+
+The `org.freedesktop.portal.GlobalShortcuts` portal is the eventual
+native answer, but the shortcut plugin Tiro uses has no Wayland backend
+yet, so the CLI route is the documented, everywhere-working fallback.
 
 ## GPU builds (optional)
 

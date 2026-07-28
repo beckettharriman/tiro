@@ -187,11 +187,25 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // LIFECYCLE-1: a second launch summons the running instance's
-            // panel instead of starting another app.
-            eprintln!("second instance launch -> summoning panel");
-            hotkeys::summon_panel(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // LIFECYCLE-1: a second launch reaches the running instance.
+            // With an action flag it acts as a remote control — the CLI
+            // fallback for Wayland sessions where global hotkeys can't be
+            // grabbed (bind a DE-level shortcut to `tiro --toggle`, see
+            // BUILDING.md). A plain second launch summons the panel.
+            if argv.iter().any(|a| a == "--toggle") {
+                eprintln!("second instance: --toggle");
+                hotkeys::dispatch(app, "dictate");
+            } else if argv.iter().any(|a| a == "--cancel") {
+                eprintln!("second instance: --cancel");
+                hotkeys::dispatch(app, "cancel");
+            } else if argv.iter().any(|a| a == "--panel") {
+                eprintln!("second instance: --panel");
+                hotkeys::dispatch(app, "panel");
+            } else {
+                eprintln!("second instance launch -> summoning panel");
+                hotkeys::summon_panel(app);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
