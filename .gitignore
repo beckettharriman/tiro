@@ -15,6 +15,7 @@ config.ini
 config.ini.*
 vocab.txt
 models/
+logs/
 transcripts/
 *.pid
 

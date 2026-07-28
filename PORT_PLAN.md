@@ -121,7 +121,7 @@ side and the hard platform corners.)
 - [x] **5.3 Docs.** Rewrite README.md for the new app (install, build, usage,
   hotkeys, offline/privacy story, Wayland notes). LICENSE carried over.
   `vocab.example.txt` + `config.example.ini` included.
-- [ ] **5.4 Pre-release hygiene sweep.** Run the attribution greps from
+- [x] **5.4 Pre-release hygiene sweep.** Run the attribution greps from
   CLAUDE.md over full history and tree; scrub logs/temp files; verify
   .gitignore covers runtime artifacts; confirm repo is clean for an eventual
   public flip (stays private until owner says otherwise).
