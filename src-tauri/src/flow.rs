@@ -509,13 +509,16 @@ enum Outcome {
 }
 
 /// Transcribe off the command thread, then copy + log. An error can never
-/// skip `finish` — the pill must never wedge on "transcribing".
+/// skip `finish` — the pill must never wedge on "transcribing": every exit
+/// from the closure maps to an `Outcome`, and a panic anywhere inside it
+/// (whisper bindings, clipboard, log IO) is caught and treated as an error
+/// rather than killing the thread with the pill still showing.
 fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session: u64) {
     let ctx = app.state::<AppCtx>();
     let mut clean: Option<String> = None;
     let mut rec: Option<store::Rec> = None;
     let mut is_vault = true;
-    let outcome = (|| {
+    let worker = std::panic::AssertUnwindSafe(|| {
         let audio16 = audio::resample_to_16k(&take.samples, take.rate);
         let (cleanup_mode, vocab) = {
             let cfg = lock(&ctx.cfg);
@@ -619,7 +622,11 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             }
         }
         Outcome::Done
-    })();
+    });
+    let outcome = std::panic::catch_unwind(worker).unwrap_or_else(|_| {
+        eprintln!("transcribe worker panicked; treating as transcription error");
+        Outcome::Error
+    });
     // Only clear the in-flight flag if we are still the current session.
     if ctx.session.load(Ordering::SeqCst) == session {
         ctx.xscribing.store(false, Ordering::SeqCst);
