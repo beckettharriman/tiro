@@ -118,7 +118,7 @@ side and the hard platform corners.)
   PORTING_NOTES.
 - [ ] **5.2 Packaging.** `cargo tauri build` installers: NSIS/MSI on Windows,
   .deb + AppImage on Linux. App icon (port tiro.ico, add Linux sizes).
-- [ ] **5.3 Docs.** Rewrite README.md for the new app (install, build, usage,
+- [x] **5.3 Docs.** Rewrite README.md for the new app (install, build, usage,
   hotkeys, offline/privacy story, Wayland notes). LICENSE carried over.
   `vocab.example.txt` + `config.example.ini` included.
 - [ ] **5.4 Pre-release hygiene sweep.** Run the attribution greps from

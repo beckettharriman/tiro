@@ -1,0 +1,12 @@
+# Tiro smart-vocabulary list.
+#
+# Words, names, and jargon you want Whisper to spell correctly. Add proper nouns,
+# product names, technical terms, and slang you use often, separated by commas
+# or newlines. Lines starting with "#" and blank lines are ignored.
+#
+# This biases transcription toward these spellings; it does not force them.
+# Replace the examples below with your own, then save as vocab.txt.
+
+Tauri, whisper.cpp, Vulkan, WebKitGTK, WASAPI, GGUF
+Kubernetes, PostgreSQL, OAuth, GraphQL, Tailwind, async/await
+GitHub, README, changelog, monorepo
