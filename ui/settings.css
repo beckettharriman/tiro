@@ -72,6 +72,7 @@
   height: .5px; background: var(--separator);
 }
 .row.col { flex-direction: column; align-items: stretch; gap: 11px; }
+.row.disabled { opacity: .45; pointer-events: none; }
 .row-l { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .row-label { font-size: 14.5px; font-weight: 450; letter-spacing: -.01em; color: var(--txt-1); }
 .row-sub { font-size: 12px; line-height: 1.35; color: var(--txt-3); }
@@ -151,14 +152,16 @@
   box-shadow: 0 1px 3px rgba(0,0,0,.18), 0 2px 7px rgba(0,0,0,.3);
 }
 
-/* select (pull-down) */
-.sel-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 0 auto; }
+/* select (pull-down) — shrinks inside its row; long names (e.g. verbose
+   mic devices) ellipsize instead of pushing past the row edge */
+.sel-wrap { position: relative; display: inline-flex; align-items: center; flex: 0 999 auto; min-width: 0; }
 .sel {
   appearance: none; -webkit-appearance: none; border: 0; outline: none;
   background: transparent; cursor: pointer;
   color: var(--txt-2); font: 500 14.5px var(--font); letter-spacing: -.01em;
   text-align: right; text-align-last: right;
   padding: 4px 20px 4px 6px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sel:hover { color: var(--txt-1); }
 .sel option { color: #000; }
