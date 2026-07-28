@@ -107,7 +107,7 @@ side and the hard platform corners.)
   implement/document the Wayland story (portal GlobalShortcuts where
   available; DE-level shortcut → `tiro --toggle` CLI fallback wired through
   the single-instance IPC).
-- [ ] **4.4 Platform features cross-check.** Theme detection, power
+- [x] **4.4 Platform features cross-check.** Theme detection, power
   detection, autostart on both OSes; note WSLg-specific quirks separately
   from real-Linux issues.
 

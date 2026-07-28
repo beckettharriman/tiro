@@ -91,6 +91,42 @@ reports the GPU as unavailable. The main process never initializes a GPU
 context in either build — GPU inference always lives in the worker child
 (see PORTING_NOTES §6).
 
+## Development notes: WSLg quirks vs real-Linux issues
+
+Development happens Linux-native under WSL2/WSLg. Some behaviors there
+are **WSLg artifacts**, not app or real-Linux bugs:
+
+- **Keyboard death after hiding the focused window**: WSLg's XWayland
+  stops delivering keyboard events to every X client (even fresh grabs)
+  once the last focused surface unmaps — e.g. hiding the panel by
+  hotkey with no other app window open. Focusing any surface (or
+  relaunching the app) revives input. App threads stay healthy
+  throughout.
+- **Synthetic window drags are ignored**: the compositor does not honor
+  `_NET_WM_MOVERESIZE` driven by XTEST pointer input, so interactive
+  drag behavior can't be exercised there.
+- **Audio**: only ALSA's null device exists — capture yields silence
+  without real-time pacing, and sound cues are inaudible.
+- **No Settings portal by default**: `XDG_CURRENT_DESKTOP` is empty, so
+  xdg-desktop-portal selects no backend and theme detection degrades to
+  the boot-time value. Fix for development:
+  `~/.config/xdg-desktop-portal/portals.conf` with
+  `[preferred]` / `default=gtk`, then restart the portal services.
+- **`GDK_BACKEND=x11` required** to render (WSLg's Wayland/EGL path
+  fails), and there is no StatusNotifier host, so the tray icon has
+  nowhere to appear.
+
+Real-Linux notes that are **not** WSLg-specific (and are handled in
+code):
+
+- The windowing layer latches the boot-time portal color-scheme and its
+  OS ThemeChanged events carry a dummy window id — Tiro reads the
+  Settings portal directly and polls on the 20 s watcher instead.
+- WebKitGTK reports a ~200 px minimum widget height; the pill window
+  clears GTK size requests at startup to reach its 300x72 size.
+- Wayland global-hotkey limits and the CLI fallback: see the section
+  above.
+
 ## Packaging
 
 Installer builds (`cargo tauri build` — NSIS/MSI on Windows, .deb and

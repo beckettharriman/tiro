@@ -4688,6 +4688,7 @@ name = "tiro"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "auto-launch",
  "chrono",
  "cpal 0.18.1",
  "gtk",

@@ -15,6 +15,30 @@ fn main() {
         tiro_lib::cues::cue_test();
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--autostart-test") {
+        // Exercises the same auto-launch config the autostart plugin builds
+        // (app name = productName "tiro", path = current exe, no args).
+        let mode = args.get(i + 1).map(String::as_str).unwrap_or("status");
+        let exe = std::env::current_exe().expect("current_exe");
+        let al = auto_launch::AutoLaunchBuilder::new()
+            .set_app_name("tiro")
+            .set_app_path(&exe.display().to_string())
+            .build()
+            .expect("auto-launch build");
+        let result = match mode {
+            "on" => al.enable().map_err(|e| e.to_string()),
+            "off" => al.disable().map_err(|e| e.to_string()),
+            _ => Ok(()),
+        };
+        match result {
+            Ok(()) => eprintln!(
+                "autostart {mode}: is_enabled = {:?}",
+                al.is_enabled().map_err(|e| e.to_string())
+            ),
+            Err(e) => eprintln!("autostart {mode} FAILED: {e}"),
+        }
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--copy-test") {
         match args.get(i + 1) {
             Some(text) => match tiro_lib::clipboard::copy(text) {
