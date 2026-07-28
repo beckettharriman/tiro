@@ -198,3 +198,46 @@ This applies to Vulkan contexts too, so the port keeps the architecture:
 ## Out of scope for the port
 - `transcribe_video.py` / `diarize_video.py` — standalone side utilities, not part of the app. Ignore.
 - The `.bat`/`.vbs`/`.ps1`/`.lnk` launcher scripts — replaced by a real packaged app + autostart plugin.
+
+## Port deviations (recorded during the parity audit, task 5.1)
+
+Beyond the **PORT:** notes above, the shipped port intentionally deviates
+from the original in these ways:
+
+- **Engine**: whisper.cpp (whisper-rs) with GGUF models replaces
+  faster-whisper/CTranslate2; the GPU backend is Vulkan, not CUDA.
+  `device = cuda` is still accepted in config and means "the GPU".
+- **Linux theme detection** does not use the windowing layer's theme API:
+  tao latches the boot-time portal value and delivers OS ThemeChanged
+  events with a dummy window id that never reaches handlers. Instead the
+  XDG Settings portal is read directly and the 20 s watcher pushes
+  changes — behaviorally identical to the original's registry poll.
+  Windows keeps the native event path.
+- **Logging**: no `tracing` stack. Release builds redirect stderr to
+  `tiro.log` (start-banner + everything the app prints; on Unix this also
+  captures whisper.cpp's C-level output). Dev builds log to the terminal.
+  The original's `faulthandler` has no equivalent.
+- **Wayland hotkeys**: the shortcut plugin has no Wayland backend, so the
+  documented setup is a DE-level shortcut bound to `tiro --toggle` /
+  `--panel` / `--cancel`, forwarded to the running instance over the
+  single-instance IPC (see BUILDING.md). The GlobalShortcuts portal is a
+  future enhancement.
+- **Panel drag tracking**: `start_dragging()` has no end-of-drag
+  callback, so "user moved the panel" is detected as drift from the last
+  position the app set (>3 px) at the next summon — same observable
+  behavior as the original's drag-loop flag.
+- **Active monitor** = the monitor under the cursor (falling back to the
+  panel's monitor, then primary). The original preferred the foreground
+  window's monitor — a Win32-only signal whose own fallback was the
+  cursor.
+- **GPU worker responses** carry one pre-joined segment string in the
+  `segments` array rather than per-segment texts; the parent joins
+  identically either way, so the wire shape is unchanged.
+- **Hotkey validation** is structural (modifiers + one known key) rather
+  than a Win32 VK-map lookup; the OS-level registration remains the real
+  arbiter and failures are reported per hotkey.
+- **`sound_volume`** is written in Python float repr ("0.5", "1.0") so a
+  config.ini carried over from the original stays byte-compatible.
+- **Tray**: the Windows icon lands in the taskbar overflow flyout by
+  default (OS behavior); Explorer-restart re-add is handled by the tray
+  library rather than a hand-rolled TaskbarCreated hook.

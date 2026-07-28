@@ -6,3 +6,4 @@ models/
 logs/
 vocab.txt
 gpu_worker.log
+tiro.log

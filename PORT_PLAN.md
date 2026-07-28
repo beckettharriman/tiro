@@ -113,7 +113,7 @@ side and the hard platform corners.)
 
 ## Phase 5 — parity, packaging, release prep
 
-- [ ] **5.1 Parity audit.** Walk PORTING_NOTES top to bottom against the
+- [x] **5.1 Parity audit.** Walk PORTING_NOTES top to bottom against the
   running app; fix gaps; record intentional deviations at the bottom of
   PORTING_NOTES.
 - [ ] **5.2 Packaging.** `cargo tauri build` installers: NSIS/MSI on Windows,

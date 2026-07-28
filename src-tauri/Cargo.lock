@@ -4693,6 +4693,7 @@ dependencies = [
  "cpal 0.18.1",
  "gtk",
  "hound",
+ "libc",
  "regex",
  "rodio",
  "rust-ini",

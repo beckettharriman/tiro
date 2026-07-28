@@ -1,7 +1,44 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Release builds run without a console (windows_subsystem on Windows, a
+/// desktop launch on Linux), so diagnostics would vanish — send stderr to
+/// tiro.log in the working directory instead, the port's answer to the
+/// original's tiro.log. On Unix dup2 also captures whisper.cpp's C-level
+/// stderr; on Windows SetStdHandle covers the Rust side (C runtime output
+/// latched its handle at startup and is not recoverable there).
+#[cfg(not(debug_assertions))]
+fn stderr_to_log() {
+    use std::fs::OpenOptions;
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("tiro.log")
+    else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::dup2(file.as_raw_fd(), 2) };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        unsafe { SetStdHandle(STD_ERROR_HANDLE, file.as_raw_handle()) };
+    }
+    // The fd/handle must outlive the process's logging.
+    std::mem::forget(file);
+    eprintln!(
+        "---- tiro start {} ----",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+}
+
 fn main() {
+    #[cfg(not(debug_assertions))]
+    stderr_to_log();
     // CLI subcommands run headless, before any window/GPU machinery exists.
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--gpu-worker") {
