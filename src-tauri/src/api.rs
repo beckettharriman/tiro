@@ -431,7 +431,13 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                     "device",
                     powermode_to_device(value.as_str().unwrap_or("auto")),
                 );
-                // ensure_device(resolve_target()) joins in task 3.5
+                // apply live off the command thread, like the original's
+                // background ensure_device(resolve_target())
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let target = flow::resolve_target(&app.state::<AppCtx>());
+                    flow::ensure_device(&app, target);
+                });
             }
             "modelBattery" => cfg.set("model_battery", &as_cfg_str(value)),
             "modelPlugged" => cfg.set("model_ac", &as_cfg_str(value)),

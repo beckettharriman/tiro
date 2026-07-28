@@ -91,10 +91,30 @@ fn power_watcher(app: tauri::AppHandle) {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(20));
             let ctx = app.state::<flow::AppCtx>();
+            // If the GPU worker died on its own (crash / driver reset), don't
+            // keep claiming GPU: latch it off so resolve_target steers to CPU
+            // below; the periodic re-probe allows a respawn later.
+            {
+                let mut engine = flow::lock(&ctx.engine);
+                if engine.device == "gpu"
+                    && !engine.worker.as_mut().is_some_and(gpu::GpuWorker::alive)
+                {
+                    eprintln!("power: GPU worker died unexpectedly; latching GPU off");
+                    flow::latch_gpu_off(&ctx);
+                }
+            }
+            let target = flow::resolve_target(&ctx);
+            let device_now = flow::lock(&ctx.engine).device.clone();
+            if target != device_now {
+                eprintln!("Power/device change -> switching to {target}");
+                flow::ensure_device(&app, target); // kills/spawns; pushes the chip
+            }
             let ac = power::on_ac_power();
             if ac != last_power {
                 last_power = ac;
                 eprintln!("power flip -> {}", if ac { "plugged" } else { "battery" });
+                // power may have flipped without a device swap; keep the
+                // footer chip's power label current.
                 flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
             }
             let eff = {
@@ -135,8 +155,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => hotkeys::dispatch(app, "panel"),
             "dictate" => hotkeys::dispatch(app, "dictate"),
-            "restart" => app.restart(),
-            "quit" => app.exit(0),
+            // Kill the GPU worker FIRST: exiting without it would leave an
+            // orphan holding the dGPU awake until its EOF backstop fires.
+            "restart" => {
+                flow::stop_worker(app);
+                app.restart()
+            }
+            "quit" => {
+                flow::stop_worker(app);
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

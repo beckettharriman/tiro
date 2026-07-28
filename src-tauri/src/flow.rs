@@ -28,13 +28,21 @@ use crate::audio::{self, Recording, Take};
 use crate::clipboard;
 use crate::config::ConfigStore;
 use crate::cues;
+use crate::gpu::{GpuWorker, READY_TIMEOUT_CACHED, READY_TIMEOUT_DOWNLOAD};
+use crate::power;
 use crate::store;
 use crate::transcribe::{self, Transcriber};
 
-/// The serving engine: a CPU transcriber for now; the GPU worker client
-/// joins in task 3.4.
+/// How long to leave `gpu_ok` latched false before allowing one re-probe.
+/// A GPU load can fail for transient reasons (driver waking the dGPU, a
+/// busy GPU); never re-probing would strand the app on CPU until restart.
+const GPU_REPROBE_SECS: u64 = 600;
+
+/// The serving engine: an in-process CPU transcriber, or the GPU worker
+/// child (never both live at once).
 pub struct Engine {
     pub transcriber: Option<Transcriber>,
+    pub worker: Option<GpuWorker>,
     pub model_name: String,
     /// "cpu" | "gpu" — which engine actually serves requests right now.
     pub device: String,
@@ -64,6 +72,11 @@ pub struct AppCtx {
     active_rate: AtomicU64,
     /// Bumping this cancels every pending pill hide timer.
     pill_gen: AtomicU64,
+    /// `_cuda_ok`: false once the GPU proves unavailable, to stop retrying.
+    gpu_ok: AtomicBool,
+    /// `_cuda_probe_ts`: last time `gpu_ok` was reset for a re-probe
+    /// (millis since process start via `Instant`).
+    gpu_probe: Mutex<Option<std::time::Instant>>,
 }
 
 /// The app's working directory (config.ini, models/, vocab.txt live here,
@@ -109,6 +122,7 @@ impl AppCtx {
             cfg: Mutex::new(ConfigStore::load(dir.join("config.ini"), &dir)),
             engine: Mutex::new(Engine {
                 transcriber: None,
+                worker: None,
                 model_name: String::new(),
                 device: "cpu".into(),
             }),
@@ -121,6 +135,50 @@ impl AppCtx {
             active_mic: Mutex::new(String::new()),
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
+            gpu_ok: AtomicBool::new(true),
+            gpu_probe: Mutex::new(None),
+        }
+    }
+}
+
+/// `_maybe_reprobe_cuda`: don't latch `gpu_ok` false forever — allow one
+/// GPU retry every `GPU_REPROBE_SECS` so a transient failure self-heals
+/// without a restart. Only matters when the user wants the GPU at all.
+fn maybe_reprobe_gpu(ctx: &AppCtx) {
+    if ctx.gpu_ok.load(Ordering::SeqCst) || lock(&ctx.cfg).get("device").to_lowercase() == "cpu" {
+        return;
+    }
+    let mut probe = lock(&ctx.gpu_probe);
+    let due = probe.is_none_or(|t| t.elapsed().as_secs() >= GPU_REPROBE_SECS);
+    if due {
+        *probe = Some(std::time::Instant::now());
+        ctx.gpu_ok.store(true, Ordering::SeqCst); // next load really tests it
+    }
+}
+
+/// `resolve_target`: which device we SHOULD be on right now, honoring
+/// config + power + GPU availability. Config keeps the original's "cuda"
+/// value name; internally the GPU target is "gpu".
+pub fn resolve_target(ctx: &AppCtx) -> &'static str {
+    maybe_reprobe_gpu(ctx);
+    let dev = lock(&ctx.cfg).get("device").to_lowercase();
+    let gpu_ok = ctx.gpu_ok.load(Ordering::SeqCst);
+    match dev.as_str() {
+        "cpu" => "cpu",
+        "cuda" => {
+            if gpu_ok {
+                "gpu"
+            } else {
+                "cpu"
+            }
+        }
+        _ => {
+            // auto: GPU only when it works AND we're plugged in
+            if gpu_ok && power::on_ac_power() {
+                "gpu"
+            } else {
+                "cpu"
+            }
         }
     }
 }
@@ -131,22 +189,148 @@ impl Default for AppCtx {
     }
 }
 
-/// `engine_dict`: the chip payload. Reports the ACTUAL device and the live
-/// power source.
+/// `engine_dict`: the chip payload. Reports the ACTUAL device — "GPU"
+/// requires the worker child to be alive right now; a silently-dead worker
+/// must not show a green GPU chip — and the live power source.
 pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
-    let engine = lock(&ctx.engine);
+    let mut engine = lock(&ctx.engine);
     let model = if engine.model_name.is_empty() {
         lock(&ctx.cfg).get("model")
     } else {
         engine.model_name.clone()
     };
-    let device = if engine.device == "gpu" { "GPU" } else { "CPU" };
-    let power = if crate::power::on_ac_power() {
+    let gpu = engine.device == "gpu" && engine.worker.as_mut().is_some_and(GpuWorker::alive);
+    let device = if gpu { "GPU" } else { "CPU" };
+    let power = if power::on_ac_power() {
         "plugged"
     } else {
         "battery"
     };
     json!({ "model": model, "device": device, "power": power })
+}
+
+/// Load the engine for `target` into `engine` (held under the engine
+/// lock). "gpu" spawns the worker child — this process never touches the
+/// GPU (POWER_AND_DGPU.md); any worker failure latches `gpu_ok` false and
+/// falls back to CPU, exactly like the original's in-process CUDA failure.
+fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
+    let models_dir = app_dir().join("models");
+    let (model_ac, model_battery, compute_type) = {
+        let cfg = lock(&ctx.cfg);
+        let fallback = cfg.get("model");
+        let ac = {
+            let m = cfg.get("model_ac");
+            if m.is_empty() {
+                fallback.clone()
+            } else {
+                m
+            }
+        };
+        let bat = {
+            let m = cfg.get("model_battery");
+            if m.is_empty() {
+                fallback.clone()
+            } else {
+                m
+            }
+        };
+        (ac, bat, cfg.get("compute_type"))
+    };
+    if target == "gpu" {
+        eprintln!("Starting GPU worker for '{model_ac}' ...");
+        let cached = models_dir
+            .join(transcribe::model_file_name(&model_ac, &compute_type))
+            .exists();
+        let timeout = if cached {
+            READY_TIMEOUT_CACHED
+        } else {
+            READY_TIMEOUT_DOWNLOAD
+        };
+        match GpuWorker::spawn(&model_ac, &models_dir, &compute_type, "gpu", timeout) {
+            Ok(w) => {
+                eprintln!("Ready on GPU (worker).");
+                engine.transcriber = None;
+                engine.worker = Some(w);
+                engine.model_name = model_ac;
+                engine.device = "gpu".into();
+                return;
+            }
+            Err(e) => {
+                eprintln!("GPU worker unavailable ({e}); falling back to CPU.");
+                ctx.gpu_ok.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+    eprintln!("Loading '{model_battery}' on CPU ...");
+    let loaded = transcribe::ensure_model(&models_dir, &model_battery, &compute_type)
+        .and_then(|model_path| {
+            let vad = transcribe::ensure_vad_model(&models_dir)
+                .map_err(|e| {
+                    eprintln!("VAD model unavailable ({e}); continuing without VAD");
+                    e
+                })
+                .ok();
+            Transcriber::load(&model_path, vad)
+        })
+        .and_then(|t| t.warm_up().map(|()| t));
+    match loaded {
+        Ok(t) => {
+            engine.transcriber = Some(t);
+            engine.model_name = model_battery;
+            engine.device = "cpu".into();
+            eprintln!("Ready on CPU.");
+        }
+        Err(e) => {
+            // Leave the engine empty -> "Model not ready" on use.
+            eprintln!("CPU model load failed: {e}");
+            engine.transcriber = None;
+            engine.model_name = String::new();
+            engine.device = "cpu".into();
+        }
+    }
+}
+
+/// `ensure_device`: swap the serving engine to `target` if needed. Healthy
+/// means: for cpu the model is loaded; for gpu the worker child is ALIVE
+/// (a silently-crashed worker must not count as "already on gpu" or
+/// dictation would dead-end). The outgoing (or dead) worker is killed
+/// BEFORE the replacement load — on the AC->battery flip the dGPU should
+/// be asleep during the seconds the CPU model spends loading, not after.
+pub fn ensure_device(app: &AppHandle, target: &str) {
+    let ctx = app.state::<AppCtx>();
+    {
+        let mut engine = lock(&ctx.engine);
+        let healthy = engine.device == target
+            && match target {
+                "gpu" => engine.worker.as_mut().is_some_and(GpuWorker::alive),
+                _ => engine.transcriber.is_some(),
+            };
+        if healthy {
+            return;
+        }
+        if let Some(mut w) = engine.worker.take() {
+            w.stop();
+        }
+        load_engine(&ctx, &mut engine, target);
+        // the in-process CPU model (if any) drops here, freeing its RAM
+    }
+    push_panel(app, "tiroSetEngine", engine_dict(&ctx));
+}
+
+/// Latch the GPU unavailable (dead worker seen by the watcher); the
+/// periodic re-probe in `resolve_target` can lift it later.
+pub fn latch_gpu_off(ctx: &AppCtx) {
+    ctx.gpu_ok.store(false, Ordering::SeqCst);
+}
+
+/// Kill the GPU worker synchronously (quit/restart path): its exit is what
+/// releases the GPU context, so it must die BEFORE this process goes away.
+pub fn stop_worker(app: &AppHandle) {
+    let ctx = app.state::<AppCtx>();
+    let worker = lock(&ctx.engine).worker.take();
+    if let Some(mut w) = worker {
+        w.stop();
+    }
 }
 
 /// Call `window.<fn>(<json>)` in the panel — the original's `evaluate_js`.
@@ -224,53 +408,13 @@ fn play(ctx: &AppCtx, name: &str) {
     cues::play_cue(&lock(&ctx.cfg), name);
 }
 
-/// Load the CPU model per config in the background (startup / boot), then
-/// push the engine chip. Failures leave the engine empty -> "Model not
+/// Bring up the engine for the resolved target in the background (startup),
+/// then push the engine chip. Failures leave the engine empty -> "Model not
 /// ready" on use, like the original.
 pub fn boot_engine(app: AppHandle) {
     std::thread::spawn(move || {
-        let ctx = app.state::<AppCtx>();
-        let (model, compute_type) = {
-            let cfg = lock(&ctx.cfg);
-            let m = cfg.get("model_battery");
-            let model = if m.is_empty() { cfg.get("model") } else { m };
-            (model, cfg.get("compute_type"))
-        };
-        eprintln!("Loading '{model}' on CPU ...");
-        let models_dir = app_dir().join("models");
-        let model_path = match transcribe::ensure_model(&models_dir, &model, &compute_type) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("model download failed: {e}");
-                return;
-            }
-        };
-        let vad_path = match transcribe::ensure_vad_model(&models_dir) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                eprintln!("VAD model unavailable ({e}); continuing without VAD");
-                None
-            }
-        };
-        let transcriber = match Transcriber::load(&model_path, vad_path) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("model load failed: {e}");
-                return;
-            }
-        };
-        if let Err(e) = transcriber.warm_up() {
-            eprintln!("warm-up failed: {e}");
-            return;
-        }
-        {
-            let mut engine = lock(&ctx.engine);
-            engine.transcriber = Some(transcriber);
-            engine.model_name = model.clone();
-            engine.device = "cpu".into();
-        }
-        eprintln!("Ready on CPU.");
-        push_panel(&app, "tiroSetEngine", engine_dict(&ctx));
+        let target = resolve_target(&app.state::<AppCtx>());
+        ensure_device(&app, target);
     });
 }
 
@@ -381,22 +525,66 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             )
         };
         // The engine lock serializes transcription like the original's
-        // _xscribe_lock (and blocks device swaps mid-take).
+        // _xscribe_lock (and blocks device swaps mid-take). GPU can afford
+        // accuracy (beam 5); CPU stays fast (beam 1).
+        let mut engine_flipped = false;
         let (verbatim, model_name, device) = {
-            let engine = lock(&ctx.engine);
-            let Some(transcriber) = engine.transcriber.as_ref() else {
-                eprintln!("transcribe skipped: model not ready");
-                return Outcome::Model;
-            };
-            let beam = if engine.device == "gpu" { 5 } else { 1 };
-            match transcriber.transcribe(&audio16, beam, vocab.as_deref()) {
-                Ok(text) => (text, engine.model_name.clone(), engine.device.clone()),
-                Err(e) => {
-                    eprintln!("transcribe failed: {e}");
-                    return Outcome::Error;
+            let mut engine = lock(&ctx.engine);
+            if engine.device == "gpu" {
+                let result = engine
+                    .worker
+                    .as_mut()
+                    .ok_or_else(|| "GPU worker already gone".to_string())
+                    .and_then(|w| w.transcribe(&audio16, 5, vocab.as_deref()));
+                match result {
+                    Ok(text) => (text, engine.model_name.clone(), "gpu".to_string()),
+                    Err(e) => {
+                        // The worker crashed / timed out MID-TAKE. The take
+                        // must not be lost: kill the worker, latch the GPU
+                        // off (the periodic re-probe allows a respawn
+                        // later), load the battery model in-process, and
+                        // transcribe the SAME audio on CPU right here.
+                        eprintln!(
+                            "gpu-worker: request failed ({e}); \
+                             falling back to in-process CPU for this take"
+                        );
+                        ctx.gpu_ok.store(false, Ordering::SeqCst);
+                        if let Some(mut w) = engine.worker.take() {
+                            w.stop();
+                        }
+                        load_engine(&ctx, &mut engine, "cpu");
+                        engine_flipped = true;
+                        let Some(t) = engine.transcriber.as_ref() else {
+                            eprintln!("CPU fallback load failed too");
+                            return Outcome::Error;
+                        };
+                        match t.transcribe(&audio16, 1, vocab.as_deref()) {
+                            Ok(text) => (text, engine.model_name.clone(), "cpu".to_string()),
+                            Err(e) => {
+                                eprintln!("transcribe failed: {e}");
+                                return Outcome::Error;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let Some(transcriber) = engine.transcriber.as_ref() else {
+                    eprintln!("transcribe skipped: model not ready");
+                    return Outcome::Model;
+                };
+                match transcriber.transcribe(&audio16, 1, vocab.as_deref()) {
+                    Ok(text) => (text, engine.model_name.clone(), "cpu".to_string()),
+                    Err(e) => {
+                        eprintln!("transcribe failed: {e}");
+                        return Outcome::Error;
+                    }
                 }
             }
         };
+        if engine_flipped {
+            // chip: GPU -> CPU, immediately (after releasing the lock)
+            push_panel(&app, "tiroSetEngine", engine_dict(&ctx));
+        }
         // STATE-2: a cancel issued during transcription aborts before copy/write.
         if ctx.cancel_xscribe.load(Ordering::SeqCst)
             || ctx.session.load(Ordering::SeqCst) != session

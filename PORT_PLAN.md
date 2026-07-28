@@ -86,7 +86,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
   EOF-exit orphan safety (PORTING_NOTES §6 — read POWER_AND_DGPU.md in the
   original first; the main process must NEVER initialize a GPU context).
   Feature-gate so plain `cargo build` works without the Vulkan SDK.
-- [ ] **3.5 Device orchestration.** `resolve_target()` semantics (auto/cpu/gpu,
+- [x] **3.5 Device orchestration.** `resolve_target()` semantics (auto/cpu/gpu,
   600 s failure latch + re-probe), power-flip handling (kill worker BEFORE CPU
   load on AC→battery), GPU-crash → CPU retry of the same audio, engine chip
   truthfulness, beam 5 on GPU / 1 on CPU.
