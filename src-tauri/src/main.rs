@@ -37,6 +37,22 @@ fn stderr_to_log() {
 }
 
 fn main() {
+    // KDE-taskbar fix, and it must run before anything touches GTK: the GTK
+    // Wayland backend has no concept of skip-taskbar / taskhint (xdg-shell
+    // offers no such state), so tao's skipTaskbar — and several other window
+    // hints — are silently dropped and both frameless windows show up as
+    // regular apps in the Plasma task switcher. Under X11/XWayland the
+    // _NET_WM_STATE_SKIP_TASKBAR hint exists and KWin honors it, so on a
+    // Wayland session we steer GDK to the X11 backend — but only when
+    // XWayland is actually there (DISPLAY set) and the user hasn't chosen a
+    // backend themselves.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("GDK_BACKEND").is_none()
+    {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
     #[cfg(not(debug_assertions))]
     stderr_to_log();
     // CLI subcommands run headless, before any window/GPU machinery exists.
