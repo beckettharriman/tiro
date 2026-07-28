@@ -11,7 +11,9 @@
 //!   portal's virtual keyboard is the only injection path that works
 //!   everywhere. The portal shows a one-time permission dialog; the restore
 //!   token it hands back is persisted (config `portal_restore_token`) so the
-//!   dialog never repeats.
+//!   dialog never repeats. The portal session is strictly per-paste: created,
+//!   used for one chord, and explicitly closed before returning — success or
+//!   failure — so the desktop's "remote control" indicator never lingers.
 //!
 //! THE classic bug of paste-key tools: the user's physical Ctrl+Alt+V is
 //! still held when the hotkey fires, so a naive synthetic V lands as
@@ -288,7 +290,7 @@ mod x11_impl {
 #[cfg(target_os = "linux")]
 mod portal_impl {
     use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
-    use ashpd::desktop::PersistMode;
+    use ashpd::desktop::{PersistMode, Session};
 
     // Linux evdev keycodes (input-event-codes.h) — what NotifyKeyboardKeycode
     // speaks.
@@ -311,14 +313,43 @@ mod portal_impl {
             .map_err(|e| format!("RemoteDesktop portal: {e}"))
     }
 
+    /// Strict per-paste portal lifecycle: create session → start → inject →
+    /// close. Nothing about the session outlives this call.
+    ///
+    /// The close MUST be explicit: ashpd's `Session` is a plain D-Bus proxy
+    /// with no Drop hook, and ashpd keeps its zbus connection in a
+    /// process-global static, so a session that is merely dropped stays alive
+    /// (and keeps the desktop's "remote control" indicator lit) until the
+    /// whole process exits. Only the `Close` call ends it — which is why the
+    /// session is closed here on EVERY exit path, error or success.
     async fn paste_async(restore_token: &str) -> Result<Option<String>, ashpd::Error> {
-        use ashpd::desktop::remote_desktop::{SelectDevicesOptions, StartOptions};
         use ashpd::desktop::CreateSessionOptions;
 
         let proxy = RemoteDesktop::new().await?;
         let session = proxy
             .create_session(CreateSessionOptions::default())
             .await?;
+        // From here on a live portal session exists on the bus: whatever
+        // start_and_inject does, close the session before returning.
+        let result = start_and_inject(&proxy, &session, restore_token).await;
+        if let Err(e) = session.close().await {
+            // A failed Close usually means the compositor already tore the
+            // session down; there is no further handle to act on either way.
+            eprintln!("inject: portal session close failed: {e}");
+        }
+        result
+    }
+
+    /// Everything that happens inside a live portal session. Split out so
+    /// `paste_async` can close the session on every arm with one `?`-free
+    /// spot; each `?` in here unwinds to that close.
+    async fn start_and_inject(
+        proxy: &RemoteDesktop,
+        session: &Session<RemoteDesktop>,
+        restore_token: &str,
+    ) -> Result<Option<String>, ashpd::Error> {
+        use ashpd::desktop::remote_desktop::{SelectDevicesOptions, StartOptions};
+
         let token = if restore_token.is_empty() {
             None
         } else {
@@ -326,7 +357,7 @@ mod portal_impl {
         };
         proxy
             .select_devices(
-                &session,
+                session,
                 SelectDevicesOptions::default()
                     .set_devices(ashpd::enumflags2::BitFlags::from(DeviceType::Keyboard))
                     .set_persist_mode(PersistMode::ExplicitlyRevoked)
@@ -337,7 +368,7 @@ mod portal_impl {
         // With a valid restore token this resolves silently; without one the
         // desktop shows the one-time permission dialog here.
         let devices = proxy
-            .start(&session, None, StartOptions::default())
+            .start(session, None, StartOptions::default())
             .await?
             .response()?;
         let new_token = devices.restore_token().map(ToOwned::to_owned);
@@ -351,7 +382,7 @@ mod portal_impl {
         // plain thread sleep is safe and avoids a direct tokio dependency.)
         std::thread::sleep(std::time::Duration::from_millis(super::SETTLE_MS + 30));
         let key = |code: i32, state: KeyState| {
-            proxy.notify_keyboard_keycode(&session, code, state, Default::default())
+            proxy.notify_keyboard_keycode(session, code, state, Default::default())
         };
         for stray in [
             KEY_LEFTALT,
@@ -369,7 +400,6 @@ mod portal_impl {
         key(KEY_V, KeyState::Pressed).await?;
         key(KEY_V, KeyState::Released).await?;
         key(KEY_LEFTCTRL, KeyState::Released).await?;
-        session.close().await?;
         Ok(new_token)
     }
 }
