@@ -75,6 +75,10 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         // RemoteDesktop-portal restore token for paste injection on Wayland
         // (set after the user approves the one-time permission dialog).
         ("portal_restore_token", String::new()),
+        // Last on-screen panel position as "x,y" (physical px), so the panel
+        // reopens where the user left it across restarts. Empty = never
+        // placed -> centered on first show.
+        ("panel_pos", String::new()),
     ]
 }
 
@@ -233,6 +237,7 @@ mod tests {
         assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
         assert_eq!(cfg.get("cancel_hotkey"), "ctrl+alt+x");
         assert_eq!(cfg.get("portal_restore_token"), "");
+        assert_eq!(cfg.get("panel_pos"), "", "no remembered position yet");
         assert_eq!(cfg.get("device"), "auto");
         assert_eq!(cfg.get("compute_type"), "int8");
         assert_eq!(cfg.get("model_battery"), "base.en");
@@ -429,6 +434,23 @@ mod tests {
         let cfg = ConfigStore::load(path, dir.path());
         assert_eq!(cfg.get("panel_hotkey"), "ctrl+alt+c");
         assert_eq!(cfg.get("paste_hotkey"), "ctrl+alt+v");
+    }
+
+    #[test]
+    fn panel_pos_round_trips_and_backfills() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = load_in(&dir);
+        cfg.set("panel_pos", "640,-128");
+        drop(cfg);
+        let cfg = load_in(&dir);
+        assert_eq!(cfg.get("panel_pos"), "640,-128");
+        let raw = fs::read_to_string(cfg.path()).unwrap();
+        assert!(raw.contains("panel_pos = 640,-128"), "persisted: {raw}");
+        // a pre-panel_pos file gets the key backfilled empty
+        let path = dir.path().join("old.ini");
+        fs::write(&path, "[general]\ntheme = light\n").unwrap();
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("panel_pos"), "", "backfilled to unset");
     }
 
     #[test]

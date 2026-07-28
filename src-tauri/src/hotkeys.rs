@@ -1,13 +1,24 @@
 //! Global hotkeys, ported from the original's RegisterHotKey listener:
-//! the three configured combos dispatch to toggle/panel/cancel, a repeat
-//! press of an action still running is dropped (no pile-up / double-toggle),
-//! and `register_all` re-registers live after a rebind (`_request_rebind`).
+//! the configured combos dispatch to toggle/paste/panel/cancel, a repeat
+//! press of dictate/paste/cancel still running is dropped (no pile-up /
+//! double-toggle), and `register_all` re-registers live after a rebind
+//! (`_request_rebind`).
+//!
+//! The PANEL action deliberately bypasses that drop-guard: dropping a repeat
+//! press is right for the recording actions but would eat the second press
+//! of a rapid open-close. Panel presses queue to a dedicated worker that
+//! coalesces a burst to its net intent and applies the window op
+//! immediately — nothing slow (mic enumeration, fs probes) ever runs before
+//! the map/unmap; the fresh state snapshot follows asynchronously.
 //!
 //! Registration goes through tauri-plugin-global-shortcut (Win32 on Windows,
 //! X11 on Linux — the Wayland portal story is task 4.3).
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -218,7 +229,15 @@ fn dictate_event(app: &AppHandle, state: ShortcutState) {
 /// `_dispatch_hotkey`: run the action OFF the listener thread; drop a repeat
 /// press of the same action while the prior one is still running. The tray
 /// reuses this (the original's `_tray_dispatch` had the same shape).
+///
+/// The panel is the exception: its presses must NEVER be dropped (a rapid
+/// open-close relies on every press landing), so they go to the panel
+/// worker's queue instead of the inflight guard.
 pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
+    if which == "panel" {
+        panel_request(app, PanelCmd::Toggle);
+        return;
+    }
     {
         let mut set = inflight().lock().unwrap_or_else(|e| e.into_inner());
         if !set.insert(which) {
@@ -231,7 +250,6 @@ pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
         match which {
             "dictate" => flow::toggle_record(&app),
             "paste" => flow::paste_take(&app),
-            "panel" => toggle_panel(&app),
             "cancel" => flow::cancel_record(&app),
             _ => {}
         }
@@ -242,59 +260,178 @@ pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
     });
 }
 
-/// `toggle_panel`: hide the panel if visible, else re-render it from a fresh
-/// snapshot and summon it. (Tauri reports visibility reliably, so no manual
-/// tracking like pywebview needed; centering-on-summon joins in task 2.4.)
-///
-/// GTK window operations are only safe on the main thread, and hotkey
-/// dispatch runs on a worker — so the state snapshot (slow: mic enumeration)
-/// is computed here and the window ops are handed to the main thread.
-pub fn toggle_panel(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("panel") else {
-        return;
-    };
-    if w.is_visible().unwrap_or(false) {
-        let app = app.clone();
-        let _ = app.clone().run_on_main_thread(move || {
-            if let Some(w) = app.get_webview_window("panel") {
-                let _ = w.hide();
+// ---- panel toggling --------------------------------------------------------
+//
+// The press path must be INSTANT: the map/unmap happens on the main thread
+// with nothing slow in front of it. The full `get_state` snapshot (mic
+// enumeration via cpal, log-dir probe, today's transcript read — easily a
+// second) is computed AFTERWARDS on a worker and pushed via tiroApplyState;
+// until it lands the panel shows its last-known content. Presses are
+// serialized through a dedicated worker: each burst drains the queue and
+// coalesces to its net intent against the panel's REAL visibility, so
+// press-press ends hidden, press-press-press ends visible, and no press is
+// ever dropped or double-applied.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PanelCmd {
+    /// Hotkey / tray click: flip visibility.
+    Toggle,
+    /// Second launch: always end visible and in front, never hide.
+    Summon,
+}
+
+/// The net effect of a burst of queued panel commands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct PanelPlan {
+    /// Some(true) = show, Some(false) = hide, None = leave the map alone.
+    map: Option<bool>,
+    /// Raise + focus afterwards (only ever set when the plan ends visible).
+    front: bool,
+}
+
+/// Fold a burst of commands into one plan, starting from the panel's actual
+/// visibility. Every press flips the intended state in order, so e.g.
+/// hidden + press-press coalesces to "stay hidden" (open-then-close, net
+/// nothing) and press-press-press to a single show.
+fn coalesce(visible: bool, cmds: &[PanelCmd]) -> PanelPlan {
+    let mut want = visible;
+    let mut front = false;
+    for cmd in cmds {
+        match cmd {
+            PanelCmd::Toggle => {
+                want = !want;
+                front = want;
             }
-        });
-    } else {
-        let state = api::get_state(app);
-        // Drift check BEFORE repositioning: a user drag since the last
-        // summon turns auto-centering off for good.
-        let moved = crate::placement::panel_moved(app);
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            flow::push_panel(&app2, "tiroApplyState", state);
-            if let Some(w) = app2.get_webview_window("panel") {
-                let _ = w.show();
+            PanelCmd::Summon => {
+                want = true;
+                front = true;
             }
-            if moved && crate::placement::pinned(&app2) {
-                if let Some(w) = app2.get_webview_window("panel") {
-                    let _ = w.set_always_on_top(true);
-                }
-            }
-        });
-        if !moved {
-            crate::placement::reposition_burst(app, "panel");
         }
-        crate::placement::summon_front(app);
     }
+    PanelPlan {
+        map: (want != visible).then_some(want),
+        front: front && want,
+    }
+}
+
+/// What the main-thread closure actually did, for the follow-ups.
+struct Applied {
+    shown: bool,
+    front: bool,
+}
+
+/// Main-thread only: read the real visibility, coalesce the burst against
+/// it, and apply the map change. Nothing slow may run here — position math
+/// and set_position/show/hide only.
+fn apply_cmds(app: &AppHandle, cmds: &[PanelCmd]) -> Option<Applied> {
+    let w = app.get_webview_window("panel")?;
+    let visible = w.is_visible().unwrap_or(false);
+    let plan = coalesce(visible, cmds);
+    let mut shown = false;
+    match plan.map {
+        Some(true) => {
+            // Place BEFORE mapping (remembered spot, else centered) so the
+            // panel appears where it belongs instead of jumping there; the
+            // reposition burst afterwards wins any race with the WM.
+            crate::placement::position(app, "panel");
+            let _ = w.show();
+            shown = true;
+        }
+        Some(false) => {
+            // Capture the position while the window is still mapped, then
+            // unmap. The config write happens on a worker.
+            crate::placement::remember_panel_now(app);
+            let _ = w.hide();
+        }
+        None => {}
+    }
+    Some(Applied {
+        shown,
+        front: plan.front,
+    })
+}
+
+fn panel_loop(app: AppHandle, rx: Receiver<PanelCmd>) {
+    while let Ok(first) = rx.recv() {
+        let mut cmds = vec![first];
+        while let Ok(more) = rx.try_recv() {
+            cmds.push(more);
+        }
+        let (ack_tx, ack_rx) = channel::<Option<Applied>>();
+        let a = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                let applied = apply_cmds(&a, &cmds);
+                let _ = ack_tx.send(applied);
+            })
+            .is_err()
+        {
+            continue;
+        }
+        // The window op is instant; waiting for it only serializes bursts —
+        // presses arriving meanwhile queue up and coalesce on the next pass
+        // against the visibility this op just established. The timeout keeps
+        // a wedged main thread from deadlocking the panel forever.
+        let applied = match ack_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Some(applied)) => applied,
+            _ => continue,
+        };
+        if applied.shown {
+            crate::placement::reposition_burst(&app, "panel");
+            refresh_panel_state(&app);
+        }
+        if applied.front {
+            crate::placement::summon_front(&app);
+        }
+    }
+}
+
+fn panel_sender(app: &AppHandle) -> &'static Mutex<Sender<PanelCmd>> {
+    static TX: OnceLock<Mutex<Sender<PanelCmd>>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = channel::<PanelCmd>();
+        let app = app.clone();
+        std::thread::spawn(move || panel_loop(app, rx));
+        Mutex::new(tx)
+    })
+}
+
+/// Queue a panel command. Instant (a channel send) — safe from the shortcut
+/// listener, the tray handler, and the single-instance callback alike.
+pub(crate) fn panel_request(app: &AppHandle, cmd: PanelCmd) {
+    let _ = lock(panel_sender(app)).send(cmd);
+}
+
+/// Compute a fresh `get_state` snapshot OFF the press path and push it to
+/// the just-shown panel (which re-renders on `tiroApplyState`). Generation-
+/// stamped: only the latest requested snapshot may apply, so a slow one
+/// computed for an older show can never clobber the panel after a newer
+/// hide→show cycle. The push mutex makes check-and-eval atomic — a stale
+/// eval can never be issued after a fresh one.
+fn refresh_panel_state(app: &AppHandle) {
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    static PUSH: Mutex<()> = Mutex::new(());
+    let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = api::get_state(&app); // slow: mic enumeration, fs probes
+        let _guard = PUSH.lock().unwrap_or_else(|e| e.into_inner());
+        if GEN.load(Ordering::SeqCst) == gen {
+            flow::push_panel(&app, "tiroApplyState", state);
+        }
+    });
+}
+
+/// `toggle_panel`: flip the panel's visibility NOW — the window op runs with
+/// nothing slow in front of it; the fresh state snapshot follows.
+pub fn toggle_panel(app: &AppHandle) {
+    panel_request(app, PanelCmd::Toggle);
 }
 
 /// Summon (never hide): a second app launch must always end with the panel
 /// visible and in front.
 pub fn summon_panel(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("panel") else {
-        return;
-    };
-    if w.is_visible().unwrap_or(false) {
-        crate::placement::summon_front(app);
-    } else {
-        toggle_panel(app);
-    }
+    panel_request(app, PanelCmd::Summon);
 }
 
 /// ERRORS-10: the panel hotkey is the only way into an otherwise-invisible
@@ -316,6 +453,10 @@ fn panel_hotkey_warning(app: &AppHandle, hk: &str) {
 /// `_register_all_hotkeys`: (re)register every configured hotkey; an
 /// unmappable or conflicting one is skipped with a log, never a crash.
 pub fn register_all(app: &AppHandle) {
+    // Piggyback on the startup registration pass: seed the panel's
+    // remembered position from config and start move-tracking (idempotent —
+    // rebind passes are no-ops).
+    crate::placement::init_panel_tracking(app);
     let gs = app.global_shortcut();
     if let Err(e) = gs.unregister_all() {
         eprintln!("hotkey unregister_all failed: {e}");
@@ -410,5 +551,130 @@ mod tests {
         assert_eq!(to_accelerator("ctrl+alt"), None, "no non-modifier key");
         assert_eq!(to_accelerator("ctrl+bogus"), None);
         assert_eq!(to_accelerator("ctrl+f25"), None);
+    }
+
+    use PanelCmd::{Summon, Toggle};
+
+    fn plan(visible: bool, cmds: &[PanelCmd]) -> PanelPlan {
+        coalesce(visible, cmds)
+    }
+
+    #[test]
+    fn single_press_toggles_each_way() {
+        assert_eq!(
+            plan(false, &[Toggle]),
+            PanelPlan {
+                map: Some(true),
+                front: true
+            },
+            "hidden + press = show and bring to front"
+        );
+        assert_eq!(
+            plan(true, &[Toggle]),
+            PanelPlan {
+                map: Some(false),
+                front: false
+            },
+            "visible + press = hide, no raise"
+        );
+    }
+
+    #[test]
+    fn rapid_presses_coalesce_to_net_intent() {
+        // press-press from hidden: open-then-close, net nothing, ends hidden
+        assert_eq!(
+            plan(false, &[Toggle, Toggle]),
+            PanelPlan {
+                map: None,
+                front: false
+            }
+        );
+        // press-press-press from hidden ends visible (one show, one raise)
+        assert_eq!(
+            plan(false, &[Toggle, Toggle, Toggle]),
+            PanelPlan {
+                map: Some(true),
+                front: true
+            }
+        );
+        // press-press from visible: close-then-open — no map change, but the
+        // panel ends (stays) visible and is raised
+        assert_eq!(
+            plan(true, &[Toggle, Toggle]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+        // four presses from visible: even parity, ends (stays) visible and
+        // raised because the last press turned it back on
+        assert_eq!(
+            plan(true, &[Toggle, Toggle, Toggle, Toggle]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+        // odd parity from visible ends hidden
+        assert_eq!(
+            plan(true, &[Toggle, Toggle, Toggle]),
+            PanelPlan {
+                map: Some(false),
+                front: false
+            }
+        );
+    }
+
+    #[test]
+    fn summon_always_ends_visible_and_in_front() {
+        assert_eq!(
+            plan(false, &[Summon]),
+            PanelPlan {
+                map: Some(true),
+                front: true
+            }
+        );
+        assert_eq!(
+            plan(true, &[Summon]),
+            PanelPlan {
+                map: None,
+                front: true
+            },
+            "already visible: raise only, never re-map"
+        );
+        // a toggle after a summon still wins — strict press order
+        assert_eq!(
+            plan(true, &[Summon, Toggle]),
+            PanelPlan {
+                map: Some(false),
+                front: false
+            }
+        );
+        // and a summon after a hide-toggle rescues visibility
+        assert_eq!(
+            plan(true, &[Toggle, Summon]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+    }
+
+    #[test]
+    fn empty_burst_is_a_noop() {
+        assert_eq!(
+            plan(true, &[]),
+            PanelPlan {
+                map: None,
+                front: false
+            }
+        );
+        assert_eq!(
+            plan(false, &[]),
+            PanelPlan {
+                map: None,
+                front: false
+            }
+        );
     }
 }
