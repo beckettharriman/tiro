@@ -241,3 +241,8 @@ from the original in these ways:
 - **Tray**: the Windows icon lands in the taskbar overflow flyout by
   default (OS behavior); Explorer-restart re-add is handled by the tray
   library rather than a hand-rolled TaskbarCreated hook.
+- **Pill window height** is 300x88 (not the original 300x72): the pill layout
+  (44 px pill + 38 px bottom dock inset) needs 82 px, so the original clipped
+  the pill's top 10 px — a latent bug there. The extra height is transparent
+  headroom; the pill's on-screen position and size are unchanged (placement
+  anchors the window's bottom edge).
