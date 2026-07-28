@@ -375,6 +375,7 @@ pub fn get_state(app: &AppHandle) -> Value {
             "smartVocab": cfg.get_bool("use_vocab_bias"),
             "micName": resolve_mic_name(&cfg),
             "launchAtLogin": launch_at_login_enabled(app),
+            "saveTranscripts": cfg.get_bool("save_transcripts"),
             "savePath": cfg.get("vault_dir"),
             "transparency": clamp_int_str(&cfg.get("panel_transparency"), 0, 100, 45),
             "storageFallback": !is_vault,
@@ -472,6 +473,10 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                 if truthy(value) { "true" } else { "false" },
             ),
             "micName" => cfg.set("mic_name", &as_cfg_str(value)),
+            "saveTranscripts" => cfg.set(
+                "save_transcripts",
+                if truthy(value) { "true" } else { "false" },
+            ),
             "transparency" => {
                 cfg.set(
                     "panel_transparency",

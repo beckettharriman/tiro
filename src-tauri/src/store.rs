@@ -61,7 +61,9 @@ fn append(path: &PathBuf, content: &str) -> std::io::Result<()> {
 
 /// `write_log`: append the take to today's JSONL and Markdown files. File
 /// write failures are logged and swallowed (the clipboard already has the
-/// text); the record is returned either way for the panel push.
+/// text); the record is returned either way for the panel push. With
+/// `save_transcripts = false` no file is touched at all — the record is
+/// still returned so the panel shows the take for the current session.
 pub fn write_log(
     cfg: &ConfigStore,
     verbatim: &str,
@@ -85,7 +87,6 @@ fn write_log_at(
     secs: f64,
     now: DateTime<Local>,
 ) -> Result<(bool, Rec), String> {
-    let (base, is_vault) = log_dir(cfg)?;
     let day = now.format("%Y-%m-%d").to_string();
     let rec = Rec {
         ts: now.format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -96,6 +97,12 @@ fn write_log_at(
         device: device.to_string(),
         secs: (secs * 100.0).round() / 100.0,
     };
+    if !cfg.get_bool("save_transcripts") {
+        // Saving is off: no file (or directory) is created or appended; the
+        // record still feeds the in-session panel history and clipboard flow.
+        return Ok((true, rec));
+    }
+    let (base, is_vault) = log_dir(cfg)?;
     let result = (|| -> std::io::Result<()> {
         let mut line = serde_json::to_string(&rec).map_err(std::io::Error::other)?;
         line.push('\n');
@@ -268,6 +275,41 @@ mod tests {
              refine-transcript pipeline cleans this later). One line per utterance.\n\n\
              - **09:05** — first take\n- **09:06** — second take\n"
         );
+    }
+
+    #[test]
+    fn save_transcripts_off_writes_no_files_but_returns_record() {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = cfg_in(&dir);
+        cfg.set("save_transcripts", "false");
+        let (is_vault, rec) = write_log_at(
+            &cfg,
+            "unsaved take",
+            "Unsaved take.",
+            "Mic A",
+            "base.en",
+            "cpu",
+            4.5,
+            at(15, 42, 7),
+        )
+        .unwrap();
+        assert!(is_vault, "no fallback banner while saving is off");
+        assert_eq!(rec.text, "unsaved take", "record still returned");
+        assert_eq!(rec.clean, "Unsaved take.");
+        assert!(
+            !dir.path().join("vault").exists(),
+            "vault dir must not be created"
+        );
+        assert!(
+            !dir.path().join("logs").exists(),
+            "fallback dir must not be created"
+        );
+        assert!(read_today_entries(&cfg, 200).is_empty());
+        // Flipping back on resumes normal file writes.
+        cfg.set("save_transcripts", "true");
+        write_log_at(&cfg, "saved take", "", "", "m", "cpu", 1.0, at(15, 43, 0)).unwrap();
+        assert!(dir.path().join("vault").join("2026-07-27.jsonl").exists());
+        assert!(dir.path().join("vault").join("2026-07-27.md").exists());
     }
 
     #[test]

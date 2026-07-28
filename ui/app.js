@@ -131,7 +131,7 @@
       soundCues: true, volume: 65, recordingPill: true,
       clipboardCleanup: "light", smartVocab: true,
       micName: "", launchAtLogin: true,
-      savePath: "", transparency: 45,
+      saveTranscripts: true, savePath: "", transparency: 45,
       storageFallback: false, storagePath: ""
     },
     engine: { model: "small.en", device: "GPU", power: "plugged" },
@@ -440,8 +440,12 @@
   }
 
   function selectControl(value, options, onChange) {
-    const sel = h("select", { class: "sel", onchange: (ev) => onChange(ev.target.value) },
-      options.map((o) => h("option", { value: o, selected: o === value ? "selected" : null, text: o })));
+    // title = current value so a name truncated by the ellipsis is still
+    // readable on hover (the native dropdown always shows full names).
+    const sel = h("select", {
+      class: "sel", title: value || null,
+      onchange: (ev) => { ev.target.title = ev.target.value; onChange(ev.target.value); }
+    }, options.map((o) => h("option", { value: o, selected: o === value ? "selected" : null, text: o })));
     return h("span", { class: "sel-wrap" }, [sel, Icon.UpDown("sel-chev")]);
   }
 
@@ -503,6 +507,10 @@
 
   function renderSettings() {
     const page = els.settingsPage;
+    // Rebuilding the DOM resets the body's scroll position — remember it so a
+    // re-render (e.g. after a set_setting ack) doesn't jump back to the top.
+    const prevBody = page.querySelector(".set-body");
+    const keepScroll = prevBody ? prevBody.scrollTop : 0;
     page.innerHTML = "";
     page.setAttribute("aria-hidden", App.view === "panel" ? "true" : "false");
     page.style.left = App.view === "settings" ? "0" : "100%";
@@ -577,10 +585,15 @@
     ], App.shortcutHint || null));
 
     /* STORAGE */
+    const saveOn = s.saveTranscripts !== false;
+    const pathRow = row("Save transcripts to",
+      h("span", { class: "path-val", text: s.savePath }),
+      h("button", { class: "btn-mini", text: "Change…", onclick: onChangePath }));
+    if (!saveOn) pathRow.classList.add("disabled");
     const storageRows = [
-      row("Save transcripts to",
-        h("span", { class: "path-val", text: s.savePath }),
-        h("button", { class: "btn-mini", text: "Change…", onclick: onChangePath }))
+      row("Save transcripts", "Write each take to the folder below",
+        switchControl(saveOn, (v) => setSetting("saveTranscripts", v))),
+      pathRow
     ];
     // Calm inline fallback banner — only when the vault dir was unwritable.
     if (s.storageFallback) {
@@ -608,6 +621,7 @@
     ]));
 
     page.appendChild(body);
+    body.scrollTop = keepScroll;
   }
 
   /* ════════════════════════════════════════════════════════════════════
@@ -635,24 +649,36 @@
   }
 
   function setSetting(key, value) {
-    // optimistic local update
+    // optimistic local update, painted immediately (renderSettings keeps the
+    // body's scroll position, so this never jumps the page)
     if (key === "theme") App.theme = value;
     else App.settings[key] = value;
+    renderSettings();
+    renderPanel();
 
     Promise.resolve(api.set_setting(key, value)).then((res) => {
-      if (!res) { renderSettings(); renderPanel(); return; }
-      if (res.engine) applyEngine(res.engine);
-      if (res.theme != null) App.theme = res.theme;
+      if (!res) return;
+      // Re-render only when the ack actually changed something beyond the
+      // optimistic update — not on every ack.
+      let dirty = false;
+      if (res.engine && (res.engine.model !== App.engine.model ||
+          res.engine.device !== App.engine.device ||
+          res.engine.power !== App.engine.power)) {
+        applyEngine(res.engine);
+        dirty = true;
+      }
+      if (res.theme != null && res.theme !== App.theme) { App.theme = res.theme; dirty = true; }
       if (res.effectiveTheme) applyTheme(res.effectiveTheme);
-      if (res.launchAtLogin != null) App.settings.launchAtLogin = res.launchAtLogin;
-      renderSettings();
-      renderPanel();
+      if (res.launchAtLogin != null && res.launchAtLogin !== App.settings.launchAtLogin) {
+        App.settings.launchAtLogin = res.launchAtLogin;
+        dirty = true;
+      }
+      if (dirty) { renderSettings(); renderPanel(); }
     }).catch(() => { renderSettings(); renderPanel(); });
   }
 
   function onMicChange(name) {
-    App.settings.micName = name;
-    renderPanel();
+    // setSetting repaints both pages, so no extra render needed here.
     setSetting("micName", name);
   }
 

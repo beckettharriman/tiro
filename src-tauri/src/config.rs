@@ -69,6 +69,7 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("panel_transparency", "45".into()),
         ("vault_dir", vault.to_string_lossy().into_owned()),
         ("fallback_dir", fallback.to_string_lossy().into_owned()),
+        ("save_transcripts", "true".into()),
         ("auto_restart", "true".into()),
     ]
 }
@@ -227,9 +228,20 @@ mod tests {
         assert!(cfg
             .get("vault_dir")
             .ends_with(&format!("Documents{}Tiro", std::path::MAIN_SEPARATOR)));
-        for key in ["beeps", "pill", "use_vocab_bias", "auto_restart"] {
+        for key in [
+            "beeps",
+            "pill",
+            "use_vocab_bias",
+            "save_transcripts",
+            "auto_restart",
+        ] {
             assert!(cfg.get_bool(key), "{key} should default to true");
         }
+        let raw = fs::read_to_string(cfg.path()).unwrap();
+        assert!(
+            raw.contains("save_transcripts = true"),
+            "fresh config.ini carries save_transcripts: {raw}"
+        );
     }
 
     #[test]
@@ -238,10 +250,12 @@ mod tests {
         let mut cfg = load_in(&dir);
         cfg.set("theme", "dark");
         cfg.set("mic_name", "USB Microphone");
+        cfg.set("save_transcripts", "false");
         drop(cfg);
         let cfg = load_in(&dir);
         assert_eq!(cfg.get("theme"), "dark");
         assert_eq!(cfg.get("mic_name"), "USB Microphone");
+        assert!(!cfg.get_bool("save_transcripts"));
         assert_eq!(cfg.get("model_battery"), "base.en", "other keys untouched");
     }
 
