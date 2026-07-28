@@ -100,7 +100,7 @@ side and the hard platform corners.)
 - [x] **4.1 Windows build.** Pull the repo in the Windows clone
   (`C:\Users\becke\tiro`), get `cargo build` + `cargo tauri dev` green there.
   Fix portability fallout. Document build prerequisites for both OSes.
-- [ ] **4.2 Windows runtime parity.** On Windows: hotkeys, tray, transparent
+- [x] **4.2 Windows runtime parity.** On Windows: hotkeys, tray, transparent
   frameless windows, taskbar suppression, audio capture, clipboard, power
   detection, autostart — all verified against PORTING_NOTES.
 - [ ] **4.3 Hotkeys on Wayland.** Global shortcuts work on X11/WSLg today;

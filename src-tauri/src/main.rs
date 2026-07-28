@@ -15,6 +15,16 @@ fn main() {
         tiro_lib::cues::cue_test();
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--copy-test") {
+        match args.get(i + 1) {
+            Some(text) => match tiro_lib::clipboard::copy(text) {
+                Ok(()) => eprintln!("copied {} chars to the clipboard", text.chars().count()),
+                Err(e) => eprintln!("clipboard copy failed: {e}"),
+            },
+            None => eprintln!("usage: tiro --copy-test <text>"),
+        }
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--gpu-test") {
         match args.get(i + 1) {
             Some(wav) => {
