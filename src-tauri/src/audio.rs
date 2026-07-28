@@ -24,6 +24,23 @@ pub const MIN_TAKE_SECS: f64 = 0.3;
 /// The original tried the device's native rate first, then this chain.
 const FALLBACK_RATES: [u32; 3] = [48_000, 44_100, 16_000];
 
+/// Hard ceiling on a single take: 10 minutes of audio at the capture rate.
+/// A misbehaving device can deliver samples far faster than realtime (ALSA's
+/// `null` PCM produced ~45 minutes of zeros in 2 s of wall time); without a
+/// cap the buffer grows without bound and transcription of the resulting
+/// take grinds for tens of minutes, which reads as a wedged UI. Real
+/// dictation never approaches 10 minutes per take.
+pub const MAX_TAKE_SECS: usize = 600;
+
+/// ALSA's `null` PCM is a bit bucket, not a microphone: it opens happily and
+/// generates zero samples (far faster than realtime), so it must never be
+/// listed in the mic selector or picked as a capture device. Matched by its
+/// raw PCM id (`driver` on the ALSA host) and by its stock description text;
+/// neither occurs on other hosts, so this is a no-op on Windows/WASAPI.
+fn is_null_device(name: &str, driver: Option<&str>) -> bool {
+    driver == Some("null") || name.starts_with("Discard all samples")
+}
+
 fn default_rate(device: &Device) -> u32 {
     device
         .default_input_config()
@@ -38,6 +55,9 @@ pub fn list_mic_names() -> Vec<String> {
     if let Ok(devices) = host.input_devices() {
         for device in devices {
             if let Ok(desc) = device.description() {
+                if is_null_device(desc.name(), desc.driver()) {
+                    continue;
+                }
                 let name = desc.name().to_string();
                 if !names.contains(&name) {
                     names.push(name);
@@ -49,43 +69,87 @@ pub fn list_mic_names() -> Vec<String> {
 }
 
 /// Matching input devices ordered by preference: case-insensitive substring
-/// match on `name_substr`; no matches (or empty substring) falls back to
-/// every input device, and an empty enumeration to the host default.
+/// match on `name_substr`. An empty substring (fresh install) — or one that
+/// matches nothing — prefers the host DEFAULT input device: on ALSA that is
+/// the `default` PCM, which follows the desktop's (PipeWire's) configured
+/// default source; on WASAPI it is the OS default input. The remaining input
+/// devices follow as fallbacks, in enumeration order. The ALSA null device
+/// is filtered out entirely (see `is_null_device`) — previously it sat first
+/// in enumeration order and won the "first device that opens" walk.
 fn candidates(name_substr: &str) -> Vec<(Device, String, u32)> {
     let host = cpal::default_host();
-    let collect = |require_name: bool| -> Vec<(Device, String, u32)> {
-        let Ok(devices) = host.input_devices() else {
-            return Vec::new();
-        };
-        devices
-            .filter_map(|device| {
-                let name = device.description().ok()?.name().to_string();
-                if require_name
-                    && !name_substr.is_empty()
-                    && !name.to_lowercase().contains(&name_substr.to_lowercase())
-                {
-                    return None;
-                }
-                let rate = default_rate(&device);
-                Some((device, name, rate))
-            })
-            .collect()
-    };
-    let mut items = collect(!name_substr.is_empty());
-    if items.is_empty() {
-        items = collect(false);
+    let mut all: Vec<(Device, String, u32)> = host
+        .input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|device| {
+                    let desc = device.description().ok()?;
+                    if is_null_device(desc.name(), desc.driver()) {
+                        return None;
+                    }
+                    let name = desc.name().to_string();
+                    let rate = default_rate(&device);
+                    Some((device, name, rate))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !name_substr.is_empty() {
+        let needle = name_substr.to_lowercase();
+        let (matched, rest): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|(_, name, _)| name.to_lowercase().contains(&needle));
+        if !matched.is_empty() {
+            return matched;
+        }
+        all = rest;
     }
-    if items.is_empty() {
-        if let Some(device) = host.default_input_device() {
-            let rate = default_rate(&device);
-            let name = device
-                .description()
+    let mut items: Vec<(Device, String, u32)> = Vec::new();
+    if let Some(device) = host.default_input_device() {
+        let desc = device.description().ok();
+        let null = desc
+            .as_ref()
+            .is_some_and(|d| is_null_device(d.name(), d.driver()));
+        if !null {
+            let name = desc
                 .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "system default".to_string());
+                .unwrap_or_else(|| "system default".to_string());
+            let rate = default_rate(&device);
             items.push((device, name, rate));
         }
     }
+    let default_id = items.first().and_then(|(d, _, _)| d.id().ok());
+    for item in all {
+        if default_id.is_some() && item.0.id().ok() == default_id {
+            continue; // already first as the host default
+        }
+        items.push(item);
+    }
     items
+}
+
+/// Downmix `data` (interleaved, `channels`-wide frames) to mono and append
+/// it to `buf`, never growing `buf` past `max_samples` (the `MAX_TAKE_SECS`
+/// cap at the capture rate). Returns true when the cap dropped any input.
+/// Called from the realtime callback: no allocation beyond the amortized
+/// `Vec` growth the uncapped path already did.
+fn append_capped(buf: &mut Vec<f32>, data: &[f32], channels: u16, max_samples: usize) -> bool {
+    let remaining = max_samples.saturating_sub(buf.len());
+    if channels <= 1 {
+        let n = data.len().min(remaining);
+        buf.extend_from_slice(&data[..n]);
+        n < data.len()
+    } else {
+        let ch = usize::from(channels);
+        let frames = data.len() / ch;
+        let n = frames.min(remaining);
+        buf.extend(
+            data.chunks_exact(ch)
+                .take(n)
+                .map(|frame| frame.iter().sum::<f32>() / ch as f32),
+        );
+        n < frames
+    }
 }
 
 /// `resample_to_16k`: the original's np.interp linear resampler. Sample j of
@@ -190,6 +254,7 @@ impl Recording {
                 vec![1, native_channels]
             }
         };
+        let max_samples = rate as usize * MAX_TAKE_SECS;
         let mut last_err = String::new();
         for channels in channel_counts {
             let config = StreamConfig {
@@ -199,6 +264,7 @@ impl Recording {
             };
             let frames_cb = Arc::clone(&frames);
             let recording_cb = Arc::clone(&recording);
+            let mut capped = false; // log the cap once per stream
             let built = device.build_input_stream(
                 config,
                 move |data: &[f32], _| {
@@ -206,13 +272,10 @@ impl Recording {
                         return;
                     }
                     let mut buf = frames_cb.lock().unwrap_or_else(|e| e.into_inner());
-                    if channels == 1 {
-                        buf.extend_from_slice(data);
-                    } else {
-                        let ch = usize::from(channels);
-                        buf.extend(
-                            data.chunks_exact(ch)
-                                .map(|frame| frame.iter().sum::<f32>() / ch as f32),
+                    if append_capped(&mut buf, data, channels, max_samples) && !capped {
+                        capped = true;
+                        eprintln!(
+                            "take capped at {MAX_TAKE_SECS} s of audio; dropping further samples"
                         );
                     }
                 },
@@ -326,6 +389,64 @@ mod tests {
     #[test]
     fn resample_of_empty_is_empty() {
         assert!(resample_to_16k(&[], 48_000).is_empty());
+    }
+
+    #[test]
+    fn null_device_is_recognized() {
+        assert!(is_null_device(
+            "Discard all samples (playback) or generate zero samples (capture)",
+            Some("null"),
+        ));
+        assert!(
+            is_null_device("Discard all samples (playback)", None),
+            "description alone is enough"
+        );
+        assert!(
+            is_null_device("anything", Some("null")),
+            "raw PCM id alone is enough"
+        );
+        assert!(!is_null_device("PipeWire Sound Server", Some("pipewire")));
+        assert!(!is_null_device("MIC_TEST, USB Audio", None));
+        assert!(!is_null_device("Microphone (USB Audio)", Some("{0.0.1}")));
+    }
+
+    #[test]
+    fn append_capped_mono_under_cap() {
+        let mut buf = vec![0.5f32; 3];
+        assert!(!append_capped(&mut buf, &[1.0, 2.0], 1, 10));
+        assert_eq!(buf, vec![0.5, 0.5, 0.5, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn append_capped_mono_stops_at_cap() {
+        let mut buf = vec![0.0f32; 8];
+        assert!(append_capped(&mut buf, &[1.0, 2.0, 3.0], 1, 10));
+        assert_eq!(buf.len(), 10);
+        assert_eq!(&buf[8..], &[1.0, 2.0]);
+        // once full, further data is dropped entirely and still reported
+        assert!(append_capped(&mut buf, &[4.0], 1, 10));
+        assert_eq!(buf.len(), 10);
+    }
+
+    #[test]
+    fn append_capped_downmixes_and_caps() {
+        let mut buf = Vec::new();
+        // stereo frames [1,3] [5,7] [9,11] -> mono 2, 6, 10; cap at 2 frames
+        assert!(append_capped(
+            &mut buf,
+            &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
+            2,
+            2
+        ));
+        assert_eq!(buf, vec![2.0, 6.0]);
+    }
+
+    #[test]
+    fn max_take_is_ten_minutes() {
+        assert_eq!(MAX_TAKE_SECS, 600);
+        // ~45 min of null-device output at 48 kHz would be capped to 10 min
+        let cap = 48_000 * MAX_TAKE_SECS;
+        assert!(130_887_360 > cap);
     }
 
     #[test]
