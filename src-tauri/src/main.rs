@@ -36,7 +36,57 @@ fn stderr_to_log() {
     );
 }
 
+/// A panic must leave evidence: log its message + location to stderr (which
+/// release builds redirect to tiro.log), then hand off to the previous hook
+/// so the standard report — including a backtrace when RUST_BACKTRACE is
+/// set — still prints. Reads fd 2 at panic time, so it composes with
+/// `stderr_to_log` regardless of install order.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = payload_str(info.payload());
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_string());
+        eprintln!(
+            "PANIC {} at {loc}: {msg}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        previous(info);
+    }));
+}
+
+/// The panic payload as text: `panic!` carries a `&str` or `String`;
+/// anything else is opaque.
+fn payload_str(payload: &dyn std::any::Any) -> &str {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        "<non-string panic payload>"
+    }
+}
+
 fn main() {
+    // KDE-taskbar fix, and it must run before anything touches GTK: the GTK
+    // Wayland backend has no concept of skip-taskbar / taskhint (xdg-shell
+    // offers no such state), so tao's skipTaskbar — and several other window
+    // hints — are silently dropped and both frameless windows show up as
+    // regular apps in the Plasma task switcher. Under X11/XWayland the
+    // _NET_WM_STATE_SKIP_TASKBAR hint exists and KWin honors it, so on a
+    // Wayland session we steer GDK to the X11 backend — but only when
+    // XWayland is actually there (DISPLAY set) and the user hasn't chosen a
+    // backend themselves.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("GDK_BACKEND").is_none()
+    {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    install_panic_hook();
     #[cfg(not(debug_assertions))]
     stderr_to_log();
     // CLI subcommands run headless, before any window/GPU machinery exists.
@@ -104,4 +154,19 @@ fn main() {
         return;
     }
     tiro_lib::run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload_str;
+
+    #[test]
+    fn payload_str_covers_panic_shapes() {
+        let s: Box<dyn std::any::Any> = Box::new("boom");
+        assert_eq!(payload_str(s.as_ref()), "boom");
+        let s: Box<dyn std::any::Any> = Box::new(String::from("boom 42"));
+        assert_eq!(payload_str(s.as_ref()), "boom 42");
+        let s: Box<dyn std::any::Any> = Box::new(42_u32);
+        assert_eq!(payload_str(s.as_ref()), "<non-string panic payload>");
+    }
 }
