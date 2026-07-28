@@ -97,7 +97,7 @@ the original app at `C:\Users\becke\voice-clipboard` (read-only).
 continuously from Phase 0 onward. This phase closes the gaps on the other
 side and the hard platform corners.)
 
-- [ ] **4.1 Windows build.** Pull the repo in the Windows clone
+- [x] **4.1 Windows build.** Pull the repo in the Windows clone
   (`C:\Users\becke\tiro`), get `cargo build` + `cargo tauri dev` green there.
   Fix portability fallout. Document build prerequisites for both OSes.
 - [ ] **4.2 Windows runtime parity.** On Windows: hotkeys, tray, transparent
