@@ -638,8 +638,8 @@
     const s = App.settings;
     const engine = App.engine;
 
-    /* header */
-    page.appendChild(h("div", { class: "set-hd" }, [
+    /* header — drag handle, same rule as the main page (buttons still click) */
+    page.appendChild(h("div", { class: "set-hd", onmousedown: beginDrag }, [
       h("button", { class: "back", title: "Back to Tiro", onclick: onBack }, [Icon.Back(), "Tiro"]),
       h("span", { class: "set-title", text: "Settings" })
     ]));
@@ -751,9 +751,9 @@
         { value: "system", label: "Follow system" }
       ], (v) => setSetting("theme", v))),
       rowCol("Transparency", slider(transp, 0, 100,
-        (v) => persistTransparency(v),                 // commit on release
+        (v) => persistTransparency(v),                 // release (also fires per-tick on WebKit)
         Icon.Transparency(),
-        (v) => { App.settings.transparency = v; applyTransparency(v); }))  // live preview
+        (v) => persistTransparency(v)))                // live preview; write is debounced
     ]));
 
     /* SYSTEM */
@@ -783,10 +783,18 @@
     const op = 0.95 - 0.65 * (Math.max(0, Math.min(100, t)) / 100);
     document.documentElement.style.setProperty("--panel-alpha", op.toFixed(3));
   }
+  // The visual change applies immediately, but the config write is debounced:
+  // WebKit fires slider events on every tick of a drag, and each set_setting
+  // is an fsync'd file write — persisting per tick lags the whole system.
+  let transparencySaveTimer = null;
   function persistTransparency(t) {
     App.settings.transparency = t;
     applyTransparency(t);
-    Promise.resolve(api.set_setting("transparency", t)).catch(() => {});
+    if (transparencySaveTimer !== null) clearTimeout(transparencySaveTimer);
+    transparencySaveTimer = setTimeout(() => {
+      transparencySaveTimer = null;
+      Promise.resolve(api.set_setting("transparency", t)).catch(() => {});
+    }, 200);
   }
 
   function setSetting(key, value) {
