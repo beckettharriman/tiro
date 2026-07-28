@@ -229,7 +229,11 @@ pub fn parse_hotkey(hotkey: &str) -> bool {
 // ---- state helpers ---------------------------------------------------------
 
 /// `resolve_mic_name`: the stored substring resolved to the first matching
-/// full device name (fallback: first mic / stored value).
+/// entry of the CURRENT mic list — on Linux with PipeWire that is the
+/// pactl-fed list of real sources (default entry first), elsewhere the raw
+/// cpal names — so the dropdown selection round-trips. Fallbacks: no match
+/// selects the first entry (the default mic), an empty list keeps the
+/// stored value.
 pub fn resolve_mic_name(cfg: &ConfigStore) -> String {
     let cur = cfg.get("mic_name");
     let names = audio::list_mic_names();
