@@ -9,7 +9,7 @@
 //! host per platform (WASAPI on Windows, ALSA on Linux), so the default
 //! host already is that filter.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -185,6 +185,58 @@ pub fn too_short(samples: usize, rate: u32) -> bool {
     (samples as f64) < f64::from(rate) * MIN_TAKE_SECS
 }
 
+/// Live input level shared between the stream callback and the pill's
+/// level pusher. The callback folds each chunk's peak |sample| in with an
+/// atomic max on the f32 bit pattern — valid because peaks are
+/// non-negative, and for non-negative IEEE-754 floats the bit ordering
+/// matches the numeric ordering. Allocation-free and lock-free, so the
+/// audio callback stays cheap.
+pub struct LevelMeter(AtomicU32);
+
+impl LevelMeter {
+    pub fn new() -> Self {
+        Self(AtomicU32::new(0))
+    }
+
+    /// Fold a chunk's peak absolute sample into the meter.
+    pub fn fold(&self, samples: &[f32]) {
+        let mut peak = 0.0f32;
+        for &s in samples {
+            let a = s.abs();
+            if a > peak {
+                peak = a;
+            }
+        }
+        if peak > 0.0 {
+            self.0.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Read the peak accumulated since the last call, resetting it — each
+    /// poll reports the loudest moment of its own window, so a brief word
+    /// between polls still registers.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.0.swap(0, Ordering::Relaxed))
+    }
+}
+
+impl Default for LevelMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Map a raw peak (linear, 0..1) to a perceptual 0..1 meter value: dBFS
+/// with a -50 dB floor, so quiet speech (peaks around 0.03..0.1) still
+/// visibly moves the meter instead of hugging zero.
+pub fn perceptual_level(peak: f32) -> f32 {
+    if peak <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * peak.log10();
+    ((db + 50.0) / 50.0).clamp(0.0, 1.0)
+}
+
 #[derive(Debug)]
 pub struct AudioError(pub String);
 
@@ -201,6 +253,7 @@ pub struct Recording {
     stream: cpal::Stream,
     frames: Arc<Mutex<Vec<f32>>>,
     recording: Arc<AtomicBool>,
+    level: Arc<LevelMeter>,
     rate: u32,
     mic_name: String,
 }
@@ -241,6 +294,7 @@ impl Recording {
     fn open(device: &Device, name: &str, rate: u32) -> Result<Self, AudioError> {
         let frames = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recording = Arc::new(AtomicBool::new(true));
+        let level = Arc::new(LevelMeter::new());
         // Mono first, like the original; a device that refuses 1 channel is
         // captured at its native channel count and downmixed in the callback.
         let channel_counts = {
@@ -265,12 +319,15 @@ impl Recording {
             let frames_cb = Arc::clone(&frames);
             let recording_cb = Arc::clone(&recording);
             let mut capped = false; // log the cap once per stream
+            let level_cb = Arc::clone(&level);
             let built = device.build_input_stream(
                 config,
                 move |data: &[f32], _| {
                     if !recording_cb.load(Ordering::Relaxed) {
                         return;
                     }
+                    // Peak over the raw interleaved chunk (any channel).
+                    level_cb.fold(data);
                     let mut buf = frames_cb.lock().unwrap_or_else(|e| e.into_inner());
                     if append_capped(&mut buf, data, channels, max_samples) && !capped {
                         capped = true;
@@ -289,6 +346,7 @@ impl Recording {
                             stream,
                             frames,
                             recording,
+                            level,
                             rate,
                             mic_name: name.to_string(),
                         })
@@ -307,6 +365,12 @@ impl Recording {
 
     pub fn mic_name(&self) -> &str {
         &self.mic_name
+    }
+
+    /// Shared handle to the live level meter; stays valid (and quiet) after
+    /// the stream stops.
+    pub fn level_meter(&self) -> Arc<LevelMeter> {
+        Arc::clone(&self.level)
     }
 
     /// Stop capturing and hand back the take. The recording flag is cleared
@@ -340,8 +404,10 @@ pub fn record_test() {
         recording.mic_name(),
         recording.rate()
     );
+    let meter = recording.level_meter();
     std::thread::sleep(std::time::Duration::from_secs(2));
     let take = recording.stop();
+    let peak = meter.take_peak();
     let secs = take.samples.len() as f32 / take.rate as f32;
     let resampled = resample_to_16k(&take.samples, take.rate);
     println!(
@@ -350,6 +416,10 @@ pub fn record_test() {
         take.rate,
         resampled.len(),
         too_short(take.samples.len(), take.rate),
+    );
+    println!(
+        "peak level: {peak:.4} ({:.2} on the 0..1 meter)",
+        perceptual_level(peak)
     );
 }
 
@@ -447,6 +517,33 @@ mod tests {
         // ~45 min of null-device output at 48 kHz would be capped to 10 min
         let cap = 48_000 * MAX_TAKE_SECS;
         assert!(130_887_360 > cap);
+    }
+
+    #[test]
+    fn level_meter_folds_peak_and_resets_on_take() {
+        let meter = LevelMeter::new();
+        assert_eq!(meter.take_peak(), 0.0, "starts silent");
+        meter.fold(&[0.1, -0.5, 0.2]);
+        meter.fold(&[0.3, -0.05]);
+        assert_eq!(meter.take_peak(), 0.5, "peak |sample| across chunks");
+        assert_eq!(meter.take_peak(), 0.0, "take resets the meter");
+        meter.fold(&[]);
+        assert_eq!(meter.take_peak(), 0.0, "empty chunk leaves it silent");
+    }
+
+    #[test]
+    fn perceptual_level_mapping() {
+        assert_eq!(perceptual_level(0.0), 0.0);
+        assert_eq!(perceptual_level(-1.0), 0.0, "negative peaks clamp to 0");
+        assert_eq!(perceptual_level(1.0), 1.0, "full scale");
+        assert_eq!(perceptual_level(2.0), 1.0, "clipped input clamps to 1");
+        // -50 dB floor: 10^(-50/20) ~ 0.00316 maps to ~0
+        assert!(perceptual_level(0.003).abs() < 0.01);
+        // quiet speech (-20 dBFS) sits visibly mid-meter
+        let quiet = perceptual_level(0.1);
+        assert!((quiet - 0.6).abs() < 0.01, "0.1 -> ~0.6, got {quiet}");
+        // monotonic
+        assert!(perceptual_level(0.02) < perceptual_level(0.2));
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::json;
@@ -48,10 +48,14 @@ pub struct Engine {
     pub device: String,
 }
 
+/// Successful `RecCmd::Start` reply: (device name, rate, live level meter
+/// for the pill).
+type StartInfo = (String, u32, Arc<audio::LevelMeter>);
+
 enum RecCmd {
     Start {
         mic: String,
-        reply: Sender<Result<(String, u32), String>>,
+        reply: Sender<Result<StartInfo, String>>,
     },
     Stop {
         reply: Sender<Option<Take>>,
@@ -72,6 +76,9 @@ pub struct AppCtx {
     active_rate: AtomicU64,
     /// Bumping this cancels every pending pill hide timer.
     pill_gen: AtomicU64,
+    /// Bumping this stops the previous take's level-pusher thread, so a
+    /// stale pusher can never drive a newer take's pill.
+    level_gen: AtomicU64,
     /// `_cuda_ok`: false once the GPU proves unavailable, to stop retrying.
     gpu_ok: AtomicBool,
     /// `_cuda_probe_ts`: last time `gpu_ok` was reset for a re-probe
@@ -99,7 +106,8 @@ impl AppCtx {
                     RecCmd::Start { mic, reply } => {
                         let result = Recording::start(&mic)
                             .map(|rec| {
-                                let info = (rec.mic_name().to_string(), rec.rate());
+                                let info =
+                                    (rec.mic_name().to_string(), rec.rate(), rec.level_meter());
                                 current = Some(rec);
                                 info
                             })
@@ -135,6 +143,7 @@ impl AppCtx {
             active_mic: Mutex::new(String::new()),
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
+            level_gen: AtomicU64::new(0),
             gpu_ok: AtomicBool::new(true),
             gpu_probe: Mutex::new(None),
         }
@@ -351,6 +360,30 @@ fn push_pill(app: &AppHandle, state: &str, payload: Option<&str>) {
     }
 }
 
+/// Push a live input level (0..1) to the pill's meter. The `&&` guard keeps
+/// the eval harmless against a pill build without `pillLevel`.
+fn push_pill_level(app: &AppHandle, level: f32) {
+    if let Some(w) = app.get_webview_window("pill") {
+        let _ = w.eval(format!("window.pillLevel&&window.pillLevel({level:.3})"));
+    }
+}
+
+/// While a take is recording, poll the level meter at ~15 Hz and feed the
+/// pill. Exits when recording stops or a newer take bumps `level_gen`
+/// (the generation guard: a stale pusher must never touch a newer pill).
+fn start_level_pusher(app: &AppHandle, ctx: &AppCtx, meter: Arc<audio::LevelMeter>) {
+    let gen = ctx.level_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(66));
+        let ctx = app.state::<AppCtx>();
+        if ctx.level_gen.load(Ordering::SeqCst) != gen || !ctx.recording.load(Ordering::SeqCst) {
+            return;
+        }
+        push_pill_level(&app, audio::perceptual_level(meter.take_peak()));
+    });
+}
+
 /// Show the pill window in the given state, cancelling any pending hide
 /// timer first (a fresh state must not be hidden by a stale timer).
 fn show_pill(app: &AppHandle, ctx: &AppCtx, state: &str, payload: Option<&str>) {
@@ -450,12 +483,14 @@ fn start_recording(app: &AppHandle, ctx: &AppCtx) {
         .recv()
         .unwrap_or_else(|_| Err("recorder thread unavailable".to_string()));
     match result {
-        Ok((name, rate)) => {
+        Ok((name, rate, meter)) => {
             *lock(&ctx.active_mic) = name.clone();
             ctx.active_rate.store(rate as u64, Ordering::SeqCst);
             ctx.recording.store(true, Ordering::SeqCst);
             play(ctx, "start");
             show_pill(app, ctx, "recording", None);
+            start_level_pusher(app, ctx, meter);
+            crate::set_tray_state(app, "recording");
             push_panel(app, "tiroSetRecording", json!(true));
             eprintln!("● Recording on '{name}' @ {rate} Hz");
         }
@@ -478,17 +513,20 @@ fn stop_recording(app: &AppHandle, ctx: &AppCtx) {
     let take = reply_rx.recv().ok().flatten();
     play(ctx, "stop");
     let Some(take) = take else {
+        crate::set_tray_state(app, "idle");
         hide_pill(app, ctx);
         play(ctx, "cancel");
         return;
     };
     let rate = take.rate;
     if take.samples.is_empty() || audio::too_short(take.samples.len(), rate) {
+        crate::set_tray_state(app, "idle");
         hide_pill(app, ctx);
         play(ctx, "cancel");
         return;
     }
     show_pill(app, ctx, "transcribing", None);
+    crate::set_tray_state(app, "transcribing");
     let secs = take.samples.len() as f64 / rate as f64;
     let mic = lock(&ctx.active_mic).clone();
     // Fresh session id for this utterance; clear any leftover cancel flag.
@@ -650,6 +688,10 @@ fn finish(
     }
     let stale =
         ctx.recording.load(Ordering::SeqCst) || ctx.session.load(Ordering::SeqCst) != session;
+    if !stale {
+        // a newer recording owns the tray, otherwise this take is over
+        crate::set_tray_state(app, "idle");
+    }
 
     if let (Outcome::Done, Some(clean)) = (&outcome, &clean) {
         play(ctx, "done");
@@ -719,6 +761,7 @@ pub fn cancel_record(app: &AppHandle) {
             return;
         }
         ctx.cancel_xscribe.store(true, Ordering::SeqCst);
+        crate::set_tray_state(app, "idle");
         hide_pill(app, &ctx);
         play(&ctx, "cancel");
         eprintln!("transcription cancelled");
@@ -726,6 +769,7 @@ pub fn cancel_record(app: &AppHandle) {
     }
     ctx.recording.store(false, Ordering::SeqCst);
     let _ = lock(&ctx.rec_tx).send(RecCmd::Cancel);
+    crate::set_tray_state(app, "idle");
     push_panel(app, "tiroSetRecording", json!(false));
     hide_pill(app, &ctx);
     play(&ctx, "cancel");

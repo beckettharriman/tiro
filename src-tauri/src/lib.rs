@@ -131,6 +131,81 @@ fn power_watcher(app: tauri::AppHandle) {
     });
 }
 
+/// The three tray icon pixel buffers (RGBA), built once from the app's
+/// default window icon: idle (untouched) plus recording/transcribing
+/// variants with a status dot stamped in the bottom-right corner. Kept as
+/// raw buffers in a static so `set_tray_state` can hand `tauri::image::
+/// Image::new` a `'static` borrow without copying per call.
+struct TrayIconSet {
+    width: u32,
+    height: u32,
+    idle: Vec<u8>,
+    recording: Vec<u8>,
+    transcribing: Vec<u8>,
+}
+
+static TRAY_ICONS: std::sync::OnceLock<Option<TrayIconSet>> = std::sync::OnceLock::new();
+
+/// Stamp a filled status dot (diameter ~35% of the icon's smaller side)
+/// into the bottom-right corner of an RGBA buffer, fully opaque, with a
+/// ~1 px darker rim so it reads against both light and dark trays.
+fn stamp_status_dot(rgba: &mut [u8], width: u32, height: u32, color: [u8; 3]) {
+    let size = width.min(height) as f32;
+    let radius = size * 0.175; // dot diameter = 35% of icon size
+    let margin = size * 0.02;
+    let cx = width as f32 - radius - margin;
+    let cy = height as f32 - radius - margin;
+    let rim = color.map(|c| (f32::from(c) * 0.55) as u8);
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let d = (dx * dx + dy * dy).sqrt();
+            let fill = if d <= radius - 1.0 {
+                Some(color)
+            } else if d <= radius {
+                Some(rim)
+            } else {
+                None
+            };
+            if let Some(c) = fill {
+                let i = ((y * width + x) * 4) as usize;
+                if i + 3 < rgba.len() {
+                    rgba[i] = c[0];
+                    rgba[i + 1] = c[1];
+                    rgba[i + 2] = c[2];
+                    rgba[i + 3] = 255;
+                }
+            }
+        }
+    }
+}
+
+/// Swap the tray icon + tooltip to reflect the dictation state ("idle",
+/// "recording", "transcribing"). Non-fatal like the rest of the tray: if
+/// the tray never built (or the app had no icon) this is a no-op, and a
+/// failed swap only logs.
+pub fn set_tray_state(app: &tauri::AppHandle, state: &str) {
+    let Some(tray) = app.tray_by_id("tiro") else {
+        return;
+    };
+    let icons = TRAY_ICONS.get().and_then(Option::as_ref);
+    let (buf, tooltip) = match state {
+        "recording" => (icons.map(|i| &i.recording), "Tiro — recording…"),
+        "transcribing" => (icons.map(|i| &i.transcribing), "Tiro — transcribing…"),
+        _ => (icons.map(|i| &i.idle), "Tiro"),
+    };
+    if let (Some(buf), Some(set)) = (buf, icons) {
+        let image = tauri::image::Image::new(buf, set.width, set.height);
+        if let Err(e) = tray.set_icon(Some(image)) {
+            eprintln!("tray icon swap failed: {e}");
+        }
+    }
+    if let Err(e) = tray.set_tooltip(Some(tooltip)) {
+        eprintln!("tray tooltip update failed: {e}");
+    }
+}
+
 /// Tray icon: a control/recovery surface for the otherwise-invisible app.
 /// Left-click toggles the panel; the right-click menu covers Open,
 /// Start/Stop dictation, Restart, and Quit. Menu/click actions go through
@@ -180,8 +255,87 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
+    // Build the state-icon cache once, from the same default icon.
+    TRAY_ICONS.get_or_init(|| {
+        app.default_window_icon().map(|icon| {
+            let (width, height) = (icon.width(), icon.height());
+            let idle = icon.rgba().to_vec();
+            let mut recording = idle.clone();
+            stamp_status_dot(&mut recording, width, height, [0xE5, 0x48, 0x4D]);
+            let mut transcribing = idle.clone();
+            stamp_status_dot(&mut transcribing, width, height, [0xF5, 0xA5, 0x24]);
+            TrayIconSet {
+                width,
+                height,
+                idle,
+                recording,
+                transcribing,
+            }
+        })
+    });
     tray.build(app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tray_icon_tests {
+    use super::stamp_status_dot;
+
+    fn px(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    #[test]
+    fn dot_stamps_bottom_right_and_leaves_corners_alone() {
+        const W: u32 = 32;
+        const H: u32 = 32;
+        let mut buf = vec![0u8; (W * H * 4) as usize];
+        stamp_status_dot(&mut buf, W, H, [0xE5, 0x48, 0x4D]);
+        // radius = 32*0.175 = 5.6, margin 0.64 -> center ~ (25.76, 25.76)
+        assert_eq!(
+            px(&buf, W, 25, 25),
+            [0xE5, 0x48, 0x4D, 255],
+            "dot center is the fill color, opaque"
+        );
+        for (x, y) in [(0, 0), (W - 1, 0), (0, H - 1)] {
+            assert_eq!(
+                px(&buf, W, x, y),
+                [0, 0, 0, 0],
+                "corner ({x},{y}) untouched"
+            );
+        }
+        assert_eq!(
+            px(&buf, W, W - 1, H - 1),
+            [0, 0, 0, 0],
+            "the very bottom-right corner sits outside the circle"
+        );
+        // a rim pixel exists: darker than fill, still opaque
+        let rim = [
+            (0xE5 as f32 * 0.55) as u8,
+            (0x48 as f32 * 0.55) as u8,
+            (0x4D as f32 * 0.55) as u8,
+            255,
+        ];
+        let has_rim = (0..H).any(|y| (0..W).any(|x| px(&buf, W, x, y) == rim));
+        assert!(has_rim, "rim ring pixels present");
+        // dot covers roughly pi*r^2 pixels (r=5.6 -> ~98), sanity band
+        let colored = (0..H)
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .filter(|&(x, y)| px(&buf, W, x, y)[3] == 255)
+            .count();
+        assert!(
+            (70..=130).contains(&colored),
+            "dot area ~ pi*r^2, got {colored}"
+        );
+    }
+
+    #[test]
+    fn dot_survives_tiny_icons_without_panicking() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        stamp_status_dot(&mut buf, 4, 4, [0xF5, 0xA5, 0x24]);
+        // just must not panic; something near bottom-right may be colored
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
