@@ -21,19 +21,162 @@ use whisper_rs::{
 use crate::audio::SAMPLE_RATE;
 use crate::config::ConfigStore;
 
-/// The models offered in the panel's selectors.
-pub const MODELS: [&str; 3] = ["base.en", "small.en", "medium.en"];
-
 const HF_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 /// whisper.cpp's Silero VAD model (same file its download-vad-model.sh fetches).
 const VAD_URL: &str =
     "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin";
 const VAD_FILE: &str = "ggml-silero-v5.1.2.bin";
 
+/// One whisper.cpp model the settings' model manager can offer. Sizes are
+/// the exact content-lengths on the HF repo (checked 2026-07); the curated
+/// subset is what the Models card shows before "Show all models".
+pub struct ModelInfo {
+    pub name: &'static str,
+    pub hint: &'static str,
+    pub curated: bool,
+    /// Whether a `-q8_0` quantized GGUF exists on the HF repo. large-v1 and
+    /// large-v3 only ship f16 there, so `int8` falls back to the plain file.
+    pub has_q8: bool,
+    /// Content-length of the q8_0 file (0 when `has_q8` is false).
+    pub q8_bytes: u64,
+    /// Content-length of the plain f16 file.
+    pub f16_bytes: u64,
+}
+
+impl ModelInfo {
+    /// The GGUF file this entry resolves to for the given `compute_type`.
+    pub fn file_name(&self, compute_type: &str) -> String {
+        if compute_type == "int8" && self.has_q8 {
+            format!("ggml-{}-q8_0.bin", self.name)
+        } else {
+            format!("ggml-{}.bin", self.name)
+        }
+    }
+
+    /// The expected download size for the given `compute_type`.
+    pub fn size_bytes(&self, compute_type: &str) -> u64 {
+        if compute_type == "int8" && self.has_q8 {
+            self.q8_bytes
+        } else {
+            self.f16_bytes
+        }
+    }
+}
+
+/// The full whisper.cpp GGUF catalog offered in settings.
+pub const CATALOG: &[ModelInfo] = &[
+    ModelInfo {
+        name: "tiny",
+        hint: "Fastest — very low accuracy, all languages",
+        curated: false,
+        has_q8: true,
+        q8_bytes: 43_537_433,
+        f16_bytes: 77_691_713,
+    },
+    ModelInfo {
+        name: "tiny.en",
+        hint: "Fastest — very low accuracy",
+        curated: true,
+        has_q8: true,
+        q8_bytes: 43_550_795,
+        f16_bytes: 77_704_715,
+    },
+    ModelInfo {
+        name: "base",
+        hint: "Fast — all languages",
+        curated: false,
+        has_q8: true,
+        q8_bytes: 81_768_585,
+        f16_bytes: 147_951_465,
+    },
+    ModelInfo {
+        name: "base.en",
+        hint: "Fast — battery default",
+        curated: true,
+        has_q8: true,
+        q8_bytes: 81_781_811,
+        f16_bytes: 147_964_211,
+    },
+    ModelInfo {
+        name: "small",
+        hint: "Balanced — all languages",
+        curated: false,
+        has_q8: true,
+        q8_bytes: 264_464_607,
+        f16_bytes: 487_601_967,
+    },
+    ModelInfo {
+        name: "small.en",
+        hint: "Balanced — plugged default",
+        curated: true,
+        has_q8: true,
+        q8_bytes: 264_477_561,
+        f16_bytes: 487_614_201,
+    },
+    ModelInfo {
+        name: "medium",
+        hint: "Accurate — slower on CPU, all languages",
+        curated: false,
+        has_q8: true,
+        q8_bytes: 823_369_779,
+        f16_bytes: 1_533_763_059,
+    },
+    ModelInfo {
+        name: "medium.en",
+        hint: "Accurate — slower on CPU",
+        curated: true,
+        has_q8: true,
+        q8_bytes: 823_382_461,
+        f16_bytes: 1_533_774_781,
+    },
+    ModelInfo {
+        name: "large-v1",
+        hint: "Original large — all languages",
+        curated: false,
+        has_q8: false,
+        q8_bytes: 0,
+        f16_bytes: 3_094_623_691,
+    },
+    ModelInfo {
+        name: "large-v2",
+        hint: "Very accurate — all languages",
+        curated: false,
+        has_q8: true,
+        q8_bytes: 1_656_129_691,
+        f16_bytes: 3_094_623_691,
+    },
+    ModelInfo {
+        name: "large-v3",
+        hint: "Very accurate — all languages",
+        curated: false,
+        has_q8: false,
+        q8_bytes: 0,
+        f16_bytes: 3_095_033_483,
+    },
+    ModelInfo {
+        name: "large-v3-turbo",
+        hint: "Most accurate — GPU recommended, all languages",
+        curated: true,
+        has_q8: true,
+        q8_bytes: 874_188_075,
+        f16_bytes: 1_624_555_275,
+    },
+];
+
+/// Look a model up in the catalog by name.
+pub fn catalog_find(name: &str) -> Option<&'static ModelInfo> {
+    CATALOG.iter().find(|m| m.name == name)
+}
+
 /// Map a model name + the config's `compute_type` to a GGUF file name. The
 /// original's CPU `int8` quantization maps to the q8_0 GGUF variants; any
-/// other value gets the plain (f16) files.
+/// other value gets the plain (f16) files. Catalog entries know whether a
+/// q8_0 file actually exists upstream (large-v1/large-v3 don't have one);
+/// unknown model names keep the plain historical mapping.
 pub fn model_file_name(model: &str, compute_type: &str) -> String {
+    if let Some(info) = catalog_find(model) {
+        return info.file_name(compute_type);
+    }
     if compute_type == "int8" {
         format!("ggml-{model}-q8_0.bin")
     } else {
@@ -41,7 +184,39 @@ pub fn model_file_name(model: &str, compute_type: &str) -> String {
     }
 }
 
+/// Install state of one model on disk.
+pub struct ModelStatus {
+    pub installed: bool,
+    pub bytes: u64,
+}
+
+/// Whether `model`'s resolved GGUF is present under `models_dir`, and how
+/// large the file on disk is.
+pub fn model_status(models_dir: &Path, model: &str, compute_type: &str) -> ModelStatus {
+    match fs::metadata(models_dir.join(model_file_name(model, compute_type))) {
+        Ok(md) if md.is_file() => ModelStatus {
+            installed: true,
+            bytes: md.len(),
+        },
+        _ => ModelStatus {
+            installed: false,
+            bytes: 0,
+        },
+    }
+}
+
 fn download(url: &str, dest: &Path, label: &str) -> Result<(), String> {
+    download_with(url, dest, label, &mut |_, _| {})
+}
+
+/// Stream `url` to `dest` (via a `.part` file), reporting every chunk to
+/// `progress` as `(bytes_done, content_length)`.
+fn download_with(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), String> {
     eprintln!("downloading {label} from {url}");
     let response = ureq::get(url)
         .call()
@@ -64,6 +239,7 @@ fn download(url: &str, dest: &Path, label: &str) -> Result<(), String> {
         }
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
+        progress(done, total);
         if let Some(total) = total {
             let pct = (done * 100 / total) as u32;
             if pct >= last_pct + 10 {
@@ -81,11 +257,23 @@ fn download(url: &str, dest: &Path, label: &str) -> Result<(), String> {
 
 /// Path to the GGUF for `model`, downloading it on first use.
 pub fn ensure_model(models_dir: &Path, model: &str, compute_type: &str) -> Result<PathBuf, String> {
+    download_model_with(models_dir, model, compute_type, &mut |_, _| {})
+}
+
+/// `ensure_model` with a progress callback — the model manager's download
+/// path. Reports `(bytes_done, content_length)` per received chunk; a model
+/// already on disk returns immediately without calling `progress`.
+pub fn download_model_with(
+    models_dir: &Path,
+    model: &str,
+    compute_type: &str,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
     fs::create_dir_all(models_dir).map_err(|e| e.to_string())?;
     let file = model_file_name(model, compute_type);
     let path = models_dir.join(&file);
     if !path.exists() {
-        download(&format!("{HF_BASE}{file}"), &path, &file)?;
+        download_with(&format!("{HF_BASE}{file}"), &path, &file, progress)?;
     }
     Ok(path)
 }
@@ -326,6 +514,95 @@ mod tests {
         );
         assert_eq!(model_file_name("base.en", "float16"), "ggml-base.en.bin");
         assert_eq!(model_file_name("medium.en", ""), "ggml-medium.en.bin");
+        // not in the catalog -> historical mapping still applies
+        assert_eq!(
+            model_file_name("distil-x", "int8"),
+            "ggml-distil-x-q8_0.bin"
+        );
+    }
+
+    #[test]
+    fn models_without_q8_fall_back_to_f16() {
+        // The HF repo has no q8_0 file for large-v1/large-v3 (checked live);
+        // int8 must resolve to the plain f16 file for those, not a 404 name.
+        assert_eq!(model_file_name("large-v1", "int8"), "ggml-large-v1.bin");
+        assert_eq!(model_file_name("large-v3", "int8"), "ggml-large-v3.bin");
+        assert_eq!(
+            model_file_name("large-v2", "int8"),
+            "ggml-large-v2-q8_0.bin"
+        );
+        assert_eq!(
+            model_file_name("large-v3-turbo", "int8"),
+            "ggml-large-v3-turbo-q8_0.bin"
+        );
+    }
+
+    #[test]
+    fn catalog_is_complete_and_curated_in_order() {
+        assert_eq!(CATALOG.len(), 12);
+        let curated: Vec<&str> = CATALOG
+            .iter()
+            .filter(|m| m.curated)
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(
+            curated,
+            [
+                "tiny.en",
+                "base.en",
+                "small.en",
+                "medium.en",
+                "large-v3-turbo"
+            ]
+        );
+        for m in CATALOG {
+            assert!(m.f16_bytes > 0, "{} has no f16 size", m.name);
+            assert_eq!(m.has_q8, m.q8_bytes > 0, "{} q8 size mismatch", m.name);
+            assert!(m.size_bytes("int8") > 0, "{}", m.name);
+        }
+        assert!(catalog_find("tiny.en").is_some());
+        assert!(catalog_find("nope").is_none());
+    }
+
+    #[test]
+    fn model_status_reports_install_state_and_size() {
+        let dir = TempDir::new().unwrap();
+        let st = model_status(dir.path(), "tiny.en", "int8");
+        assert!(!st.installed);
+        assert_eq!(st.bytes, 0);
+        std::fs::write(dir.path().join("ggml-tiny.en-q8_0.bin"), b"stub").unwrap();
+        let st = model_status(dir.path(), "tiny.en", "int8");
+        assert!(st.installed);
+        assert_eq!(st.bytes, 4);
+        // a different compute_type resolves to a different (absent) file
+        assert!(!model_status(dir.path(), "tiny.en", "float16").installed);
+    }
+
+    /// Real-network check of the model manager's download path; run manually
+    /// with `cargo test -- --ignored download_tiny_en`.
+    #[test]
+    #[ignore = "network: downloads ~43 MB from huggingface.co"]
+    fn download_tiny_en_q8_with_progress() {
+        let dir = TempDir::new().unwrap();
+        let mut events = 0u64;
+        let mut last = (0u64, None::<u64>);
+        let path = download_model_with(dir.path(), "tiny.en", "int8", &mut |done, total| {
+            events += 1;
+            last = (done, total);
+        })
+        .unwrap();
+        assert!(path.ends_with("ggml-tiny.en-q8_0.bin"));
+        let expected = catalog_find("tiny.en").unwrap().q8_bytes;
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
+        assert_eq!(last.0, expected, "final progress event == file size");
+        assert_eq!(last.1, Some(expected), "content-length reported");
+        assert!(events > 10, "progress fired {events} times");
+        // second call: already installed -> no progress events
+        events = 0;
+        let again =
+            download_model_with(dir.path(), "tiny.en", "int8", &mut |_, _| events += 1).unwrap();
+        assert_eq!(again, path);
+        assert_eq!(events, 0);
     }
 
     #[test]

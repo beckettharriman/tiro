@@ -29,7 +29,9 @@
       close_panel: function () { return invoke("close_panel"); },
       begin_drag: function () { return invoke("begin_drag"); },
       pick_folder: function () { return invoke("pick_folder"); },
-      rebind_shortcut: function (which, combo) { return invoke("rebind_shortcut", { which: which, combo: combo }); }
+      rebind_shortcut: function (which, combo) { return invoke("rebind_shortcut", { which: which, combo: combo }); },
+      list_models: function () { return invoke("list_models"); },
+      download_model: function (name) { return invoke("download_model", { name: name }); }
     }
   };
 

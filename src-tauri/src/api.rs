@@ -6,6 +6,9 @@
 //! Not yet live here: the `powerMode` device swap (device orchestration,
 //! task 3.5) — the config write is real, the side effect joins there.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
@@ -13,6 +16,7 @@ use crate::audio;
 use crate::config::ConfigStore;
 use crate::flow::{self, lock, AppCtx};
 use crate::store;
+use crate::transcribe;
 
 // ---- config <-> JS value mapping helpers (ported 1:1) ----------------------
 
@@ -419,6 +423,110 @@ fn ack(app: &AppHandle, ctx: &AppCtx) -> Value {
     })
 }
 
+/// Model names with a download currently in flight — prevents two threads
+/// pulling the same file at once (different models concurrently are fine).
+static DOWNLOADS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// `list_models`: the model manager's catalog snapshot — every catalog entry
+/// with its plain-language hint, resolved file name/size for the current
+/// `compute_type`, and live install/download state.
+pub fn list_models(app: &AppHandle) -> Value {
+    let ctx = app.state::<AppCtx>();
+    let compute_type = lock(&ctx.cfg).get("compute_type");
+    let models_dir = flow::app_dir().join("models");
+    let in_flight = lock(&DOWNLOADS).clone();
+    let list: Vec<Value> = transcribe::CATALOG
+        .iter()
+        .map(|m| {
+            let status = transcribe::model_status(&models_dir, m.name, &compute_type);
+            json!({
+                "name": m.name,
+                "hint": m.hint,
+                "curated": m.curated,
+                "file": m.file_name(&compute_type),
+                "sizeBytes": m.size_bytes(&compute_type),
+                "installed": status.installed,
+                "installedBytes": status.bytes,
+                "downloading": in_flight.contains(m.name),
+            })
+        })
+        .collect();
+    json!(list)
+}
+
+/// `download_model`: start a background download of one catalog model,
+/// streaming progress to the panel via `tiroModelProgress` pushes (throttled
+/// to ~1% steps). Failures are pushed as an error payload, never fatal.
+pub fn download_model(app: &AppHandle, name: &str) -> Value {
+    let Some(info) = transcribe::catalog_find(name) else {
+        return json!({ "ok": false, "error": format!("unknown model '{name}'") });
+    };
+    let ctx = app.state::<AppCtx>();
+    let compute_type = lock(&ctx.cfg).get("compute_type");
+    let models_dir = flow::app_dir().join("models");
+    if transcribe::model_status(&models_dir, info.name, &compute_type).installed {
+        return json!({ "ok": true, "installed": true });
+    }
+    if !lock(&DOWNLOADS).insert(info.name.to_string()) {
+        return json!({ "ok": true, "downloading": true }); // already in flight
+    }
+    let app = app.clone();
+    let model = info.name.to_string();
+    std::thread::spawn(move || {
+        let mut last_pct: i64 = -1;
+        let result = transcribe::download_model_with(
+            &models_dir,
+            &model,
+            &compute_type,
+            &mut |done, total| {
+                let Some(total) = total.filter(|t| *t > 0) else {
+                    return;
+                };
+                let pct = (done * 100 / total) as i64;
+                if pct > last_pct {
+                    last_pct = pct;
+                    flow::push_panel(
+                        &app,
+                        "tiroModelProgress",
+                        json!({ "model": model, "pct": pct, "done": false, "error": Value::Null }),
+                    );
+                }
+            },
+        );
+        lock(&DOWNLOADS).remove(&model);
+        let payload = match result {
+            Ok(_) => json!({ "model": model, "pct": 100, "done": true, "error": Value::Null }),
+            Err(e) => {
+                eprintln!("model download failed: {e}");
+                json!({ "model": model, "pct": last_pct.max(0), "done": false, "error": e })
+            }
+        };
+        flow::push_panel(&app, "tiroModelProgress", payload);
+    });
+    json!({ "ok": true, "started": true })
+}
+
+/// Force an engine reload after a battery/plugged model change — otherwise
+/// the new choice would only take effect on the next device swap. Tear down
+/// whatever serves right now (worker stopped, CPU model dropped) under the
+/// engine lock — which serializes with any in-flight take — then bring the
+/// resolved target back up, which loads the newly-configured model.
+fn hot_apply_model_change(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let ctx = app.state::<AppCtx>();
+        {
+            let mut engine = lock(&ctx.engine);
+            if let Some(mut w) = engine.worker.take() {
+                w.stop();
+            }
+            engine.transcriber = None;
+        }
+        let target = flow::resolve_target(&ctx);
+        flow::ensure_device(&app, target);
+    });
+}
+
 /// `set_setting`: change one setting, apply live.
 pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
     let ctx = app.state::<AppCtx>();
@@ -439,8 +547,14 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                     flow::ensure_device(&app, target);
                 });
             }
-            "modelBattery" => cfg.set("model_battery", &as_cfg_str(value)),
-            "modelPlugged" => cfg.set("model_ac", &as_cfg_str(value)),
+            "modelBattery" => {
+                cfg.set("model_battery", &as_cfg_str(value));
+                hot_apply_model_change(app);
+            }
+            "modelPlugged" => {
+                cfg.set("model_ac", &as_cfg_str(value));
+                hot_apply_model_change(app);
+            }
             "soundCues" => cfg.set("beeps", if truthy(value) { "true" } else { "false" }),
             "volume" => {
                 // int(value) truncates; the stored form is Python's
