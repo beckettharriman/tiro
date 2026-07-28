@@ -79,6 +79,13 @@ pub struct AppCtx {
     /// Bumping this stops the previous take's level-pusher thread, so a
     /// stale pusher can never drive a newer take's pill.
     level_gen: AtomicU64,
+    /// The last successful take's clipboard text, for "paste again" when the
+    /// paste hotkey fires idle (the user may have copied other things since).
+    last_clean: Mutex<Option<String>>,
+    /// Session id whose completed take should also be pasted at the cursor
+    /// (0 = none). Consumed by `finish` ONLY while that session is current —
+    /// a superseded take must never paste.
+    paste_session: AtomicU64,
     /// `_cuda_ok`: false once the GPU proves unavailable, to stop retrying.
     gpu_ok: AtomicBool,
     /// `_cuda_probe_ts`: last time `gpu_ok` was reset for a re-probe
@@ -97,6 +104,12 @@ pub(crate) fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
 }
 
 impl AppCtx {
+    /// Whether a take is being recorded right now (read-only view for the
+    /// hotkey layer's push-to-talk logic).
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::SeqCst)
+    }
+
     pub fn new() -> Self {
         let (tx, rx) = channel::<RecCmd>();
         std::thread::spawn(move || {
@@ -144,6 +157,8 @@ impl AppCtx {
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
             level_gen: AtomicU64::new(0),
+            last_clean: Mutex::new(None),
+            paste_session: AtomicU64::new(0),
             gpu_ok: AtomicBool::new(true),
             gpu_probe: Mutex::new(None),
         }
@@ -468,8 +483,85 @@ pub fn toggle_record(app: &AppHandle) {
     {
         return;
     }
-    stop_recording(app, &ctx);
+    stop_recording(app, &ctx, false);
     ctx.busy.store(false, Ordering::SeqCst);
+}
+
+/// The paste hotkey ("put my words here"). Three behaviors:
+/// - mid-recording: stop the take now; when it completes it is copied (as
+///   always) AND pasted at the cursor
+/// - while transcribing: arm the in-flight take to paste on completion
+/// - idle: re-copy the LAST take's clipboard text and paste it
+pub fn paste_take(app: &AppHandle) {
+    let ctx = app.state::<AppCtx>();
+    if ctx.busy.load(Ordering::SeqCst) {
+        return;
+    }
+    if ctx.recording.load(Ordering::SeqCst) {
+        if ctx
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        stop_recording(app, &ctx, true);
+        ctx.busy.store(false, Ordering::SeqCst);
+        return;
+    }
+    if ctx.xscribing.load(Ordering::SeqCst) {
+        // Arm the in-flight take; `finish` consumes this only if that take's
+        // session is still current when it completes.
+        ctx.paste_session
+            .store(ctx.session.load(Ordering::SeqCst), Ordering::SeqCst);
+        eprintln!("paste armed for the in-flight take");
+        return;
+    }
+    // Idle: replay the last take.
+    let Some(text) = lock(&ctx.last_clean).clone() else {
+        play(&ctx, "error");
+        show_pill(app, &ctx, "error", Some("Nothing to paste"));
+        arm_pill_hide(app, &ctx, 2000);
+        eprintln!("paste: no last take");
+        return;
+    };
+    if let Err(e) = clipboard::copy(&text) {
+        eprintln!("paste: clipboard copy failed: {e}");
+        play(&ctx, "error");
+        show_pill(app, &ctx, "error", Some("Copy failed"));
+        arm_pill_hide(app, &ctx, 2000);
+        return;
+    }
+    play(&ctx, "done");
+    if inject_paste(app, &ctx) {
+        eprintln!("✓ Re-pasted last take");
+        show_pill(app, &ctx, "done", None);
+    } else {
+        show_pill(app, &ctx, "error", Some("On clipboard"));
+    }
+    arm_pill_hide(app, &ctx, 1100);
+}
+
+/// Deliver the synthetic Ctrl+V, persisting a refreshed portal restore token
+/// when the Wayland backend hands one back. Returns false on any failure —
+/// the callers fall back to the "On clipboard" pill, never an exception.
+fn inject_paste(app: &AppHandle, ctx: &AppCtx) -> bool {
+    let _ = app; // signature symmetry; the injection needs no window handle
+    let token = lock(&ctx.cfg).get("portal_restore_token");
+    match crate::inject::paste_at_cursor(&token) {
+        Ok(new_token) => {
+            if let Some(t) = new_token {
+                if t != token {
+                    lock(&ctx.cfg).set("portal_restore_token", &t);
+                }
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("paste injection failed ({e}); text stays on the clipboard");
+            false
+        }
+    }
 }
 
 fn start_recording(app: &AppHandle, ctx: &AppCtx) {
@@ -505,7 +597,7 @@ fn start_recording(app: &AppHandle, ctx: &AppCtx) {
     }
 }
 
-fn stop_recording(app: &AppHandle, ctx: &AppCtx) {
+fn stop_recording(app: &AppHandle, ctx: &AppCtx, paste: bool) {
     ctx.recording.store(false, Ordering::SeqCst);
     push_panel(app, "tiroSetRecording", json!(false));
     let (reply_tx, reply_rx) = channel();
@@ -531,6 +623,10 @@ fn stop_recording(app: &AppHandle, ctx: &AppCtx) {
     let mic = lock(&ctx.active_mic).clone();
     // Fresh session id for this utterance; clear any leftover cancel flag.
     let session = ctx.session.fetch_add(1, Ordering::SeqCst) + 1;
+    // Arm (paste stop) or disarm (plain stop — a stale armed paste from an
+    // earlier, now-superseded take must never leak onto this one).
+    ctx.paste_session
+        .store(if paste { session } else { 0 }, Ordering::SeqCst);
     ctx.cancel_xscribe.store(false, Ordering::SeqCst);
     ctx.xscribing.store(true, Ordering::SeqCst);
     let app = app.clone();
@@ -643,6 +739,8 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             return Outcome::CopyFail;
         }
         clean = Some(text.clone());
+        // Remember the clipboard text for the paste hotkey's idle replay.
+        *lock(&ctx.last_clean) = Some(text.clone());
         let cfg = lock(&ctx.cfg);
         let model_for_log = if model_name.is_empty() {
             cfg.get("model")
@@ -692,6 +790,10 @@ fn finish(
         // a newer recording owns the tray, otherwise this take is over
         crate::set_tray_state(app, "idle");
     }
+    // Consume the armed paste — for ANY outcome, so a failed take can't leave
+    // it lingering — but only while this take's session is still current; a
+    // superseded take must never paste (its swap here targets a dead id).
+    let wants_paste = !stale && ctx.paste_session.swap(0, Ordering::SeqCst) == session;
 
     if let (Outcome::Done, Some(clean)) = (&outcome, &clean) {
         play(ctx, "done");
@@ -712,6 +814,13 @@ fn finish(
         }
         if stale {
             return; // a newer recording owns the pill now
+        }
+        if wants_paste && !inject_paste(app, ctx) {
+            // Injection failed — the text is safely on the clipboard; say so
+            // instead of the normal done pill, then hide on the done timing.
+            show_pill(app, ctx, "error", Some("On clipboard"));
+            arm_pill_hide(app, ctx, 1100);
+            return;
         }
         show_pill(app, ctx, "done", None);
         arm_pill_hide(app, ctx, 1100);
@@ -761,6 +870,7 @@ pub fn cancel_record(app: &AppHandle) {
             return;
         }
         ctx.cancel_xscribe.store(true, Ordering::SeqCst);
+        ctx.paste_session.store(0, Ordering::SeqCst); // cancelled take never pastes
         crate::set_tray_state(app, "idle");
         hide_pill(app, &ctx);
         play(&ctx, "cancel");

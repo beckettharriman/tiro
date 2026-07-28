@@ -387,6 +387,7 @@ pub fn get_state(app: &AppHandle) -> Value {
         });
         let shortcuts = json!({
             "dictate": keys_to_combo(&cfg.get("dictation_hotkey")),
+            "paste": keys_to_combo(&cfg.get("paste_hotkey")),
             "panel": keys_to_combo(&cfg.get("panel_hotkey")),
             "cancel": keys_to_combo(&cfg.get("cancel_hotkey")),
         });
@@ -635,6 +636,7 @@ pub fn rebind_shortcut(app: &AppHandle, which: &str, combo: &Value) -> Value {
     let keys = combo.get("keys").cloned().unwrap_or_else(|| json!([]));
     let cfg_key = match which {
         "dictate" => "dictation_hotkey",
+        "paste" => "paste_hotkey",
         "panel" => "panel_hotkey",
         "cancel" => "cancel_hotkey",
         _ => return json!({ "ok": false, "keys": keys }),

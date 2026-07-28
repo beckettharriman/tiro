@@ -15,9 +15,11 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use crate::api;
 use crate::flow::{self, lock, AppCtx};
 
-/// which -> config key, in the original's registration order.
-const ACTIONS: [(&str, &str); 3] = [
+/// which -> config key, in the original's registration order (paste joined
+/// the scheme in the port).
+const ACTIONS: [(&str, &str); 4] = [
     ("dictate", "dictation_hotkey"),
+    ("paste", "paste_hotkey"),
     ("panel", "panel_hotkey"),
     ("cancel", "cancel_hotkey"),
 ];
@@ -118,6 +120,101 @@ fn inflight() -> &'static Mutex<HashSet<&'static str>> {
     INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+// ---- push-to-talk on the dictate key ---------------------------------------
+//
+// Tap (press+release under HOLD_MS) keeps the classic toggle: recording
+// starts on the press and continues until the next tap. Holding the key
+// longer than HOLD_MS turns the same press into push-to-talk: the release
+// stops the take and transcribes.
+//
+// Platform delivery of ShortcutState (global-hotkey 0.8.0 sources):
+// - Windows registers with MOD_NOREPEAT (no repeat Pressed) and synthesizes
+//   Released by polling GetAsyncKeyState every 50 ms — both states arrive.
+// - X11 forwards real KeyPress/KeyRelease. Key AUTOREPEAT arrives as
+//   release+press pairs a few ms apart, so a Released only counts as the real
+//   release if no Pressed of the same shortcut follows within REPEAT_MS.
+// If a platform never delivered Released, the release logic simply never
+// runs and the key degrades to the plain toggle.
+
+/// Hold this long (press -> release) to make the press push-to-talk.
+const HOLD_MS: u64 = 400;
+
+/// A Released followed by a Pressed within this window is X11 autorepeat.
+const REPEAT_MS: u64 = 50;
+
+#[derive(Default)]
+struct Ptt {
+    /// When the live press started; None = key is (logically) up.
+    press_at: Option<std::time::Instant>,
+    /// Whether that press is the one that STARTED the recording — only such
+    /// a press may stop it on hold-release (a stop-tap held long, or a press
+    /// that failed to open the mic, must not re-toggle).
+    starts_take: bool,
+    /// Bumped on every Pressed; lets a pending release check detect that an
+    /// autorepeat Pressed swallowed its Released.
+    generation: u64,
+}
+
+fn ptt() -> &'static Mutex<Ptt> {
+    static PTT: OnceLock<Mutex<Ptt>> = OnceLock::new();
+    PTT.get_or_init(|| Mutex::new(Ptt::default()))
+}
+
+/// Dictate-key state handler: toggle on tap, push-to-talk on hold.
+fn dictate_event(app: &AppHandle, state: ShortcutState) {
+    match state {
+        ShortcutState::Pressed => {
+            {
+                let mut s = ptt().lock().unwrap_or_else(|e| e.into_inner());
+                s.generation += 1; // cancels any pending release check
+                if s.press_at.is_some() {
+                    // Autorepeat Pressed while the hold is live — swallow it
+                    // (the bump above already voided its paired Released).
+                    return;
+                }
+                s.press_at = Some(std::time::Instant::now());
+                let ctx = app.state::<AppCtx>();
+                s.starts_take = !ctx.is_recording();
+            }
+            eprintln!("hotkey fired: dictate");
+            dispatch(app, "dictate");
+        }
+        ShortcutState::Released => {
+            let released_at = std::time::Instant::now();
+            let (generation, held, starts_take) = {
+                let s = ptt().lock().unwrap_or_else(|e| e.into_inner());
+                let Some(press_at) = s.press_at else {
+                    return; // stray release (e.g. registered mid-hold)
+                };
+                let held = released_at.duration_since(press_at)
+                    >= std::time::Duration::from_millis(HOLD_MS);
+                (s.generation, held, s.starts_take)
+            };
+            // Don't act yet: X11 autorepeat delivers release+press pairs a
+            // few ms apart. Wait REPEAT_MS; a Pressed arriving meanwhile
+            // bumps the generation and this release turns out to be fake.
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(REPEAT_MS));
+                {
+                    let mut s = ptt().lock().unwrap_or_else(|e| e.into_inner());
+                    if s.generation != generation {
+                        return; // autorepeat — the hold is still live
+                    }
+                    s.press_at = None; // the real release
+                }
+                let ctx = app.state::<AppCtx>();
+                if held && starts_take && ctx.is_recording() {
+                    eprintln!("dictate released after hold: push-to-talk stop");
+                    dispatch(&app, "dictate");
+                }
+                // A quick tap keeps recording — today's toggle; the next tap
+                // stops it.
+            });
+        }
+    }
+}
+
 /// `_dispatch_hotkey`: run the action OFF the listener thread; drop a repeat
 /// press of the same action while the prior one is still running. The tray
 /// reuses this (the original's `_tray_dispatch` had the same shape).
@@ -133,6 +230,7 @@ pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
     std::thread::spawn(move || {
         match which {
             "dictate" => flow::toggle_record(&app),
+            "paste" => flow::paste_take(&app),
             "panel" => toggle_panel(&app),
             "cancel" => flow::cancel_record(&app),
             _ => {}
@@ -240,7 +338,10 @@ pub fn register_all(app: &AppHandle) {
             continue;
         };
         let result = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
-            if event.state == ShortcutState::Pressed {
+            if which == "dictate" {
+                // Tap = toggle, hold = push-to-talk; needs both states.
+                dictate_event(app, event.state);
+            } else if event.state == ShortcutState::Pressed {
                 eprintln!("hotkey fired: {which}");
                 dispatch(app, which);
             }

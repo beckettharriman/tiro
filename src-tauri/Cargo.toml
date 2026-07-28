@@ -44,10 +44,18 @@ auto-launch = "0.5"
 gpu = ["whisper-rs/vulkan"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = [
+    "tokio",
+    "remote_desktop",
+    # remote_desktop's response types borrow screencast's Stream, so the
+    # module does not compile without this feature too.
+    "screencast",
+] }
 gtk = "0.18"
+x11rb = { version = "0.14", features = ["xtest"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_Power", "Win32_System_Console"] }
+windows-sys = { version = "0.60", features = ["Win32_System_Power", "Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"

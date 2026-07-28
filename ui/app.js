@@ -138,7 +138,8 @@
     mics: [],
     shortcuts: {
       dictate: { ctrl: true, alt: true, shift: false, meta: false, code: "Space", keys: ["Ctrl", "Alt", "Space"] },
-      panel:   { ctrl: true, alt: true, shift: false, meta: false, code: "KeyV", keys: ["Ctrl", "Alt", "V"] },
+      paste:   { ctrl: true, alt: true, shift: false, meta: false, code: "KeyV", keys: ["Ctrl", "Alt", "V"] },
+      panel:   { ctrl: true, alt: true, shift: false, meta: false, code: "KeyC", keys: ["Ctrl", "Alt", "C"] },
       cancel:  { ctrl: true, alt: true, shift: false, meta: false, code: "KeyX", keys: ["Ctrl", "Alt", "X"] }
     },
     theme: "dark", effectiveTheme: "dark",
@@ -247,7 +248,7 @@
     modelProgress: {},    // model name -> latest tiroModelProgress payload
     copiedId: null,
     expandedIds: new Set(),  // entry ids whose transcript fold is expanded
-    editing: null,        // shortcut key being captured: dictate | panel | cancel
+    editing: null,        // shortcut key being captured: dictate | paste | panel | cancel
     shortcutHint: null,   // transient "couldn't change shortcut" hint, or null
     _copyTimer: null,
     _captureHandler: null
@@ -719,6 +720,7 @@
     /* SHORTCUTS */
     body.appendChild(group("Shortcuts", [
       shortcutRow("Dictate", "dictate"),
+      shortcutRow("Paste at cursor", "paste"),
       shortcutRow("Open panel", "panel"),
       shortcutRow("Cancel recording", "cancel")
     ], App.shortcutHint || null));
