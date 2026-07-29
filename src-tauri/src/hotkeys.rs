@@ -533,16 +533,80 @@ pub(crate) fn dispatch(app: &AppHandle, which: &'static str) {
 // second) is computed AFTERWARDS on a worker and pushed via tiroApplyState;
 // until it lands the panel shows its last-known content. Presses are
 // serialized through a dedicated worker: each burst drains the queue and
-// coalesces to its net intent against the panel's REAL visibility, so
-// press-press ends hidden, press-press-press ends visible, and no press is
-// ever dropped or double-applied.
+// coalesces to its net intent against the panel's REAL state, so no press
+// is ever dropped or double-applied.
+//
+// A press does not blindly flip visibility: the panel can be VISIBLE yet
+// BURIED under another window (the user clicked something on top of it),
+// and hiding an invisible panel feels like the press did nothing — it then
+// takes a second press to get the panel back. Each press instead advances
+// a three-state cycle:
+//
+//     hidden            -> shown at the remembered spot, front and focused
+//     visible + buried  -> raised to front and focused, SAME position
+//     visible + focused -> hidden
+//
+// so hiding always takes exactly one press from the panel the user is
+// actually looking at (the active window). Focused means REAL focus:
+// `is_focused` is GTK's `is_active` on Linux and the Win32 focus flag on
+// Windows, both driven by the server's focus events and never by our own
+// set_focus request (unlike `is_visible`, which is GTK-local — see
+// `apply_cmds`).
+//
+// Two real-world wrinkles are absorbed by a grace window (RAISE_GRACE_MS):
+// the gap between a press's raise and focus actually landing is at least
+// summon_front's deliberate 150 ms defer plus WM latency, and the WM may
+// decline the focus request outright (KWin focus-stealing prevention
+// answering a timestamp-less activation of a skip-taskbar XWayland window
+// with "demands attention", or focus-follows-mouse revoking focus the
+// moment it lands). A press that finds the panel STILL unfocused that soon
+// after a raise therefore counts as Focused and hides — the same net
+// outcome as the folded burst (buried + press-press = hide), and the cap
+// that keeps a focus-denying WM from ever making the panel unhideable by
+// hotkey: press 1 raises, press 2 hides, worst case.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PanelCmd {
-    /// Hotkey / tray click: flip visibility.
+    /// Hotkey / tray click: advance the hidden -> front -> hidden cycle.
     Toggle,
     /// Second launch: always end visible and in front, never hide.
     Summon,
+}
+
+/// The panel's press-relevant window state, read on the main thread right
+/// before a burst is applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PanelState {
+    /// Not mapped.
+    Hidden,
+    /// Mapped but not the active window (buried under another window, or
+    /// visible-but-unfocused).
+    Buried,
+    /// Mapped and the active (really-focused) window.
+    Focused,
+}
+
+/// How long after a raise a still-unfocused panel keeps counting as Focused
+/// (see the section comment): long enough to cover summon_front's 150 ms
+/// defer plus any WM latency or outright focus denial, short enough that a
+/// panel the user genuinely focused and re-buried is raisable again almost
+/// immediately.
+const RAISE_GRACE_MS: u64 = 2000;
+
+/// Classify the panel for the burst about to be applied. Pure — the flags
+/// are read by the caller — so the full decision table is unit-testable.
+/// `raised_recently` is the focus-denial cap: the previous applied plan
+/// raised the panel less than RAISE_GRACE_MS ago, so a panel that is STILL
+/// unfocused counts as Focused and the press hides it instead of raising
+/// forever. A hidden panel is never "focus-denied" — hidden dominates.
+fn classify(visible: bool, focused: bool, raised_recently: bool) -> PanelState {
+    if !visible {
+        PanelState::Hidden
+    } else if focused || raised_recently {
+        PanelState::Focused
+    } else {
+        PanelState::Buried
+    }
 }
 
 /// The net effect of a burst of queued panel commands.
@@ -555,27 +619,27 @@ struct PanelPlan {
 }
 
 /// Fold a burst of commands into one plan, starting from the panel's actual
-/// visibility. Every press flips the intended state in order, so e.g.
-/// hidden + press-press coalesces to "stay hidden" (open-then-close, net
-/// nothing) and press-press-press to a single show.
-fn coalesce(visible: bool, cmds: &[PanelCmd]) -> PanelPlan {
-    let mut want = visible;
-    let mut front = false;
+/// state. Every press advances the cycle in order — hidden -> focused,
+/// buried -> focused, focused -> hidden — so a queued burst folds
+/// deterministically: buried + press = raise; buried + press-press = hide
+/// (press 1 raises, press 2 hides); hidden + press-press = stay hidden
+/// (open-then-close, net nothing); hidden + press-press-press = a single
+/// show. The plan re-maps only when the net visibility changed, and raises
+/// whenever a non-empty burst ends with the panel front-and-focused.
+fn coalesce(start: PanelState, cmds: &[PanelCmd]) -> PanelPlan {
+    let mut cur = start;
     for cmd in cmds {
-        match cmd {
-            PanelCmd::Toggle => {
-                want = !want;
-                front = want;
-            }
-            PanelCmd::Summon => {
-                want = true;
-                front = true;
-            }
-        }
+        cur = match (cmd, cur) {
+            (PanelCmd::Toggle, PanelState::Focused) => PanelState::Hidden,
+            (PanelCmd::Toggle, _) => PanelState::Focused,
+            (PanelCmd::Summon, _) => PanelState::Focused,
+        };
     }
+    let started_visible = start != PanelState::Hidden;
+    let ends_visible = cur != PanelState::Hidden;
     PanelPlan {
-        map: (want != visible).then_some(want),
-        front: front && want,
+        map: (ends_visible != started_visible).then_some(ends_visible),
+        front: !cmds.is_empty() && cur == PanelState::Focused,
     }
 }
 
@@ -585,13 +649,20 @@ struct Applied {
     front: bool,
 }
 
-/// Main-thread only: read the real visibility, coalesce the burst against
-/// it, and apply the map change. Nothing slow may run here — position math
-/// and set_position/show/hide only.
-fn apply_cmds(app: &AppHandle, cmds: &[PanelCmd]) -> Option<Applied> {
+/// Main-thread only: read the real visibility and focus, coalesce the burst
+/// against them, and apply the map change. Nothing slow may run here —
+/// position math and set_position/show/hide only. `raised_recently` is the
+/// panel worker's raise-grace flag (see `classify`).
+fn apply_cmds(app: &AppHandle, cmds: &[PanelCmd], raised_recently: bool) -> Option<Applied> {
     let w = app.get_webview_window("panel")?;
     let visible = w.is_visible().unwrap_or(false);
-    let plan = coalesce(visible, cmds);
+    // is_focused is REAL focus on both backends (GTK is_active / Win32 focus
+    // flag, both server-event-driven — see the section comment). A failed
+    // query falls back to focused so the legacy visible -> hide toggle still
+    // applies: hiding must never cost extra presses because a backend
+    // couldn't answer.
+    let focused = visible && w.is_focused().unwrap_or(true);
+    let plan = coalesce(classify(visible, focused, raised_recently), cmds);
     let mut shown = false;
     match plan.map {
         Some(true) => {
@@ -617,16 +688,23 @@ fn apply_cmds(app: &AppHandle, cmds: &[PanelCmd]) -> Option<Applied> {
 }
 
 fn panel_loop(app: AppHandle, rx: Receiver<PanelCmd>) {
+    // When the last applied plan ended front-and-focused, a press inside the
+    // grace window that STILL finds the panel unfocused reads as the WM
+    // having declined our focus request — see `classify`. Owned here because
+    // this worker is the only sequencer of panel ops.
+    let mut last_raise: Option<Instant> = None;
     while let Ok(first) = rx.recv() {
         let mut cmds = vec![first];
         while let Ok(more) = rx.try_recv() {
             cmds.push(more);
         }
+        let raised_recently =
+            last_raise.is_some_and(|t| t.elapsed() < Duration::from_millis(RAISE_GRACE_MS));
         let (ack_tx, ack_rx) = channel::<Option<Applied>>();
         let a = app.clone();
         if app
             .run_on_main_thread(move || {
-                let applied = apply_cmds(&a, &cmds);
+                let applied = apply_cmds(&a, &cmds, raised_recently);
                 let _ = ack_tx.send(applied);
             })
             .is_err()
@@ -641,8 +719,14 @@ fn panel_loop(app: AppHandle, rx: Receiver<PanelCmd>) {
             Ok(Some(applied)) => applied,
             _ => continue,
         };
+        last_raise = applied.front.then(Instant::now);
         if applied.shown {
             crate::placement::reposition_burst(&app, "panel");
+        }
+        if applied.shown || applied.front {
+            // A raise must also refresh: a panel buried for an hour would
+            // otherwise come front with the stale snapshot from its last
+            // show (the old hide->show cycle refreshed as a side effect).
             refresh_panel_state(&app);
         }
         if applied.front {
@@ -687,8 +771,9 @@ fn refresh_panel_state(app: &AppHandle) {
     });
 }
 
-/// `toggle_panel`: flip the panel's visibility NOW — the window op runs with
-/// nothing slow in front of it; the fresh state snapshot follows.
+/// `toggle_panel`: advance the panel's show/raise/hide cycle NOW — the
+/// window op runs with nothing slow in front of it; the fresh state
+/// snapshot follows.
 pub fn toggle_panel(app: &AppHandle) {
     panel_request(app, PanelCmd::Toggle);
 }
@@ -904,15 +989,16 @@ mod tests {
     }
 
     use PanelCmd::{Summon, Toggle};
+    use PanelState::{Buried, Focused, Hidden};
 
-    fn plan(visible: bool, cmds: &[PanelCmd]) -> PanelPlan {
-        coalesce(visible, cmds)
+    fn plan(state: PanelState, cmds: &[PanelCmd]) -> PanelPlan {
+        coalesce(state, cmds)
     }
 
     #[test]
-    fn single_press_toggles_each_way() {
+    fn single_press_advances_the_cycle() {
         assert_eq!(
-            plan(false, &[Toggle]),
+            plan(Hidden, &[Toggle]),
             PanelPlan {
                 map: Some(true),
                 front: true
@@ -920,20 +1006,37 @@ mod tests {
             "hidden + press = show and bring to front"
         );
         assert_eq!(
-            plan(true, &[Toggle]),
+            plan(Buried, &[Toggle]),
+            PanelPlan {
+                map: None,
+                front: true
+            },
+            "buried + press = raise and focus only — no re-map, no hide"
+        );
+        assert_eq!(
+            plan(Focused, &[Toggle]),
             PanelPlan {
                 map: Some(false),
                 front: false
             },
-            "visible + press = hide, no raise"
+            "focused + press = hide, no raise"
         );
     }
 
     #[test]
     fn rapid_presses_coalesce_to_net_intent() {
+        // press-press from buried: raise-then-hide — each press advances
+        // the cycle, so the burst nets out to a single hide
+        assert_eq!(
+            plan(Buried, &[Toggle, Toggle]),
+            PanelPlan {
+                map: Some(false),
+                front: false
+            }
+        );
         // press-press from hidden: open-then-close, net nothing, ends hidden
         assert_eq!(
-            plan(false, &[Toggle, Toggle]),
+            plan(Hidden, &[Toggle, Toggle]),
             PanelPlan {
                 map: None,
                 front: false
@@ -941,33 +1044,42 @@ mod tests {
         );
         // press-press-press from hidden ends visible (one show, one raise)
         assert_eq!(
-            plan(false, &[Toggle, Toggle, Toggle]),
+            plan(Hidden, &[Toggle, Toggle, Toggle]),
             PanelPlan {
                 map: Some(true),
                 front: true
             }
         );
-        // press-press from visible: close-then-open — no map change, but the
-        // panel ends (stays) visible and is raised
+        // press-press from focused: close-then-open — no map change, but
+        // the panel ends (stays) visible and is raised
         assert_eq!(
-            plan(true, &[Toggle, Toggle]),
+            plan(Focused, &[Toggle, Toggle]),
             PanelPlan {
                 map: None,
                 front: true
             }
         );
-        // four presses from visible: even parity, ends (stays) visible and
+        // press-press-press from buried: raise, hide, show — already
+        // mapped, so no map change, but it ends front-and-focused
+        assert_eq!(
+            plan(Buried, &[Toggle, Toggle, Toggle]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+        // four presses from focused: even parity, ends (stays) visible and
         // raised because the last press turned it back on
         assert_eq!(
-            plan(true, &[Toggle, Toggle, Toggle, Toggle]),
+            plan(Focused, &[Toggle, Toggle, Toggle, Toggle]),
             PanelPlan {
                 map: None,
                 front: true
             }
         );
-        // odd parity from visible ends hidden
+        // odd parity from focused ends hidden
         assert_eq!(
-            plan(true, &[Toggle, Toggle, Toggle]),
+            plan(Focused, &[Toggle, Toggle, Toggle]),
             PanelPlan {
                 map: Some(false),
                 front: false
@@ -978,23 +1090,31 @@ mod tests {
     #[test]
     fn summon_always_ends_visible_and_in_front() {
         assert_eq!(
-            plan(false, &[Summon]),
+            plan(Hidden, &[Summon]),
             PanelPlan {
                 map: Some(true),
                 front: true
             }
         );
         assert_eq!(
-            plan(true, &[Summon]),
+            plan(Focused, &[Summon]),
             PanelPlan {
                 map: None,
                 front: true
             },
             "already visible: raise only, never re-map"
         );
+        assert_eq!(
+            plan(Buried, &[Summon]),
+            PanelPlan {
+                map: None,
+                front: true
+            },
+            "a buried panel is raised, never hidden, by a summon"
+        );
         // a toggle after a summon still wins — strict press order
         assert_eq!(
-            plan(true, &[Summon, Toggle]),
+            plan(Focused, &[Summon, Toggle]),
             PanelPlan {
                 map: Some(false),
                 front: false
@@ -1002,7 +1122,71 @@ mod tests {
         );
         // and a summon after a hide-toggle rescues visibility
         assert_eq!(
-            plan(true, &[Toggle, Summon]),
+            plan(Focused, &[Toggle, Summon]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+    }
+
+    #[test]
+    fn classification_reads_real_state() {
+        // hidden dominates everything — a closed panel is never
+        // "focus-denied", it just gets shown
+        assert_eq!(classify(false, false, false), Hidden);
+        assert_eq!(classify(false, false, true), Hidden);
+        // real focus wins regardless of the grace flag
+        assert_eq!(classify(true, true, false), Focused);
+        assert_eq!(classify(true, true, true), Focused);
+        // visible + unfocused + no recent raise = buried
+        assert_eq!(classify(true, false, false), Buried);
+        // ...and with a recent raise = the focus-denial cap: Focused
+        assert_eq!(classify(true, false, true), Focused);
+    }
+
+    #[test]
+    fn denied_focus_raise_then_press_hides() {
+        // press 1: buried, no recent raise -> raise and focus, no re-map
+        let s1 = classify(true, false, false);
+        assert_eq!(s1, Buried);
+        assert_eq!(
+            plan(s1, &[Toggle]),
+            PanelPlan {
+                map: None,
+                front: true
+            }
+        );
+        // the WM declines (or hasn't yet granted) the focus request; press 2
+        // lands inside the grace window with the panel STILL unfocused ->
+        // counts as focused -> hide. Never a raise loop.
+        let s2 = classify(true, false, true);
+        assert_eq!(s2, Focused);
+        let hide = PanelPlan {
+            map: Some(false),
+            front: false,
+        };
+        assert_eq!(plan(s2, &[Toggle]), hide);
+        // identical to the burst-folded outcome (buried + press-press =
+        // hide), so a fast double-press from buried nets hide whether it
+        // arrives in one queue drain or two.
+        assert_eq!(plan(Buried, &[Toggle, Toggle]), hide);
+    }
+
+    #[test]
+    fn granted_focus_keeps_the_plain_cycle() {
+        // focus was granted after the raise: the panel reads focused on its
+        // own, the grace flag is irrelevant, and one press hides — as ever
+        assert_eq!(
+            plan(classify(true, true, true), &[Toggle]),
+            PanelPlan {
+                map: Some(false),
+                front: false
+            }
+        );
+        // once the grace expires, a re-buried panel is raisable again
+        assert_eq!(
+            plan(classify(true, false, false), &[Toggle]),
             PanelPlan {
                 map: None,
                 front: true
@@ -1012,20 +1196,16 @@ mod tests {
 
     #[test]
     fn empty_burst_is_a_noop() {
-        assert_eq!(
-            plan(true, &[]),
-            PanelPlan {
-                map: None,
-                front: false
-            }
-        );
-        assert_eq!(
-            plan(false, &[]),
-            PanelPlan {
-                map: None,
-                front: false
-            }
-        );
+        for state in [Hidden, Buried, Focused] {
+            assert_eq!(
+                plan(state, &[]),
+                PanelPlan {
+                    map: None,
+                    front: false
+                },
+                "{state:?}"
+            );
+        }
     }
 
     // ---- tap/hold state machine (shared by the dictate and paste keys) ----
