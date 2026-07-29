@@ -417,8 +417,17 @@ pub fn run() {
             list_models,
             download_model
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                // Every graceful exit funnels through here — tray Quit
+                // (app.exit) and tray Restart (app.restart) both raise
+                // RunEvent::Exit. The Wayland portal session survives until
+                // explicitly closed, so close it exactly once, now.
+                inject::close_portal_session();
+            }
+        });
 }
 
 #[cfg(test)]

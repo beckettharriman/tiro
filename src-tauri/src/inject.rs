@@ -11,9 +11,13 @@
 //!   portal's virtual keyboard is the only injection path that works
 //!   everywhere. The portal shows a one-time permission dialog; the restore
 //!   token it hands back is persisted (config `portal_restore_token`) so the
-//!   dialog never repeats. The portal session is strictly per-paste: created,
-//!   used for one chord, and explicitly closed before returning — success or
-//!   failure — so the desktop's "remote control" indicator never lingers.
+//!   dialog never repeats. ONE portal session is created lazily on the first
+//!   paste and reused for every later one — the desktop announces each
+//!   session start (KDE pops a "remote control session started"
+//!   notification), so per-paste sessions would mean per-paste
+//!   notifications. The session is closed exactly once, on app exit
+//!   (`close_portal_session`); a session the desktop tore down mid-run is
+//!   detected on use and transparently recreated for that paste.
 //!
 //! THE classic bug of paste-key tools: the user's physical Ctrl+Alt+V is
 //! still held when the hotkey fires, so a naive synthetic V lands as
@@ -60,6 +64,20 @@ pub fn paste_at_cursor(restore_token: &str) -> Result<Option<String>, String> {
         x11_impl::paste().map(|()| None)
     }
 }
+
+/// Close the long-lived RemoteDesktop portal session, if one was ever
+/// created. Must be called on every app exit path (all of them funnel
+/// through `RunEvent::Exit`) — ashpd sessions have no Drop hook, so only an
+/// explicit Close ends the desktop's "remote control" indicator before the
+/// process is fully gone.
+#[cfg(target_os = "linux")]
+pub fn close_portal_session() {
+    portal_impl::close_session();
+}
+
+/// Windows has no portal session; nothing to close.
+#[cfg(windows)]
+pub fn close_portal_session() {}
 
 #[cfg(windows)]
 mod windows_impl {
@@ -289,6 +307,8 @@ mod x11_impl {
 
 #[cfg(target_os = "linux")]
 mod portal_impl {
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
     use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
     use ashpd::desktop::{PersistMode, Session};
 
@@ -304,46 +324,129 @@ mod portal_impl {
     const KEY_LEFTMETA: i32 = 125;
     const KEY_RIGHTMETA: i32 = 126;
 
-    /// Paste via the RemoteDesktop portal. Returns the (possibly refreshed)
-    /// restore token to persist — portal restore tokens are single-use, so
-    /// every successful Start hands back a replacement.
+    /// The lazily-created, long-lived portal session: the proxy it was made
+    /// from plus the session handle itself.
+    struct Portal {
+        proxy: RemoteDesktop,
+        session: Session<RemoteDesktop>,
+    }
+
+    /// One session per app run. Created on the first paste, reused for every
+    /// later paste, closed exactly once by `close_session` on app exit. The
+    /// desktop announces every RemoteDesktop session start (KDE pops a
+    /// "remote control session started" notification), so this MUST NOT go
+    /// back to a per-paste session — that is one notification per paste.
+    static PORTAL: Mutex<Option<Portal>> = Mutex::new(None);
+
+    fn portal_slot() -> MutexGuard<'static, Option<Portal>> {
+        // A poisoned lock only means a paste panicked mid-flight; the slot's
+        // content is still no worse than what the stale-session path already
+        // handles, so keep going with it.
+        PORTAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Paste via the RemoteDesktop portal. Returns the refreshed restore
+    /// token to persist whenever a session was (re)created — portal restore
+    /// tokens are single-use, so every successful Start hands back a
+    /// replacement. A reused session returns `None`: nothing new to persist.
     pub fn paste(restore_token: &str) -> Result<Option<String>, String> {
         // ashpd is async; ride tauri's tokio runtime from this worker thread.
         tauri::async_runtime::block_on(paste_async(restore_token))
             .map_err(|e| format!("RemoteDesktop portal: {e}"))
     }
 
-    /// Strict per-paste portal lifecycle: create session → start → inject →
-    /// close. Nothing about the session outlives this call.
+    /// Close the long-lived session (app exit).
     ///
     /// The close MUST be explicit: ashpd's `Session` is a plain D-Bus proxy
     /// with no Drop hook, and ashpd keeps its zbus connection in a
-    /// process-global static, so a session that is merely dropped stays alive
-    /// (and keeps the desktop's "remote control" indicator lit) until the
-    /// whole process exits. Only the `Close` call ends it — which is why the
-    /// session is closed here on EVERY exit path, error or success.
+    /// process-global static, so a session that is merely dropped stays
+    /// alive (and keeps the desktop's "remote control" indicator lit) until
+    /// the whole process exits. No session yet — or a paste currently
+    /// holding the slot's session — is a quiet no-op; in the latter case
+    /// process exit drops the D-Bus connection moments later and the portal
+    /// ends the session with it.
+    pub fn close_session() {
+        let taken = portal_slot().take();
+        if let Some(p) = taken {
+            match tauri::async_runtime::block_on(p.session.close()) {
+                Ok(()) => eprintln!("inject: portal session closed on exit"),
+                Err(e) => eprintln!("inject: portal session close on exit failed: {e}"),
+            }
+        }
+    }
+
+    /// Reuse the stored session when there is one; (re)create it when there
+    /// is none or the stored one turns out to be dead (portal restart,
+    /// compositor hiccup, permission revoked) — the recreate happens within
+    /// the same paste, so a stale session still lands this take.
+    ///
+    /// The session is taken OUT of the slot for the duration of the paste —
+    /// the mutex is never held across an await. Pastes are serialized
+    /// upstream (flow's busy flag / session ids), so the slot cannot race
+    /// another paste in practice; `stow` still closes any displaced session
+    /// rather than leaking it.
     async fn paste_async(restore_token: &str) -> Result<Option<String>, ashpd::Error> {
         use ashpd::desktop::CreateSessionOptions;
+
+        // Bound OUTSIDE the `if let`: as a scrutinee, the guard temporary
+        // from `portal_slot()` would live (locked) through the whole body.
+        let live = portal_slot().take();
+        if let Some(p) = live {
+            match inject_chord(&p.proxy, &p.session).await {
+                Ok(()) => {
+                    eprintln!("inject: portal session reused");
+                    stow(p).await;
+                    return Ok(None);
+                }
+                Err(e) => {
+                    eprintln!("inject: portal session stale ({e}); recreating");
+                    // Best effort — the usual cause is the session already
+                    // being gone on the portal side.
+                    let _ = p.session.close().await;
+                }
+            }
+        }
 
         let proxy = RemoteDesktop::new().await?;
         let session = proxy
             .create_session(CreateSessionOptions::default())
             .await?;
-        // From here on a live portal session exists on the bus: whatever
-        // start_and_inject does, close the session before returning.
-        let result = start_and_inject(&proxy, &session, restore_token).await;
-        if let Err(e) = session.close().await {
-            // A failed Close usually means the compositor already tore the
-            // session down; there is no further handle to act on either way.
-            eprintln!("inject: portal session close failed: {e}");
+        // From here on a live portal session exists on the bus: it must
+        // either end up stowed in PORTAL (closed later by `close_session`)
+        // or be explicitly closed before returning an error — never merely
+        // dropped (see `close_session` on why Drop is not enough).
+        let result = match start_session(&proxy, &session, restore_token).await {
+            Ok(new_token) => inject_chord(&proxy, &session).await.map(|()| new_token),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(new_token) => {
+                eprintln!("inject: portal session created");
+                stow(Portal { proxy, session }).await;
+                Ok(new_token)
+            }
+            Err(e) => {
+                if let Err(close_err) = session.close().await {
+                    eprintln!("inject: portal session close failed: {close_err}");
+                }
+                Err(e)
+            }
         }
-        result
     }
 
-    /// Everything that happens inside a live portal session. Split out so
-    /// `paste_async` can close the session on every arm with one `?`-free
-    /// spot; each `?` in here unwinds to that close.
-    async fn start_and_inject(
+    /// Put the live session back in the slot; close whatever it displaces
+    /// (only ever occupied if pastes overlapped, which upstream prevents).
+    async fn stow(p: Portal) {
+        let displaced = portal_slot().replace(p);
+        if let Some(d) = displaced {
+            let _ = d.session.close().await;
+        }
+    }
+
+    /// Device selection + start for a fresh session. With a valid restore
+    /// token the Start resolves silently; without one the desktop shows the
+    /// one-time permission dialog here. Returns the replacement token.
+    async fn start_session(
         proxy: &RemoteDesktop,
         session: &Session<RemoteDesktop>,
         restore_token: &str,
@@ -365,21 +468,26 @@ mod portal_impl {
             )
             .await?
             .response()?;
-        // With a valid restore token this resolves silently; without one the
-        // desktop shows the one-time permission dialog here.
         let devices = proxy
             .start(session, None, StartOptions::default())
             .await?
             .response()?;
-        let new_token = devices.restore_token().map(ToOwned::to_owned);
+        Ok(devices.restore_token().map(ToOwned::to_owned))
+    }
 
-        // The portal cannot see the physical keyboard, so the held-hotkey
-        // problem is handled blind: give the user's fingers a beat to leave
-        // the chord, then explicitly release every modifier that is not part
-        // of Ctrl+V before pressing it. A release for an already-up key is a
-        // harmless no-op at the compositor.
-        // (block_on drives this future on the calling worker thread, so a
-        // plain thread sleep is safe and avoids a direct tokio dependency.)
+    /// The Ctrl+V chord on an already-started session. Runs per paste.
+    ///
+    /// The portal cannot see the physical keyboard, so the held-hotkey
+    /// problem is handled blind: give the user's fingers a beat to leave
+    /// the chord, then explicitly release every modifier that is not part
+    /// of Ctrl+V before pressing it. A release for an already-up key is a
+    /// harmless no-op at the compositor.
+    /// (block_on drives this future on the calling worker thread, so a
+    /// plain thread sleep is safe and avoids a direct tokio dependency.)
+    async fn inject_chord(
+        proxy: &RemoteDesktop,
+        session: &Session<RemoteDesktop>,
+    ) -> Result<(), ashpd::Error> {
         std::thread::sleep(std::time::Duration::from_millis(super::SETTLE_MS + 30));
         let key = |code: i32, state: KeyState| {
             proxy.notify_keyboard_keycode(session, code, state, Default::default())
@@ -400,6 +508,21 @@ mod portal_impl {
         key(KEY_V, KeyState::Pressed).await?;
         key(KEY_V, KeyState::Released).await?;
         key(KEY_LEFTCTRL, KeyState::Released).await?;
-        Ok(new_token)
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// `close_session` with no live session must be a silent no-op that
+        /// never touches D-Bus (there is no bus in the test environment —
+        /// reaching it would error or hang, failing this test).
+        #[test]
+        fn close_without_session_is_a_noop() {
+            assert!(portal_slot().is_none());
+            close_session();
+            assert!(portal_slot().is_none());
+        }
     }
 }
