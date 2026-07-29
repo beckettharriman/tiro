@@ -7,11 +7,35 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 
 const CORRECTIONS_FILE: &str = "corrections.txt";
 const VOCAB_FILE: &str = "vocab.txt";
+
+/// Sequence for unique sibling temp names (concurrent saves must not share
+/// a temp file).
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `content` to `path` atomically: sibling temp file + rename (atomic
+/// on the same filesystem). A reader racing a save sees the old or the new
+/// file, never a torn one, and a failed write can never destroy the
+/// existing file (fs::write truncates in place).
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".tmp.{}.{seq}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let result = fs::write(&tmp, content).and_then(|()| fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
 
 /// Hot words from `vocab.txt`: non-blank, non-comment lines, in file order.
 pub fn read_hotwords(app_dir: &Path) -> Vec<String> {
@@ -62,7 +86,7 @@ fn write_hotwords(app_dir: &Path, words: &[String]) -> std::io::Result<()> {
         out.push_str(w);
         out.push('\n');
     }
-    fs::write(path, out)
+    write_atomic(&path, &out)
 }
 
 fn write_corrections(app_dir: &Path, pairs: &[(String, String)]) -> std::io::Result<()> {
@@ -70,7 +94,7 @@ fn write_corrections(app_dir: &Path, pairs: &[(String, String)]) -> std::io::Res
     for (heard, written) in pairs {
         out.push_str(&format!("{heard} => {written}\n"));
     }
-    fs::write(app_dir.join(CORRECTIONS_FILE), out)
+    write_atomic(&app_dir.join(CORRECTIONS_FILE), &out)
 }
 
 /// `list_vocab`: the editor's snapshot.
@@ -83,10 +107,13 @@ pub fn list(app_dir: &Path) -> Value {
 }
 
 /// A bridge string with the newline/arrow characters that would corrupt the
-/// line-based files stripped out.
+/// line-based files stripped out. Leading `#` goes too — a term like
+/// "#hashtag" would otherwise be written as an invisible permanent comment
+/// line. A term that ends up empty is dropped entirely (never a blank line).
 fn clean_term(v: &Value) -> Option<String> {
     let s = v.as_str()?.replace("=>", " ");
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = s.trim_start_matches('#').trim_start().to_string();
     if s.is_empty() {
         None
     } else {
@@ -132,11 +159,29 @@ pub fn apply_corrections(text: &str, pairs: &[(String, String)]) -> String {
     if pairs.is_empty() || text.is_empty() {
         return text.to_string();
     }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = text.to_string();
     for (heard, written) in pairs {
-        let pattern = format!(r"(?i)\b{}\b", regex::escape(heard));
+        // `\b` only where it can match: against a heard-side that starts or
+        // ends with a non-word char (".NET", "C++") a boundary would demand
+        // a word char on the far side and the pattern would never fire.
+        let lead = if heard.chars().next().is_some_and(is_word) {
+            r"\b"
+        } else {
+            ""
+        };
+        let trail = if heard.chars().last().is_some_and(is_word) {
+            r"\b"
+        } else {
+            ""
+        };
+        let pattern = format!("(?i){lead}{}{trail}", regex::escape(heard));
         if let Ok(re) = regex::Regex::new(&pattern) {
-            out = re.replace_all(&out, written.as_str()).into_owned();
+            // NoExpand: the written side is literal text — a `$` in it
+            // ("bucks => $5") must never be treated as a capture reference.
+            out = re
+                .replace_all(&out, regex::NoExpand(written.as_str()))
+                .into_owned();
         }
     }
     if out.trim().is_empty() {
@@ -218,6 +263,77 @@ mod tests {
     fn apply_never_empties_a_take() {
         let pairs = vec![("um".to_string(), " ".to_string())];
         assert_eq!(apply_corrections("um", &pairs), "um", "fallback kept");
+    }
+
+    #[test]
+    fn dollar_signs_in_written_side_are_literal() {
+        // `$5` must not be expanded as a capture reference (which would
+        // silently delete the replacement from the clipboard text).
+        let pairs = vec![("bucks".to_string(), "$5".to_string())];
+        assert_eq!(
+            apply_corrections("twenty bucks today", &pairs),
+            "twenty $5 today"
+        );
+        let pairs = vec![("dollars".to_string(), "$USD".to_string())];
+        assert_eq!(apply_corrections("ten dollars", &pairs), "ten $USD");
+        let pairs = vec![("var x".to_string(), "${x}".to_string())];
+        assert_eq!(apply_corrections("set var x now", &pairs), "set ${x} now");
+        // and a plain replacement still works
+        let pairs = vec![("tyro".to_string(), "Tiro".to_string())];
+        assert_eq!(apply_corrections("hello tyro", &pairs), "hello Tiro");
+    }
+
+    #[test]
+    fn heard_sides_with_non_word_edges_match() {
+        let pairs = vec![(".NET".to_string(), "dotnet".to_string())];
+        assert_eq!(
+            apply_corrections("i use .net daily", &pairs),
+            "i use dotnet daily"
+        );
+        let pairs = vec![("C++".to_string(), "cpp".to_string())];
+        assert_eq!(apply_corrections("learn c++ now", &pairs), "learn cpp now");
+        // normal words are still whole-word-only — no substring hits
+        let pairs = vec![("net".to_string(), "NET".to_string())];
+        assert_eq!(
+            apply_corrections("internet nets net", &pairs),
+            "internet nets NET"
+        );
+    }
+
+    #[test]
+    fn leading_hash_is_scrubbed_from_terms() {
+        let dir = TempDir::new().unwrap();
+        set(
+            dir.path(),
+            &json!(["#hashtag", "##double", "#", "C#"]),
+            &json!([["#heard", "#written"]]),
+        );
+        // "#" collapses to nothing -> dropped, no blank line either
+        assert_eq!(read_hotwords(dir.path()), ["hashtag", "double", "C#"]);
+        assert_eq!(
+            read_corrections(dir.path()),
+            [("heard".into(), "written".into())]
+        );
+        let raw = fs::read_to_string(dir.path().join(VOCAB_FILE)).unwrap();
+        assert!(!raw.contains("\n\n"), "no blank word lines: {raw:?}");
+    }
+
+    #[test]
+    fn saves_are_atomic_and_leave_no_temp_files() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(VOCAB_FILE), "# header\nTiro\n").unwrap();
+        set(dir.path(), &json!(["Tiro"]), &json!([["a", "b"]]));
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|n| !n.contains(".tmp.")),
+            "temp files cleaned up: {names:?}"
+        );
+        let raw = fs::read_to_string(dir.path().join(VOCAB_FILE)).unwrap();
+        assert_eq!(raw, "# header\nTiro\n", "comment header survived");
     }
 
     #[test]
