@@ -5,6 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tiro — Pill</title>
   <link rel="stylesheet" href="styles.css" />
+  <style>
+  /* ── pill_position=top: mirror the VERTICAL direction of the enter/exit
+     animations. Only `animation-name` is overridden — duration, easing,
+     fill and opacity stay exactly what the `.pill.in` / `.pill.out`
+     shorthands in styles.css declare, so bottom placement is untouched and
+     top placement differs only in the sign of translateY (and the matching
+     transform-origin for the scale flourish). The reduced-motion rule in
+     styles.css uses `animation: none !important` and still wins here. */
+  .pill-dock.top .pill { transform-origin: top center; }
+  @keyframes pillInTop {
+    from { opacity: 0; transform: translateY(-16px) scale(.86); }
+    to   { opacity: 1; transform: translateY(0)     scale(1); }
+  }
+  @keyframes pillOutTop {
+    from { opacity: 1; transform: translateY(0)    scale(1); }
+    to   { opacity: 0; transform: translateY(-12px) scale(.9); }
+  }
+  .pill-dock.top .pill.in  { animation-name: pillInTop; }
+  .pill-dock.top .pill.out { animation-name: pillOutTop; }
+  </style>
 </head>
 <body>
   <!-- The pill is its OWN frameless, transparent OS window. The dock just
@@ -37,6 +57,40 @@
 
     let waveRAF = null;          // requestAnimationFrame handle for the waveform
     let curState = "off";        // recording | transcribing | done | error | off
+
+    /* ── pill placement (top|bottom) — flips animation direction only ────
+       The backend moves the OS window; in here the only thing that changes
+       is the vertical direction of the enter/exit keyframes (the `top`
+       class on the dock, see the <style> block above). The pill window
+       receives no settings push, so the cached value is refreshed from
+       get_state at startup and on every pillSet call (the only pushes this
+       window gets). applyPillPos is a no-op when the value is unchanged so
+       an in-flight animation is never restarted in the steady state; when
+       the setting really did change, the class flips within the invoke
+       round-trip (~ms into the .34s entrance), so the very next animation
+       runs in the new direction. */
+    let pillPosTop = false;
+    function applyPillPos(pos) {
+      const top = pos === "top";
+      if (top === pillPosTop) return;
+      pillPosTop = top;
+      dock.classList.toggle("top", top);
+    }
+    function refreshPillPos() {
+      if (window.pywebview && window.pywebview.api) {
+        Promise.resolve(window.pywebview.api.get_state()).then(function (s) {
+          if (s && s.settings) applyPillPos(s.settings.pillPosition);
+        }).catch(function () {});
+      } else {
+        /* standalone file:// preview (no backend): default bottom; honor a
+           mock position from the harness (global) or the URL, e.g.
+           pill.html?pillPosition=top. Synchronous, so a pillSet right after
+           flipping the mock animates in the new direction. */
+        let q = null;
+        try { q = new URLSearchParams(location.search).get("pillPosition"); } catch (e) { /* ignore */ }
+        applyPillPos(window.__mockPillPosition || q || "bottom");
+      }
+    }
 
     /* ── live mic level (fed by the backend via window.pillLevel) ─────────
        levelSeen flips true on the first push of a take; until then the
@@ -138,6 +192,7 @@
     //  (e.g. pillSet("done")) keep working unchanged.
     function pillSet(state, payload) {
       stopWave();
+      refreshPillPos();
 
       if (state === "off") {
         const existing = dock.querySelector(".pill");
@@ -176,7 +231,7 @@
       levelSeen = true;
     };
 
-    // start blank
+    // start blank (pillSet also primes the placement cache via refreshPillPos)
     pillSet("off");
   })();
   </script>
