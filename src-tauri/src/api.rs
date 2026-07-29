@@ -372,6 +372,10 @@ pub fn get_state(app: &AppHandle) -> Value {
         let (store_path, is_vault) = store::log_dir(&cfg)
             .map(|(p, v)| (p.to_string_lossy().into_owned(), v))
             .unwrap_or((String::new(), false));
+        let (pill_top, pill_padding) = crate::placement::resolve_pill_placement(
+            &cfg.get("pill_position"),
+            &cfg.get("pill_padding"),
+        );
         let settings = json!({
             "powerMode": device_to_powermode(&cfg.get("device")),
             "modelBattery": cfg.get("model_battery"),
@@ -379,6 +383,8 @@ pub fn get_state(app: &AppHandle) -> Value {
             "soundCues": cfg.get_bool("beeps"),
             "volume": volume_to_int(&cfg.get("sound_volume")),
             "recordingPill": cfg.get_bool("pill"),
+            "pillPosition": if pill_top { "top" } else { "bottom" },
+            "pillPadding": pill_padding,
             "clipboardCleanup": cleanup_to_js(&cfg.get("clipboard_cleanup")),
             "smartVocab": cfg.get_bool("use_vocab_bias"),
             "micName": resolve_mic_name(&cfg),
@@ -537,6 +543,7 @@ fn hot_apply_model_change(app: &AppHandle) {
 pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
     let ctx = app.state::<AppCtx>();
     let mut theme_push: Option<String> = None;
+    let mut pill_moved = false;
     {
         let mut cfg = lock(&ctx.cfg);
         match key {
@@ -583,6 +590,22 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                 }
             }
             "recordingPill" => cfg.set("pill", if truthy(value) { "true" } else { "false" }),
+            "pillPosition" => {
+                let pos = if value
+                    .as_str()
+                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("top"))
+                {
+                    "top"
+                } else {
+                    "bottom"
+                };
+                cfg.set("pill_position", pos);
+                pill_moved = true;
+            }
+            "pillPadding" => {
+                cfg.set("pill_padding", &clamp_int(value, 0, 1000, 110).to_string());
+                pill_moved = true;
+            }
             "clipboardCleanup" => cfg.set(
                 "clipboard_cleanup",
                 cleanup_to_cfg(value.as_str().unwrap_or("")),
@@ -616,6 +639,12 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
     }
     if let Some(effective) = theme_push {
         flow::push_panel(app, "tiroSetTheme", json!(effective));
+    }
+    if pill_moved {
+        // apply live: a currently-visible pill snaps to the new spot at once
+        // (after the cfg lock above is released); the next show reads the
+        // fresh values anyway.
+        crate::placement::reposition_pill_if_visible(app);
     }
     ack(app, &ctx)
 }

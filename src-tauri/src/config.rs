@@ -64,6 +64,11 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("beeps", "true".into()),
         ("sound_volume", "1.0".into()),
         ("pill", "true".into()),
+        // Pill dock edge ("top" | "bottom") and its distance in px from that
+        // work-area edge. bottom/110 is the pre-setting fixed spot, so an
+        // untouched config places the pill exactly where it always was.
+        ("pill_position", "bottom".into()),
+        ("pill_padding", "110".into()),
         ("clipboard_cleanup", "light".into()),
         ("use_vocab_bias", "true".into()),
         ("theme", "system".into()),
@@ -248,6 +253,8 @@ mod tests {
         assert_eq!(cfg.get("clipboard_cleanup"), "light");
         assert_eq!(cfg.get("theme"), "system");
         assert_eq!(cfg.get("panel_transparency"), "45");
+        assert_eq!(cfg.get("pill_position"), "bottom");
+        assert_eq!(cfg.get("pill_padding"), "110");
         assert_eq!(
             cfg.get("fallback_dir"),
             dir.path().join("logs").to_string_lossy()
@@ -309,6 +316,8 @@ mod tests {
         let cfg = ConfigStore::load(path, dir.path());
         assert_eq!(cfg.get("theme"), "light", "existing value preserved");
         assert_eq!(cfg.get("model_ac"), "small.en", "missing key backfilled");
+        assert_eq!(cfg.get("pill_position"), "bottom", "pill keys backfilled");
+        assert_eq!(cfg.get("pill_padding"), "110", "pill keys backfilled");
         let raw = fs::read_to_string(cfg.path()).unwrap();
         assert!(raw.contains("dictation_hotkey"), "backfill was persisted");
     }

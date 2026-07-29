@@ -7,7 +7,9 @@
 //!   the primary (the original preferred the foreground window's monitor — a
 //!   Win32-only signal; the cursor is its own documented fallback and the
 //!   portable equivalent)
-//! - pill: bottom-center, ~110 px up from the work-area bottom
+//! - pill: centered horizontally, docked to the top or bottom work-area edge
+//!   per `pill_position` / `pill_padding` (default: bottom, 110 px up — the
+//!   original's fixed spot, so untouched configs behave exactly as before)
 //! - panel: reappears at its REMEMBERED position — the spot the user last
 //!   left it, tracked live while visible, captured again right before a
 //!   hide, and persisted in config (`panel_pos`, "x,y") so it survives
@@ -169,10 +171,46 @@ fn active_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
     ))
 }
 
+/// The original's fixed pill offset: ~110 px up from the work-area bottom.
+/// Doubles as the `pill_padding` default so untouched configs are identical.
+const PILL_PADDING_DEFAULT: i32 = 110;
+
+/// Resolve the pill placement config values to (dock at top?, padding px).
+/// Anything unrecognized falls back to the historical default — bottom,
+/// 110 px — and a garbage padding never crashes (invalid -> default,
+/// negative -> 0). Pure, extracted for tests.
+pub(crate) fn resolve_pill_placement(position: &str, padding: &str) -> (bool, i32) {
+    let top = position.trim().eq_ignore_ascii_case("top");
+    let pad =
+        crate::api::clamp_int_str(padding, 0, 100_000, i64::from(PILL_PADDING_DEFAULT)) as i32;
+    (top, pad)
+}
+
+/// Where the pill of size (ww, wh) goes on the work area (l, t, r, b):
+/// centered horizontally, docked `padding` px from the top or bottom edge
+/// (padding clamped to half the work-area height so it can never push the
+/// pill past the middle). Pure math, extracted for tests.
+fn pill_spot(
+    work: (i32, i32, i32, i32),
+    ww: i32,
+    wh: i32,
+    top: bool,
+    padding: i32,
+) -> Option<(i32, i32)> {
+    let (ml, mt, mr, mb) = work;
+    let (mw, mh) = (mr - ml, mb - mt);
+    if mw <= 0 || mh <= 0 {
+        return None;
+    }
+    let pad = padding.clamp(0, mh / 2);
+    let x = ml + (mw - ww) / 2;
+    let y = if top { mt + pad } else { mb - wh - pad };
+    Some((x, y))
+}
+
 /// Where a window of size (ww, wh) goes on the work area (l, t, r, b):
-/// centered a touch below dead-center, or bottom-center for the pill.
-/// Pure math, extracted for tests.
-fn centered_spot(work: (i32, i32, i32, i32), ww: i32, wh: i32, bottom: bool) -> Option<(i32, i32)> {
+/// centered a touch below dead-center. Pure math, extracted for tests.
+fn centered_spot(work: (i32, i32, i32, i32), ww: i32, wh: i32) -> Option<(i32, i32)> {
     let (ml, mt, mr, mb) = work;
     let (mw, mh) = (mr - ml, mb - mt);
     if mw <= 0 || mh <= 0 {
@@ -181,11 +219,7 @@ fn centered_spot(work: (i32, i32, i32, i32), ww: i32, wh: i32, bottom: bool) -> 
     let x = ml + (mw - ww) / 2;
     // centered windows sit a little below dead-center — reads better than
     // the exact middle and keeps the panel clear of the very top.
-    let y = if bottom {
-        mt + mh - wh - 110
-    } else {
-        mt + (mh - wh) / 2 + mh / 16
-    };
+    let y = mt + (mh - wh) / 2 + mh / 16;
     Some((x, y))
 }
 
@@ -222,9 +256,9 @@ fn pos_on_screen(app: &AppHandle, x: i32, y: i32, ww: i32, wh: i32) -> bool {
 
 /// `_place_window`: put `label` where it belongs — the panel's remembered
 /// position when there is a valid one, else centered on the active work
-/// area (`bottom` docks the pill bottom-center ~110 px up instead). Must
-/// run on the main thread.
-fn place_window(app: &AppHandle, label: &str, bottom: bool) {
+/// area (the pill instead docks to the configured edge via `pill_spot`).
+/// Must run on the main thread.
+fn place_window(app: &AppHandle, label: &str) {
     let Some(w) = app.get_webview_window(label) else {
         return;
     };
@@ -244,7 +278,17 @@ fn place_window(app: &AppHandle, label: &str, bottom: bool) {
     let Some(work) = active_work_area(app) else {
         return;
     };
-    let Some((x, y)) = centered_spot(work, ww, wh, bottom) else {
+    let spot = if label == "pill" {
+        let (top, pad) = {
+            let ctx = app.state::<AppCtx>();
+            let cfg = lock(&ctx.cfg);
+            resolve_pill_placement(&cfg.get("pill_position"), &cfg.get("pill_padding"))
+        };
+        pill_spot(work, ww, wh, top, pad)
+    } else {
+        centered_spot(work, ww, wh)
+    };
+    let Some((x, y)) = spot else {
         return;
     };
     let _ = w.set_position(PhysicalPosition::new(x, y));
@@ -257,8 +301,7 @@ fn place_window(app: &AppHandle, label: &str, bottom: bool) {
 
 /// `_position_pill` / `_position_panel` as one main-thread entry.
 pub(crate) fn position(app: &AppHandle, label: &'static str) {
-    let bottom = label == "pill";
-    place_window(app, label, bottom);
+    place_window(app, label);
     if label == "panel" {
         // honor the pin without touching it elsewhere in the burst
         if let Some(w) = app.get_webview_window("panel") {
@@ -277,6 +320,20 @@ pub fn reposition_burst(app: &AppHandle, label: &'static str) {
             let a = app.clone();
             let _ = app.run_on_main_thread(move || position(&a, label));
             std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+/// Re-apply the pill's configured spot immediately if it is on screen right
+/// now — a placement-setting change must not wait for the next show. A
+/// hidden pill is left alone (the next `show_pill` burst places it fresh).
+pub fn reposition_pill_if_visible(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window("pill") {
+            if w.is_visible().unwrap_or(false) {
+                position(&app, "pill");
+            }
         }
     });
 }
@@ -324,17 +381,83 @@ mod tests {
     #[test]
     fn centered_spot_matches_original_math() {
         // 1920x1040 work area at (0,40): a 560x640 panel centers with the
-        // mh/16 downward nudge; a 300x88 pill docks bottom-center 110 up.
+        // mh/16 downward nudge.
         let work = (0, 40, 1920, 1080);
         assert_eq!(
-            centered_spot(work, 560, 640, false),
+            centered_spot(work, 560, 640),
             Some((680, 40 + (1040 - 640) / 2 + 1040 / 16))
         );
+        assert_eq!(centered_spot((0, 0, 0, 0), 560, 640), None);
+    }
+
+    #[test]
+    fn pill_default_matches_original_spot() {
+        // Fresh config (no pill_position/pill_padding values set): the pill
+        // must land exactly where the fixed bottom-center ~110-up math put it.
+        let work = (0, 40, 1920, 1080);
+        let (top, pad) = resolve_pill_placement("bottom", "110");
+        assert_eq!((top, pad), (false, 110));
         assert_eq!(
-            centered_spot(work, 300, 88, true),
-            Some((810, 40 + 1040 - 88 - 110))
+            pill_spot(work, 300, 88, top, pad),
+            Some((810, 40 + 1040 - 88 - 110)),
+            "default placement must be byte-identical to the original"
         );
-        assert_eq!(centered_spot((0, 0, 0, 0), 560, 640, false), None);
+    }
+
+    #[test]
+    fn pill_spot_docks_to_either_edge() {
+        // work area (0,40)-(1920,1080): mh = 1040
+        let work = (0, 40, 1920, 1080);
+        // top, padding P: pill top edge P px below the work-area top
+        assert_eq!(pill_spot(work, 300, 88, true, 24), Some((810, 40 + 24)));
+        // bottom, padding P: pill bottom edge P px above the work-area bottom
+        assert_eq!(
+            pill_spot(work, 300, 88, false, 24),
+            Some((810, 1080 - 88 - 24))
+        );
+        // padding 0 hugs the edge exactly
+        assert_eq!(pill_spot(work, 300, 88, true, 0), Some((810, 40)));
+        assert_eq!(pill_spot(work, 300, 88, false, 0), Some((810, 1080 - 88)));
+        // secondary monitor offset carries through (work area not at 0,0)
+        let second = (1920, 0, 3840, 1080);
+        assert_eq!(pill_spot(second, 300, 88, true, 50), Some((2730, 50)));
+        // degenerate work area: no spot
+        assert_eq!(pill_spot((0, 0, 0, 0), 300, 88, false, 110), None);
+    }
+
+    #[test]
+    fn pill_padding_clamps_to_half_the_work_area() {
+        let work = (0, 40, 1920, 1080); // mh = 1040 -> cap 520
+        assert_eq!(
+            pill_spot(work, 300, 88, true, 9999),
+            Some((810, 40 + 520)),
+            "excessive padding stops at half the work-area height"
+        );
+        assert_eq!(
+            pill_spot(work, 300, 88, false, 9999),
+            Some((810, 1080 - 88 - 520))
+        );
+        assert_eq!(
+            pill_spot(work, 300, 88, true, -50),
+            Some((810, 40)),
+            "negative padding behaves as 0"
+        );
+    }
+
+    #[test]
+    fn pill_placement_resolution_defaults_and_garbage() {
+        // untouched config -> the historical spot
+        assert_eq!(resolve_pill_placement("bottom", "110"), (false, 110));
+        // top is case/space-insensitive
+        assert_eq!(resolve_pill_placement(" Top ", "24"), (true, 24));
+        assert_eq!(resolve_pill_placement("TOP", "0"), (true, 0));
+        // anything unrecognized -> bottom (the default), never a crash
+        assert_eq!(resolve_pill_placement("middle", "110"), (false, 110));
+        assert_eq!(resolve_pill_placement("", "110"), (false, 110));
+        // garbage padding -> the 110 default; negatives floor at 0
+        assert_eq!(resolve_pill_placement("bottom", "garbage"), (false, 110));
+        assert_eq!(resolve_pill_placement("bottom", ""), (false, 110));
+        assert_eq!(resolve_pill_placement("top", "-30"), (true, 0));
     }
 
     #[test]
