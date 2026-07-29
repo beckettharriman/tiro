@@ -3,17 +3,18 @@
 
 /// Release builds run without a console (windows_subsystem on Windows, a
 /// desktop launch on Linux), so diagnostics would vanish — send stderr to
-/// tiro.log in the working directory instead, the port's answer to the
-/// original's tiro.log. On Unix dup2 also captures whisper.cpp's C-level
-/// stderr; on Windows SetStdHandle covers the Rust side (C runtime output
-/// latched its handle at startup and is not recoverable there).
+/// tiro.log in the app dir instead (NOT the CWD: an autostart launch runs
+/// with CWD = $HOME), the port's answer to the original's tiro.log. On Unix
+/// dup2 also captures whisper.cpp's C-level stderr; on Windows SetStdHandle
+/// covers the Rust side (C runtime output latched its handle at startup and
+/// is not recoverable there).
 #[cfg(not(debug_assertions))]
 fn stderr_to_log() {
     use std::fs::OpenOptions;
     let Ok(file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("tiro.log")
+        .open(tiro_lib::flow::app_dir().join("tiro.log"))
     else {
         return;
     };

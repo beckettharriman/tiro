@@ -15,7 +15,7 @@
 //! The cpal stream is not Send, so the live `Recording` is owned by a
 //! dedicated recorder thread and driven through channel commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, TryLockError};
@@ -135,10 +135,110 @@ pub struct AppCtx {
     gpu_probe: Mutex<Option<std::time::Instant>>,
 }
 
-/// The app's working directory (config.ini, models/, vocab.txt live here,
-/// like the original's APP_DIR).
+static APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The app directory — config.ini, models/, vocab.txt, corrections.txt,
+/// tiro.log and the default fallback_dir ("logs") all resolve against this.
+///
+/// RESOLUTION RULE (deterministic and launch-method independent): the
+/// original resolved every app file against its script directory, never the
+/// process CWD (PORTING_NOTES §2: fallback_dir is "app-relative"). Resolving
+/// against CWD made a dev launch (CWD = src-tauri) and an autostart launch
+/// (CWD = $HOME) read and write DIFFERENT config/vocab files — settings
+/// appeared not to persist across reboots. The rule, applied once per
+/// process:
+///   1. `TIRO_APP_DIR` env var, when set (tests / portable installs).
+///   2. The executable's directory — the port's analog of the script dir.
+///      A cargo-built exe (`<crate>/target/<profile>/tiro`) walks up to the
+///      crate directory that owns the `target` tree (src-tauri), where the
+///      app files have always lived in dev; both dev and autostart launches
+///      run the same binary, so they converge on the same directory.
+///   3. The CWD, only if the exe path is unavailable.
 pub fn app_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    APP_DIR
+        .get_or_init(|| {
+            if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
+                if !dir.is_empty() {
+                    return PathBuf::from(dir);
+                }
+            }
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .as_deref()
+                .and_then(Path::parent)
+            {
+                return dev_crate_root(dir).unwrap_or_else(|| dir.to_path_buf());
+            }
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        })
+        .clone()
+}
+
+/// For a cargo-built exe, the crate directory owning the build tree: the
+/// nearest ancestor of `exe_dir` named `target` whose parent holds a
+/// `Cargo.toml`. None for an installed binary (its own directory is the
+/// app dir, like the original's script folder).
+fn dev_crate_root(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .ancestors()
+        .find(|a| {
+            a.file_name().is_some_and(|n| n == "target")
+                && a.parent().is_some_and(|p| p.join("Cargo.toml").is_file())
+        })
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// One-time adoption of CWD-era strays, run at startup before anything
+/// reads the config. Builds before the resolution rule above wrote
+/// config.ini / vocab.txt / corrections.txt into the process CWD, so an
+/// autostart launch (CWD = $HOME) grew a second set of files there. For
+/// each file missing at the canonical location, copy in the most recently
+/// modified stray from the old locations (CWD, then $HOME); nothing is
+/// ever deleted. models/ is intentionally NOT copied (gigabytes) — it
+/// re-resolves against the canonical dir and re-downloads if truly absent.
+pub fn adopt_stray_app_files() {
+    let canonical = app_dir();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        candidates.push(PathBuf::from(home));
+    }
+    adopt_strays_into(&canonical, &candidates);
+}
+
+fn adopt_strays_into(canonical: &Path, candidates: &[PathBuf]) {
+    let canon = std::fs::canonicalize(canonical).unwrap_or_else(|_| canonical.to_path_buf());
+    for name in ["config.ini", "vocab.txt", "corrections.txt"] {
+        let dst = canonical.join(name);
+        if dst.exists() {
+            continue;
+        }
+        let newest = candidates
+            .iter()
+            .filter(|c| std::fs::canonicalize(c).unwrap_or_else(|_| c.to_path_buf()) != canon)
+            .map(|c| c.join(name))
+            .filter(|p| p.is_file())
+            .filter_map(|p| {
+                std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| (t, p))
+            })
+            .max_by_key(|(t, _)| *t);
+        if let Some((_, src)) = newest {
+            match std::fs::copy(&src, &dst) {
+                Ok(_) => eprintln!(
+                    "adopted stray {name} from {} into {}",
+                    src.display(),
+                    canonical.display()
+                ),
+                Err(e) => eprintln!("could not adopt stray {}: {e}", src.display()),
+            }
+        }
+    }
 }
 
 pub(crate) fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
@@ -1148,6 +1248,102 @@ pub fn cancel_record(app: &AppHandle) {
     hide_pill(app, &ctx);
     play(&ctx, "cancel");
     eprintln!("recording cancelled");
+}
+
+#[cfg(test)]
+mod app_dir_tests {
+    use super::{adopt_strays_into, dev_crate_root};
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn set_mtime(path: &std::path::Path, when: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn dev_crate_root_walks_out_of_the_target_tree() {
+        let dir = TempDir::new().unwrap();
+        let crate_dir = dir.path().join("src-tauri");
+        let exe_dir = crate_dir.join("target").join("release");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(crate_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(dev_crate_root(&exe_dir), Some(crate_dir.clone()));
+        // test binaries live one level deeper (target/<profile>/deps)
+        let deps = exe_dir.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        assert_eq!(dev_crate_root(&deps), Some(crate_dir));
+    }
+
+    #[test]
+    fn dev_crate_root_is_none_outside_a_cargo_tree() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        assert_eq!(dev_crate_root(&bin), None, "installed exe: no crate root");
+        // a `target` dir without Cargo.toml next to it is not a cargo tree
+        let odd = dir.path().join("target").join("release");
+        fs::create_dir_all(&odd).unwrap();
+        assert_eq!(dev_crate_root(&odd), None);
+    }
+
+    #[test]
+    fn strays_adopt_newest_and_never_clobber_canonical() {
+        let root = TempDir::new().unwrap();
+        let canonical = root.path().join("canonical");
+        let old_cwd = root.path().join("old-cwd");
+        let home = root.path().join("home");
+        for d in [&canonical, &old_cwd, &home] {
+            fs::create_dir_all(d).unwrap();
+        }
+        // canonical already has a config.ini -> must stay untouched
+        fs::write(canonical.join("config.ini"), "[general]\ntheme = dark\n").unwrap();
+        fs::write(old_cwd.join("config.ini"), "[general]\ntheme = light\n").unwrap();
+        // vocab.txt exists in both strays -> the newest one wins
+        fs::write(old_cwd.join("vocab.txt"), "old words\n").unwrap();
+        fs::write(home.join("vocab.txt"), "new words\n").unwrap();
+        let now = SystemTime::now();
+        set_mtime(&old_cwd.join("vocab.txt"), now - Duration::from_secs(600));
+        set_mtime(&home.join("vocab.txt"), now - Duration::from_secs(60));
+        // corrections.txt only in the autostart-era home dir
+        fs::write(home.join("corrections.txt"), "tyro => Tiro\n").unwrap();
+        adopt_strays_into(&canonical, &[old_cwd.clone(), home.clone()]);
+        assert_eq!(
+            fs::read_to_string(canonical.join("config.ini")).unwrap(),
+            "[general]\ntheme = dark\n",
+            "existing canonical config must never be overwritten"
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("vocab.txt")).unwrap(),
+            "new words\n",
+            "most recently modified stray wins"
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("corrections.txt")).unwrap(),
+            "tyro => Tiro\n"
+        );
+        // strays are copied, not moved
+        assert!(old_cwd.join("vocab.txt").exists());
+        assert!(home.join("vocab.txt").exists());
+    }
+
+    #[test]
+    fn adoption_skips_the_canonical_dir_and_handles_nothing_to_do() {
+        let root = TempDir::new().unwrap();
+        let canonical = root.path().join("app");
+        fs::create_dir_all(&canonical).unwrap();
+        // canonical listed as its own candidate (CWD == app dir in dev
+        // launches) must not self-copy or invent files
+        adopt_strays_into(&canonical, std::slice::from_ref(&canonical));
+        assert!(!canonical.join("config.ini").exists());
+        assert!(!canonical.join("vocab.txt").exists());
+        assert!(!canonical.join("corrections.txt").exists());
+    }
 }
 
 #[cfg(test)]

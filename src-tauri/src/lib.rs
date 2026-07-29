@@ -351,6 +351,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Adopt CWD-era stray config/vocab files into the canonical app dir
+    // BEFORE anything loads the config (AppCtx::new below reads it).
+    flow::adopt_stray_app_files();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // LIFECYCLE-1: a second launch reaches the running instance.
