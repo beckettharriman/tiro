@@ -198,6 +198,17 @@ struct PendingRelease {
 
 /// Tap-vs-hold decision core for one hotkey. Pure — timestamps and live
 /// recording state are passed in — so the decision table is unit-testable.
+///
+/// Hostile input it must survive (all real under KDE Wayland + XWayland
+/// grabs): when the compositor moves keyboard focus mid-hold (e.g. the pill
+/// window mapping), XWayland synthesizes a KeyRelease for every held key to
+/// the grab client, with no matching re-press. That synthetic Released is
+/// indistinguishable from the real one and commits after the debounce — but
+/// the key is still physically down, so autorepeat later resumes as
+/// Released+Pressed pairs whose Pressed would otherwise look like a fresh
+/// press and toggle the take OFF mid-hold. The `resurrect` machinery below
+/// detects that shape (a repeat-shaped Pressed with no live press) and
+/// revives the committed hold instead of dispatching.
 #[derive(Default)]
 struct HoldCore {
     /// When the live press started; None = key is (logically) up.
@@ -212,6 +223,12 @@ struct HoldCore {
     /// When the last Released arrived; a Pressed hot on its heels is X11
     /// autorepeat rather than a new press.
     release_at: Option<Instant>,
+    /// `press_at` of the last take-starting hold whose release committed
+    /// while the recording kept going. If that "release" was synthetic
+    /// (XWayland focus change), the still-held key's autorepeat will show up
+    /// as a repeat-shaped Pressed — which revives this hold so the eventual
+    /// real release still finishes the take.
+    resurrect: Option<Instant>,
 }
 
 impl HoldCore {
@@ -220,28 +237,45 @@ impl HoldCore {
     /// the dispatch).
     fn press(&mut self, now: Instant, starts_take: bool) -> PressAction {
         self.generation += 1; // voids any pending release check
-        if self.press_at.is_some()
-            && self
-                .release_at
-                .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(REPEAT_MS))
-        {
-            // Autorepeat Pressed while the hold is live — swallow it (the
-            // bump above already voided its paired Released).
+        let repeat_shaped = self
+            .release_at
+            .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(REPEAT_MS));
+        if self.press_at.is_some() {
+            if repeat_shaped {
+                // Autorepeat Pressed while the hold is live — swallow it
+                // (the bump above already voided its paired Released).
+                return PressAction::Swallow;
+            }
+            // A press is "live" with no recent Released: the platform never
+            // delivered the previous release (degrade-to-toggle). Falls
+            // through to a fresh press.
+        } else if repeat_shaped {
+            // Second half of a Released+Pressed autorepeat pair with NO
+            // live press: the paired Released hit a hold that was already
+            // (wrongly) committed — the key is evidently still physically
+            // down, so this press must never dispatch (dispatching here is
+            // what toggled takes off mid-hold). If the committed hold
+            // started the take, revive it.
+            if let Some(press_at) = self.resurrect {
+                self.press_at = Some(press_at);
+                self.starts_take = true;
+            }
             return PressAction::Swallow;
         }
-        // Either the key was up, or a press is "live" with no recent
-        // Released — meaning the platform never delivered the previous
-        // release (degrade-to-toggle). Both are a fresh press.
         self.press_at = Some(now);
         self.starts_take = starts_take;
+        self.resurrect = None;
         PressAction::Dispatch
     }
 
     /// A Released arrived: snapshot it for resolution after the debounce.
-    /// None = stray release (e.g. the shortcut registered mid-hold).
+    /// None = stray release (e.g. the shortcut registered mid-hold, or the
+    /// hold was already committed by a synthetic release) — still recorded
+    /// in `release_at`, so a Pressed hot on its heels reads as the second
+    /// half of an autorepeat pair.
     fn release(&mut self, now: Instant) -> Option<PendingRelease> {
-        let press_at = self.press_at?;
         self.release_at = Some(now);
+        let press_at = self.press_at?;
         Some(PendingRelease {
             generation: self.generation,
             held: now.duration_since(press_at) >= Duration::from_millis(HOLD_MS),
@@ -257,12 +291,19 @@ impl HoldCore {
         if self.generation != pending.generation {
             return ReleaseAction::Inert; // autorepeat — the hold is still live
         }
-        self.press_at = None; // the real release
+        let press_at = self.press_at.take(); // the real release (or so it seems)
         if pending.held && pending.starts_take && recording {
+            self.resurrect = None;
             ReleaseAction::Finish
         } else {
             // A quick tap keeps recording — today's toggle; the next tap
-            // stops it.
+            // stops it. Remember a take-starting hold that leaves its
+            // recording running: if this "release" was synthetic, the
+            // still-held key's autorepeat resurrects the hold.
+            self.resurrect = match press_at {
+                Some(at) if pending.starts_take && recording => Some(at),
+                _ => None,
+            };
             ReleaseAction::Inert
         }
     }
@@ -888,6 +929,80 @@ mod tests {
         let p = c.release(t).expect("hold still live");
         assert!(p.held);
         assert_eq!(c.resolve(&p, true), ReleaseAction::Finish);
+    }
+
+    #[test]
+    fn focus_steal_synthetic_release_does_not_stop_the_hold() {
+        // THE KDE Wayland premature-stop bug: hold Ctrl+Alt+V, the take
+        // starts, the pill maps and the compositor moves keyboard focus —
+        // XWayland synthesizes a Released for the held chord (no re-press
+        // reaches the grab). It commits as if the user let go. When
+        // autorepeat resumes at the repeat delay as Released+Pressed pairs,
+        // the stray Released pairs with a Pressed that used to look like a
+        // fresh press and toggled the take OFF while the key was still
+        // physically held.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch); // hold starts the take
+        // ~150ms in: synthetic Released from the focus change, then silence
+        let synth = c.release(t0 + ms(150)).expect("hold is live");
+        assert!(!synth.held);
+        assert_eq!(c.resolve(&synth, true), ReleaseAction::Inert); // commits, recording on
+        // autorepeat resumes at the 600ms repeat delay: a Released+Pressed
+        // pair whose Released finds no live press...
+        let t1 = t0 + ms(600);
+        assert!(c.release(t1).is_none(), "stray release: hold was committed");
+        // ...and whose Pressed is repeat-shaped: swallowed, hold revived
+        assert_eq!(c.press(t1 + ms(3), false), PressAction::Swallow);
+        // further repeat pairs behave like normal autorepeat against the
+        // revived hold
+        let mut t = t1 + ms(40);
+        let mut voided = Vec::new();
+        for _ in 0..3 {
+            let p = c.release(t).expect("hold is live again");
+            assert_eq!(c.press(t + ms(3), false), PressAction::Swallow);
+            voided.push(p);
+            t += ms(40);
+        }
+        for p in &voided {
+            assert_eq!(c.resolve(p, true), ReleaseAction::Inert, "voided repeat");
+        }
+        // the real physical release finally lands — push-to-talk finishes,
+        // with the hold measured from the ORIGINAL press
+        let real = c.release(t + ms(100)).expect("hold is live");
+        assert!(real.held, "hold duration measured from the original press");
+        assert_eq!(c.resolve(&real, true), ReleaseAction::Finish);
+    }
+
+    #[test]
+    fn repeat_shaped_press_never_dispatches() {
+        // A Pressed hard on the heels of a Released is the second half of
+        // an autorepeat pair even when there is no live press and nothing
+        // to resurrect — it must never dispatch (a dispatch here is a
+        // spurious take toggle).
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert!(c.release(t0).is_none()); // stray release
+        assert_eq!(c.press(t0 + ms(10), true), PressAction::Swallow);
+        // a press a human-scale gap later is genuine
+        assert_eq!(c.press(t0 + ms(300), true), PressAction::Dispatch);
+    }
+
+    #[test]
+    fn synthetic_release_after_cancel_stays_dead() {
+        // Synthetic release commits mid-hold, the take is then cancelled
+        // elsewhere (recording = false at commit): nothing to resurrect —
+        // later repeat-shaped presses stay swallowed without reviving a
+        // hold, and the eventual real release is inert.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        let synth = c.release(t0 + ms(150)).expect("hold is live");
+        assert_eq!(c.resolve(&synth, false), ReleaseAction::Inert); // take already dead
+        let t1 = t0 + ms(600);
+        assert!(c.release(t1).is_none());
+        assert_eq!(c.press(t1 + ms(3), false), PressAction::Swallow);
+        assert!(c.release(t1 + ms(40)).is_none(), "no hold was revived");
     }
 
     #[test]
