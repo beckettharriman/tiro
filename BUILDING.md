@@ -53,14 +53,20 @@ sudo apt install build-essential cmake pkg-config \
 
 ### Global hotkeys on Wayland
 
-Global hotkeys are X11 keyboard grabs. In an X11 session they just work.
-In a **Wayland** session the compositor owns the keyboard: the grabs only
-fire while an XWayland window has focus, and not at all without an X
-server — Tiro logs a notice at startup when it detects this.
+In an X11 session global hotkeys are X11 keyboard grabs and just work.
+In a **Wayland** session the compositor owns the keyboard, so Tiro binds
+its combos through the `org.freedesktop.portal.GlobalShortcuts` portal
+instead: on KDE and GNOME the shortcuts fire regardless of which app has
+focus, and KDE lists them under System Settings → Shortcuts → Tiro. The
+X11 grabs stay registered as a bridge until the portal bind succeeds; if
+the portal is absent or denied (some compositors ship no GlobalShortcuts
+backend), Tiro keeps the grabs — which only fire while an XWayland
+window has focus — and logs the failure.
 
-The supported Wayland setup is a **desktop-level shortcut bound to Tiro's
-CLI**. A second `tiro` launch is forwarded to the running instance
-(single-instance IPC), so these commands act as a remote control:
+The everywhere-working Wayland fallback is a **desktop-level shortcut
+bound to Tiro's CLI**. A second `tiro` launch is forwarded to the
+running instance (single-instance IPC), so these commands act as a
+remote control:
 
 | Command         | Action                                |
 |-----------------|---------------------------------------|
@@ -74,9 +80,10 @@ Examples: GNOME → Settings → Keyboard → Custom Shortcuts; KDE → System
 Settings → Shortcuts → Add Command; sway/hyprland → `bindsym`/`bind`
 to `tiro --toggle`.
 
-The `org.freedesktop.portal.GlobalShortcuts` portal is the eventual
-native answer, but the shortcut plugin Tiro uses has no Wayland backend
-yet, so the CLI route is the documented, everywhere-working fallback.
+Rebinding a hotkey in the panel re-runs the portal bind (the portal has
+no unbind, so Tiro closes the old session and binds a fresh one); the
+new combo is offered as the preferred trigger, which KDE accepts without
+a dialog.
 
 ## GPU builds (optional)
 

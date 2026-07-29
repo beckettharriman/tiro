@@ -12,7 +12,9 @@
 //! the map/unmap; the fresh state snapshot follows asynchronously.
 //!
 //! Registration goes through tauri-plugin-global-shortcut (Win32 on Windows,
-//! X11 on Linux — the Wayland portal story is task 4.3).
+//! X11 on Linux); on Wayland sessions the GlobalShortcuts portal then takes
+//! over delivery (see `hotkeys_portal`), feeding the same `hotkey_event`
+//! entry point.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,8 +29,9 @@ use crate::api;
 use crate::flow::{self, lock, AppCtx};
 
 /// which -> config key, in the original's registration order (paste joined
-/// the scheme in the port).
-const ACTIONS: [(&str, &str); 4] = [
+/// the scheme in the port). The `which` names double as the stable shortcut
+/// ids the Wayland portal binds.
+pub(crate) const ACTIONS: [(&str, &str); 4] = [
     ("dictate", "dictation_hotkey"),
     ("paste", "paste_hotkey"),
     ("panel", "panel_hotkey"),
@@ -126,6 +129,97 @@ pub fn to_accelerator(hotkey: &str) -> Option<String> {
     Some(parts.join("+"))
 }
 
+/// Map one lowercase config hotkey part to the xkb keysym name that XDG
+/// "shortcuts"-spec triggers use ("space" -> "space", "v" -> "v",
+/// "pageup" -> "Page_Up"). Same key domain as `key_code`.
+fn keysym_name(part: &str) -> Option<String> {
+    let named = match part {
+        "space" => "space",
+        "enter" | "return" => "Return",
+        "tab" => "Tab",
+        "esc" | "escape" => "Escape",
+        "backspace" => "BackSpace",
+        "delete" => "Delete",
+        "insert" => "Insert",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "Page_Up",
+        "pagedown" => "Page_Down",
+        "up" => "Up",
+        "down" => "Down",
+        "left" => "Left",
+        "right" => "Right",
+        "`" => "grave",
+        "-" => "minus",
+        "=" => "equal",
+        "[" => "bracketleft",
+        "]" => "bracketright",
+        "\\" => "backslash",
+        ";" => "semicolon",
+        "'" => "apostrophe",
+        "," => "comma",
+        "." => "period",
+        "/" => "slash",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some(named.to_string());
+    }
+    if let Some(n) = part.strip_prefix('f') {
+        if !n.starts_with('0') && n.parse::<u8>().is_ok_and(|v| (1..=24).contains(&v)) {
+            return Some(format!("F{n}"));
+        }
+    }
+    let mut chars = part.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+/// A config hotkey string ("ctrl+alt+c") -> the XDG "shortcuts" spec trigger
+/// form the GlobalShortcuts portal takes as a preferred trigger
+/// ("CTRL+ALT+c"). Accepts exactly the combo strings `to_accelerator`
+/// accepts; like it, the last mappable non-modifier part wins and an
+/// unmappable one rejects the combo.
+pub fn to_portal_trigger(hotkey: &str) -> Option<String> {
+    let mut mods: Vec<&str> = Vec::new();
+    let mut key: Option<String> = None;
+    for p in hotkey.to_lowercase().split('+') {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        match p {
+            "ctrl" | "control" => {
+                if !mods.contains(&"CTRL") {
+                    mods.push("CTRL");
+                }
+            }
+            "alt" => {
+                if !mods.contains(&"ALT") {
+                    mods.push("ALT");
+                }
+            }
+            "shift" => {
+                if !mods.contains(&"SHIFT") {
+                    mods.push("SHIFT");
+                }
+            }
+            "win" | "windows" | "meta" | "cmd" => {
+                if !mods.contains(&"LOGO") {
+                    mods.push("LOGO");
+                }
+            }
+            _ => key = Some(keysym_name(p)?),
+        }
+    }
+    let key = key?;
+    let mut parts = mods;
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
 fn inflight() -> &'static Mutex<HashSet<&'static str>> {
     static INFLIGHT: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
@@ -198,6 +292,17 @@ struct PendingRelease {
 
 /// Tap-vs-hold decision core for one hotkey. Pure — timestamps and live
 /// recording state are passed in — so the decision table is unit-testable.
+///
+/// Hostile input it must survive (all real under KDE Wayland + XWayland
+/// grabs): when the compositor moves keyboard focus mid-hold (e.g. the pill
+/// window mapping), XWayland synthesizes a KeyRelease for every held key to
+/// the grab client, with no matching re-press. That synthetic Released is
+/// indistinguishable from the real one and commits after the debounce — but
+/// the key is still physically down, so autorepeat later resumes as
+/// Released+Pressed pairs whose Pressed would otherwise look like a fresh
+/// press and toggle the take OFF mid-hold. The `resurrect` machinery below
+/// detects that shape (a repeat-shaped Pressed with no live press) and
+/// revives the committed hold instead of dispatching.
 #[derive(Default)]
 struct HoldCore {
     /// When the live press started; None = key is (logically) up.
@@ -212,6 +317,12 @@ struct HoldCore {
     /// When the last Released arrived; a Pressed hot on its heels is X11
     /// autorepeat rather than a new press.
     release_at: Option<Instant>,
+    /// `press_at` of the last take-starting hold whose release committed
+    /// while the recording kept going. If that "release" was synthetic
+    /// (XWayland focus change), the still-held key's autorepeat will show up
+    /// as a repeat-shaped Pressed — which revives this hold so the eventual
+    /// real release still finishes the take.
+    resurrect: Option<Instant>,
 }
 
 impl HoldCore {
@@ -220,28 +331,45 @@ impl HoldCore {
     /// the dispatch).
     fn press(&mut self, now: Instant, starts_take: bool) -> PressAction {
         self.generation += 1; // voids any pending release check
-        if self.press_at.is_some()
-            && self
-                .release_at
-                .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(REPEAT_MS))
-        {
-            // Autorepeat Pressed while the hold is live — swallow it (the
-            // bump above already voided its paired Released).
+        let repeat_shaped = self
+            .release_at
+            .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(REPEAT_MS));
+        if self.press_at.is_some() {
+            if repeat_shaped {
+                // Autorepeat Pressed while the hold is live — swallow it
+                // (the bump above already voided its paired Released).
+                return PressAction::Swallow;
+            }
+            // A press is "live" with no recent Released: the platform never
+            // delivered the previous release (degrade-to-toggle). Falls
+            // through to a fresh press.
+        } else if repeat_shaped {
+            // Second half of a Released+Pressed autorepeat pair with NO
+            // live press: the paired Released hit a hold that was already
+            // (wrongly) committed — the key is evidently still physically
+            // down, so this press must never dispatch (dispatching here is
+            // what toggled takes off mid-hold). If the committed hold
+            // started the take, revive it.
+            if let Some(press_at) = self.resurrect {
+                self.press_at = Some(press_at);
+                self.starts_take = true;
+            }
             return PressAction::Swallow;
         }
-        // Either the key was up, or a press is "live" with no recent
-        // Released — meaning the platform never delivered the previous
-        // release (degrade-to-toggle). Both are a fresh press.
         self.press_at = Some(now);
         self.starts_take = starts_take;
+        self.resurrect = None;
         PressAction::Dispatch
     }
 
     /// A Released arrived: snapshot it for resolution after the debounce.
-    /// None = stray release (e.g. the shortcut registered mid-hold).
+    /// None = stray release (e.g. the shortcut registered mid-hold, or the
+    /// hold was already committed by a synthetic release) — still recorded
+    /// in `release_at`, so a Pressed hot on its heels reads as the second
+    /// half of an autorepeat pair.
     fn release(&mut self, now: Instant) -> Option<PendingRelease> {
-        let press_at = self.press_at?;
         self.release_at = Some(now);
+        let press_at = self.press_at?;
         Some(PendingRelease {
             generation: self.generation,
             held: now.duration_since(press_at) >= Duration::from_millis(HOLD_MS),
@@ -257,12 +385,29 @@ impl HoldCore {
         if self.generation != pending.generation {
             return ReleaseAction::Inert; // autorepeat — the hold is still live
         }
-        self.press_at = None; // the real release
+        let press_at = self.press_at.take(); // the real release (or so it seems)
         if pending.held && pending.starts_take && recording {
+            // KNOWN LIMIT (X11-grab path only): a synthetic Released from
+            // an XWayland focus loss arriving AFTER the hold threshold is
+            // indistinguishable from the real release — the same focus loss
+            // stops autorepeat, so no later event ever contradicts it, and
+            // a dispatched Finish cannot be un-finished. It resolves as a
+            // false push-to-talk finish and truncates the take. The
+            // `resurrect` guard below can only cover the pre-threshold
+            // shape. In practice the portal path (no synthetic edges)
+            // replaces the grabs on Wayland, and the pill's no-focus fix
+            // removes the main mid-hold focus steal.
+            self.resurrect = None;
             ReleaseAction::Finish
         } else {
             // A quick tap keeps recording — today's toggle; the next tap
-            // stops it.
+            // stops it. Remember a take-starting hold that leaves its
+            // recording running: if this "release" was synthetic, the
+            // still-held key's autorepeat resurrects the hold.
+            self.resurrect = match press_at {
+                Some(at) if pending.starts_take && recording => Some(at),
+                _ => None,
+            };
             ReleaseAction::Inert
         }
     }
@@ -287,6 +432,26 @@ fn press_starts_take(ctx: &AppCtx, which: &str) -> bool {
     match which {
         "paste" => !ctx.is_recording() && !ctx.is_transcribing(),
         _ => !ctx.is_recording(),
+    }
+}
+
+/// One hotkey edge from EITHER delivery backend — the X11/Win32 grab
+/// (tauri-plugin-global-shortcut) or the Wayland GlobalShortcuts portal
+/// (Activated = pressed, Deactivated = released). The dictate and paste
+/// keys feed the tap-vs-hold core with both edges; the others fire on the
+/// press edge only (panel presses go through `dispatch` into the
+/// never-drop panel queue).
+pub(crate) fn hotkey_event(app: &AppHandle, which: &'static str, pressed: bool) {
+    if which == "dictate" || which == "paste" {
+        let state = if pressed {
+            ShortcutState::Pressed
+        } else {
+            ShortcutState::Released
+        };
+        hold_event(app, which, state);
+    } else if pressed {
+        eprintln!("hotkey fired: {which}");
+        dispatch(app, which);
     }
 }
 
@@ -552,40 +717,80 @@ fn panel_hotkey_warning(app: &AppHandle, hk: &str) {
 
 /// `_register_all_hotkeys`: (re)register every configured hotkey; an
 /// unmappable or conflicting one is skipped with a log, never a crash.
+///
+/// On a Wayland session the grabs registered here are only a bridge: they
+/// go up instantly (so the app is never hotkey-less) and the GlobalShortcuts
+/// portal then rebinds the same combos compositor-level on a worker thread,
+/// dropping the grabs on success (see `hotkeys_portal`). Rebinds re-run the
+/// whole pass, which on the portal side closes the old session and binds a
+/// fresh one.
 pub fn register_all(app: &AppHandle) {
     // Piggyback on the startup registration pass: seed the panel's
     // remembered position from config and start move-tracking (idempotent —
     // rebind passes are no-ops).
     crate::placement::init_panel_tracking(app);
+    register_grabs(app, &configured_bindings(app));
+    #[cfg(target_os = "linux")]
+    if crate::hotkeys_portal::wayland_session() {
+        let mappable = portal_bindings(app);
+        if !mappable.is_empty() {
+            eprintln!(
+                "Wayland session: binding hotkeys through the GlobalShortcuts \
+                 portal (the X11 grabs stay up until it succeeds)"
+            );
+            crate::hotkeys_portal::spawn_register(app, mappable);
+        }
+    }
+}
+
+/// All configured (which, combo) pairs, unmappable ones included — the
+/// registration paths do their own filtering and logging.
+fn configured_bindings(app: &AppHandle) -> Vec<(&'static str, String)> {
+    let ctx = app.state::<AppCtx>();
+    let cfg = lock(&ctx.cfg);
+    ACTIONS
+        .iter()
+        .map(|(which, key)| (*which, cfg.get(key)))
+        .collect()
+}
+
+/// The bindings the portal should bind: everything that parses. An
+/// unparsable combo is skipped exactly like the grab path skips it.
+#[cfg(target_os = "linux")]
+pub(crate) fn portal_bindings(app: &AppHandle) -> Vec<(&'static str, String)> {
+    configured_bindings(app)
+        .into_iter()
+        .filter(|(_, hk)| api::parse_hotkey(hk))
+        .collect()
+}
+
+/// Portal-recovery path: put the X11 grabs back NOW (the portal just died;
+/// the app must never be hotkey-less) without spawning another portal pass —
+/// the caller runs its own bounded retries.
+#[cfg(target_os = "linux")]
+pub(crate) fn reregister_grabs(app: &AppHandle) {
+    register_grabs(app, &configured_bindings(app));
+}
+
+/// Register `bindings` as plugin shortcuts (Win32 hooks on Windows, X11
+/// grabs on Linux), replacing whatever was registered before.
+fn register_grabs(app: &AppHandle, bindings: &[(&'static str, String)]) {
     let gs = app.global_shortcut();
     if let Err(e) = gs.unregister_all() {
         eprintln!("hotkey unregister_all failed: {e}");
     }
-    let ctx = app.state::<AppCtx>();
-    let bindings: Vec<(&'static str, String)> = {
-        let cfg = lock(&ctx.cfg);
-        ACTIONS
-            .iter()
-            .map(|(which, key)| (*which, cfg.get(key)))
-            .collect()
-    };
     for (which, hk) in bindings {
-        if !api::parse_hotkey(&hk) {
+        let which = *which;
+        if !api::parse_hotkey(hk) {
             eprintln!("hotkey '{which}' = '{hk}' is unmappable; skipped");
             continue;
         }
-        let Some(accel) = to_accelerator(&hk) else {
+        let Some(accel) = to_accelerator(hk) else {
             eprintln!("hotkey '{which}' = '{hk}' is unmappable; skipped");
             continue;
         };
         let result = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
-            if which == "dictate" || which == "paste" {
-                // Tap = toggle, hold = push-to-talk; needs both states.
-                hold_event(app, which, event.state);
-            } else if event.state == ShortcutState::Pressed {
-                eprintln!("hotkey fired: {which}");
-                dispatch(app, which);
-            }
+            hotkey_event(app, which, event.state == ShortcutState::Pressed);
         });
         match result {
             Ok(()) => eprintln!("hotkey registered: {which} = {hk}"),
@@ -594,22 +799,10 @@ pub fn register_all(app: &AppHandle) {
                     "hotkey registration FAILED for {which} = {hk} ({e}; in use by another app?)"
                 );
                 if which == "panel" {
-                    panel_hotkey_warning(app, &hk);
+                    panel_hotkey_warning(app, hk);
                 }
             }
         }
-    }
-    // Global hotkeys are X11 grabs on Linux; in a Wayland session they can
-    // only fire while an XWayland window has focus (or not at all with no
-    // X server). Point at the documented DE-shortcut fallback.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        eprintln!(
-            "Wayland session detected: global hotkeys use X11 grabs and may \
-             not fire while native Wayland apps have focus. Bind DE-level \
-             shortcuts to `tiro --toggle` / `tiro --panel` / `tiro --cancel` \
-             instead (see BUILDING.md)."
-        );
     }
 }
 
@@ -651,6 +844,63 @@ mod tests {
         assert_eq!(to_accelerator("ctrl+alt"), None, "no non-modifier key");
         assert_eq!(to_accelerator("ctrl+bogus"), None);
         assert_eq!(to_accelerator("ctrl+f25"), None);
+    }
+
+    #[test]
+    fn portal_triggers_for_the_defaults() {
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+space").as_deref(),
+            Some("CTRL+ALT+space")
+        );
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+v").as_deref(),
+            Some("CTRL+ALT+v")
+        );
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+c").as_deref(),
+            Some("CTRL+ALT+c")
+        );
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+x").as_deref(),
+            Some("CTRL+ALT+x")
+        );
+    }
+
+    #[test]
+    fn portal_trigger_key_forms() {
+        // letters and digits keep their xkb keysym names verbatim
+        assert_eq!(to_portal_trigger("shift+a").as_deref(), Some("SHIFT+a"));
+        assert_eq!(to_portal_trigger("win+5").as_deref(), Some("LOGO+5"));
+        assert_eq!(to_portal_trigger("meta+9").as_deref(), Some("LOGO+9"));
+        assert_eq!(to_portal_trigger("shift+f12").as_deref(), Some("SHIFT+F12"));
+        assert_eq!(
+            to_portal_trigger("ctrl+pageup").as_deref(),
+            Some("CTRL+Page_Up")
+        );
+        assert_eq!(to_portal_trigger("ctrl+`").as_deref(), Some("CTRL+grave"));
+        assert_eq!(to_portal_trigger("esc").as_deref(), Some("Escape"));
+        assert_eq!(
+            to_portal_trigger("ctrl+backspace").as_deref(),
+            Some("CTRL+BackSpace")
+        );
+        // duplicate/alias modifiers collapse, mixed case accepted
+        assert_eq!(
+            to_portal_trigger("Ctrl+Control+Shift+C").as_deref(),
+            Some("CTRL+SHIFT+c")
+        );
+    }
+
+    #[test]
+    fn portal_trigger_rejects_what_the_accelerator_rejects() {
+        for combo in ["", "ctrl+alt", "ctrl+bogus", "ctrl+f25"] {
+            assert_eq!(to_portal_trigger(combo), None, "combo {combo:?}");
+            assert_eq!(to_accelerator(combo), None, "combo {combo:?}");
+        }
+        // and both accept the same valid domain
+        for combo in ["ctrl+alt+space", "win+f1", "shift+.", "ctrl+alt+enter"] {
+            assert!(to_portal_trigger(combo).is_some(), "combo {combo:?}");
+            assert!(to_accelerator(combo).is_some(), "combo {combo:?}");
+        }
     }
 
     use PanelCmd::{Summon, Toggle};
@@ -888,6 +1138,82 @@ mod tests {
         let p = c.release(t).expect("hold still live");
         assert!(p.held);
         assert_eq!(c.resolve(&p, true), ReleaseAction::Finish);
+    }
+
+    #[test]
+    fn focus_steal_synthetic_release_does_not_stop_the_hold() {
+        // THE KDE Wayland premature-stop bug: hold Ctrl+Alt+V, the take
+        // starts, the pill maps and the compositor moves keyboard focus —
+        // XWayland synthesizes a Released for the held chord (no re-press
+        // reaches the grab). It commits as if the user let go. When
+        // autorepeat resumes at the repeat delay as Released+Pressed pairs,
+        // the stray Released pairs with a Pressed that used to look like a
+        // fresh press and toggled the take OFF while the key was still
+        // physically held.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        // the hold starts the take
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        // ~150ms in: synthetic Released from the focus change, then silence
+        let synth = c.release(t0 + ms(150)).expect("hold is live");
+        assert!(!synth.held);
+        // the debounce expires with recording still on: it commits
+        assert_eq!(c.resolve(&synth, true), ReleaseAction::Inert);
+        // autorepeat resumes at the 600ms repeat delay: a Released+Pressed
+        // pair whose Released finds no live press...
+        let t1 = t0 + ms(600);
+        assert!(c.release(t1).is_none(), "stray release: hold was committed");
+        // ...and whose Pressed is repeat-shaped: swallowed, hold revived
+        assert_eq!(c.press(t1 + ms(3), false), PressAction::Swallow);
+        // further repeat pairs behave like normal autorepeat against the
+        // revived hold
+        let mut t = t1 + ms(40);
+        let mut voided = Vec::new();
+        for _ in 0..3 {
+            let p = c.release(t).expect("hold is live again");
+            assert_eq!(c.press(t + ms(3), false), PressAction::Swallow);
+            voided.push(p);
+            t += ms(40);
+        }
+        for p in &voided {
+            assert_eq!(c.resolve(p, true), ReleaseAction::Inert, "voided repeat");
+        }
+        // the real physical release finally lands — push-to-talk finishes,
+        // with the hold measured from the ORIGINAL press
+        let real = c.release(t + ms(100)).expect("hold is live");
+        assert!(real.held, "hold duration measured from the original press");
+        assert_eq!(c.resolve(&real, true), ReleaseAction::Finish);
+    }
+
+    #[test]
+    fn repeat_shaped_press_never_dispatches() {
+        // A Pressed hard on the heels of a Released is the second half of
+        // an autorepeat pair even when there is no live press and nothing
+        // to resurrect — it must never dispatch (a dispatch here is a
+        // spurious take toggle).
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert!(c.release(t0).is_none()); // stray release
+        assert_eq!(c.press(t0 + ms(10), true), PressAction::Swallow);
+        // a press a human-scale gap later is genuine
+        assert_eq!(c.press(t0 + ms(300), true), PressAction::Dispatch);
+    }
+
+    #[test]
+    fn synthetic_release_after_cancel_stays_dead() {
+        // Synthetic release commits mid-hold, the take is then cancelled
+        // elsewhere (recording = false at commit): nothing to resurrect —
+        // later repeat-shaped presses stay swallowed without reviving a
+        // hold, and the eventual real release is inert.
+        let mut c = HoldCore::default();
+        let t0 = Instant::now();
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
+        let synth = c.release(t0 + ms(150)).expect("hold is live");
+        assert_eq!(c.resolve(&synth, false), ReleaseAction::Inert); // take already dead
+        let t1 = t0 + ms(600);
+        assert!(c.release(t1).is_none());
+        assert_eq!(c.press(t1 + ms(3), false), PressAction::Swallow);
+        assert!(c.release(t1 + ms(40)).is_none(), "no hold was revived");
     }
 
     #[test]
