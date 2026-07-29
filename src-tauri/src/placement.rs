@@ -347,12 +347,38 @@ pub const PANEL_W_COMPACT: u32 = 400;
 pub const PANEL_W_EXPANDED: u32 = 800;
 pub const PANEL_H: u32 = 560;
 
-/// Resize the panel window for the advanced (expanded) surface. The window
-/// is borderless and pinned by min==max size constraints (that is what
-/// keeps a `resizable: true` frameless window fixed on every WM), so the
-/// constraints and the size move together. Expanding can push the right
-/// edge past the work area — clamp x so the whole surface stays visible
-/// (the Moved event this triggers persists the shift like any drag).
+/// New window x that keeps the RIGHT edge fixed across a width change
+/// (the design's expand anchor is the top-right corner), clamped so the
+/// whole surface stays inside the work area — the left edge wins when the
+/// area is narrower than the window. Physical px. Pure, extracted for
+/// tests.
+fn anchored_right_x(old_x: i32, old_w: i32, new_w: i32, work: Option<(i32, i32, i32, i32)>) -> i32 {
+    let x = old_x + old_w - new_w;
+    match work {
+        Some((wl, _, wr, _)) => x.min(wr - new_w).max(wl),
+        None => x,
+    }
+}
+
+/// Resize the panel window for the advanced (expanded) surface — one shot,
+/// anchored so the TOP-RIGHT corner stays put (the design's anchor). The
+/// glass surface is right-aligned inside the window (styles.css `body`),
+/// so preserving the right edge keeps the visible panel pinned while the
+/// window changes width around it — and a later collapse lands the panel
+/// exactly where the user left it (no drift).
+///
+/// The native resize is deliberately INSTANT in both directions; the
+/// 520 ms motion the eye tracks is the CSS width transition on the glass
+/// inside the transparent window. app.js orders the two so the window
+/// never moves mid-animation: expand resizes the window first and starts
+/// the CSS grow only once the viewport is wide; collapse animates the CSS
+/// down first and calls this after the settle.
+///
+/// The window is borderless and pinned by min==max size constraints (that
+/// is what keeps a `resizable: true` frameless window fixed on every WM);
+/// the constraints move with the size, direction-aware so min never
+/// exceeds max in between (a contradictory hint pair is WM-defined and
+/// can cost an extra configure round-trip).
 pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
@@ -365,23 +391,28 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
             PANEL_W_COMPACT
         };
         let size = tauri::LogicalSize::new(width, PANEL_H);
-        let _ = w.set_min_size(Some(size));
-        let _ = w.set_max_size(Some(size));
-        let _ = w.set_size(size);
+        // Anchor math needs the CURRENT frame, captured before any resize
+        // (or hint enforcement) lands.
+        let old = w.outer_position().ok().zip(w.outer_size().ok());
         if on {
+            let _ = w.set_max_size(Some(size));
+            let _ = w.set_min_size(Some(size));
+        } else {
+            let _ = w.set_min_size(Some(size));
+            let _ = w.set_max_size(Some(size));
+        }
+        let _ = w.set_size(size);
+        if let Some((pos, osize)) = old {
             let scale = w.scale_factor().unwrap_or(1.0);
             let phys_w = (f64::from(width) * scale).round() as i32;
-            if let (Ok(pos), Some((wl, _, wr, _))) = (w.outer_position(), active_work_area(&app)) {
-                // left-align when the work area is narrower than the panel
-                let x = pos.x.min(wr - phys_w).max(wl);
-                if x != pos.x {
-                    let _ = w.set_position(PhysicalPosition::new(x, pos.y));
-                    // Update the remembered spot NOW, not via the async
-                    // Moved event: a reposition burst racing this expand
-                    // re-applies whatever is remembered, and the pre-expand
-                    // x would hang the 800px surface off-screen.
-                    *lock(&state(&app).panel_pos) = Some((x, pos.y));
-                }
+            let x = anchored_right_x(pos.x, osize.width as i32, phys_w, active_work_area(&app));
+            if x != pos.x {
+                let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                // Update the remembered spot NOW, not via the async Moved
+                // event: a reposition burst racing this re-applies whatever
+                // is remembered, and the stale x would hang the resized
+                // surface at the wrong spot.
+                *lock(&state(&app).panel_pos) = Some((x, pos.y));
             }
         }
     });
@@ -562,6 +593,35 @@ mod tests {
             Some((680, 40 + (1040 - 640) / 2 + 1040 / 16))
         );
         assert_eq!(centered_spot((0, 0, 0, 0), 560, 640), None);
+    }
+
+    #[test]
+    fn expand_anchors_the_top_right_corner() {
+        let work = Some((0, 0, 1920, 1080));
+        // 400 -> 800: x drops by the width delta, right edge unchanged.
+        assert_eq!(anchored_right_x(1000, 400, 800, work), 600);
+        // collapse restores the exact pre-expand spot (no drift)
+        assert_eq!(anchored_right_x(600, 800, 400, work), 1000);
+        // same width -> same x (idempotent re-apply)
+        assert_eq!(anchored_right_x(600, 800, 800, work), 600);
+    }
+
+    #[test]
+    fn expand_clamps_into_the_work_area() {
+        let work = Some((0, 0, 1920, 1080));
+        // no room to the left: pin to the work-area left edge
+        assert_eq!(anchored_right_x(100, 400, 800, work), 0);
+        // never past the right edge either
+        assert_eq!(anchored_right_x(1900, 400, 800, work), 1120);
+        // work area narrower than the panel: left edge wins
+        assert_eq!(anchored_right_x(300, 400, 800, Some((0, 0, 600, 400))), 0);
+        // secondary monitor offsets carry through
+        assert_eq!(
+            anchored_right_x(2000, 400, 800, Some((1920, 0, 3840, 1080))),
+            1920
+        );
+        // no monitor info: raw anchor math, no clamp
+        assert_eq!(anchored_right_x(50, 400, 800, None), -350);
     }
 
     #[test]
