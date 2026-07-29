@@ -28,7 +28,9 @@ cpal = "0.18.1"
 rodio = "0.22.2"
 arboard = "3.6.1"
 regex = "1.13.1"
-whisper-rs = "0.16.0"
+# raw-api exposes the ggml backend-device enumeration used by the
+# `--gpu-enum` child (hw.rs); it changes no resolved dependencies.
+whisper-rs = { version = "0.16.0", features = ["raw-api"] }
 ureq = "3.3.0"
 hound = "3.5.1"
 tauri-plugin-dialog = "2.7.2"

@@ -95,6 +95,12 @@ fn main() {
     if args.iter().any(|a| a == "--gpu-worker") {
         std::process::exit(tiro_lib::gpu_worker::run(&args));
     }
+    if args.iter().any(|a| a == "--gpu-enum") {
+        // Vulkan device enumeration in a disposable child: the GPU context
+        // it creates dies with this process (design rule 1 — the main
+        // process never touches the GPU, not even to enumerate).
+        std::process::exit(tiro_lib::hw::gpu_enum_main());
+    }
     if std::env::args().any(|a| a == "--record-test") {
         tiro_lib::audio::record_test();
         return;

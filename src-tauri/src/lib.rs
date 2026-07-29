@@ -15,6 +15,7 @@ pub mod gpu_worker;
 pub mod hotkeys;
 #[cfg(target_os = "linux")]
 pub mod hotkeys_portal;
+pub mod hw;
 pub mod inject;
 pub mod placement;
 pub mod power;
