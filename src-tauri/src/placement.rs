@@ -360,9 +360,137 @@ pub fn summon_front(app: &AppHandle) {
     });
 }
 
+/// X11 (Linux): finish the pill's ICCCM "No Input" contract so no window
+/// manager ever focuses or activates it.
+///
+/// `focusable: false` gets tao/GTK as far as WM_HINTS `input = False`, but
+/// GDK unconditionally advertises WM_TAKE_FOCUS in WM_PROTOCOLS when it
+/// realizes a toplevel (gtk3 `gdk/x11/gdkwindow-x11.c`, `set_wm_protocols`).
+/// Per ICCCM 4.1.7, `input = False` *with* WM_TAKE_FOCUS is the "Globally
+/// Active" input model, and KWin counts such a window as focus-wanting
+/// (`wantsInput()` is `acceptsFocus() || supportsProtocol(TakeFocus)`), so
+/// it still activates the pill when it maps — deactivating the app being
+/// dictated into and breaking paste-at-cursor, even though the client never
+/// grabs X focus itself. Removing WM_TAKE_FOCUS turns the pair
+/// (`input = False`, no WM_TAKE_FOCUS) into the "No Input" model, which
+/// window managers must never focus or activate.
+///
+/// GDK rewrites WM_PROTOCOLS on every realize, so this hooks `realize`
+/// (strip before the map that follows) and `map` (re-assert on every show),
+/// plus one immediate strip for the already-realized hidden window. Windows
+/// needs none of this: `focusable: false` maps to WS_EX_NOACTIVATE there.
+#[cfg(target_os = "linux")]
+pub fn pill_no_input_fixup(app: &tauri::App) {
+    use gtk::prelude::*;
+    let Some(pill) = app.webview_windows().get("pill").cloned() else {
+        return;
+    };
+    let Ok(gtk_win) = pill.gtk_window() else {
+        return;
+    };
+    gtk_win.connect_realize(|w| strip_wm_take_focus(w.upcast_ref::<gtk::Widget>()));
+    gtk_win.connect_map(|w| strip_wm_take_focus(w.upcast_ref::<gtk::Widget>()));
+    if gtk_win.is_realized() {
+        strip_wm_take_focus(gtk_win.upcast_ref::<gtk::Widget>());
+    }
+}
+
+/// Rewrite the widget's WM_PROTOCOLS without WM_TAKE_FOCUS (no-op when the
+/// property is absent or already clean). Runs on the GTK main thread only.
+#[cfg(target_os = "linux")]
+fn strip_wm_take_focus(widget: &gtk::Widget) {
+    use gtk::gdk;
+    use gtk::glib::translate::ToGlibPtr;
+    use gtk::prelude::*;
+
+    let Some(gdk_win) = widget.window() else {
+        return;
+    };
+    let wm_protocols = gdk::Atom::intern("WM_PROTOCOLS");
+    let atom_type = gdk::Atom::intern("ATOM");
+    let take_focus = gdk::Atom::intern("WM_TAKE_FOCUS");
+
+    // gdk_property_get with type ATOM returns the entries converted to
+    // GdkAtom (pointer-sized each); actual_length is in bytes.
+    let mut actual_type: gdk::ffi::GdkAtom = std::ptr::null_mut();
+    let mut actual_format: std::os::raw::c_int = 0;
+    let mut actual_length: std::os::raw::c_int = 0;
+    let mut data: *mut u8 = std::ptr::null_mut();
+    let found = unsafe {
+        gdk::ffi::gdk_property_get(
+            gdk_win.to_glib_none().0,
+            wm_protocols.to_glib_none().0,
+            atom_type.to_glib_none().0,
+            0,
+            1024, // plenty: GDK writes at most 4 protocol atoms
+            0,    // pdelete = false
+            &mut actual_type,
+            &mut actual_format,
+            &mut actual_length,
+            &mut data,
+        )
+    } != gtk::glib::ffi::GFALSE;
+    if !found || data.is_null() {
+        return;
+    }
+    let count = actual_length as usize / std::mem::size_of::<gdk::ffi::GdkAtom>();
+    let atoms: Vec<usize> = unsafe {
+        std::slice::from_raw_parts(data as *const gdk::ffi::GdkAtom, count)
+            .iter()
+            .map(|&a| a as usize)
+            .collect()
+    };
+    unsafe { gtk::glib::ffi::g_free(data as *mut _) };
+
+    let Some(kept) = without_protocol(&atoms, take_focus.value()) else {
+        return; // WM_TAKE_FOCUS was not advertised; nothing to do
+    };
+    // gdk_property_change with type ATOM expects GdkAtom values and converts
+    // them back to X atoms; c_ulong and GdkAtom are both pointer-sized here.
+    let kept: Vec<std::os::raw::c_ulong> = kept
+        .into_iter()
+        .map(|a| a as std::os::raw::c_ulong)
+        .collect();
+    gdk::property_change(
+        &gdk_win,
+        &wm_protocols,
+        &atom_type,
+        32,
+        gdk::PropMode::Replace,
+        gdk::ChangeData::ULongs(&kept),
+    );
+}
+
+/// Pure core of the WM_PROTOCOLS strip: drop `unwanted` from `atoms`.
+/// Returns `None` when `unwanted` is not present (callers skip the X write —
+/// rewriting an unchanged property every map would just spam PropertyNotify).
+#[cfg(target_os = "linux")]
+fn without_protocol(atoms: &[usize], unwanted: usize) -> Option<Vec<usize>> {
+    if !atoms.contains(&unwanted) {
+        return None;
+    }
+    Some(atoms.iter().copied().filter(|&a| a != unwanted).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wm_protocols_strip_drops_only_take_focus() {
+        // Atom values are opaque ids; stand-ins are fine for the pure core.
+        let (delete, take_focus, ping, sync) = (11, 22, 33, 44);
+        // The exact list GDK writes at realize -> TAKE_FOCUS removed, order kept.
+        assert_eq!(
+            without_protocol(&[delete, take_focus, ping, sync], take_focus),
+            Some(vec![delete, ping, sync])
+        );
+        // Already clean -> None, so callers never rewrite the property.
+        assert_eq!(without_protocol(&[delete, ping, sync], take_focus), None);
+        // Empty / absent property -> None.
+        assert_eq!(without_protocol(&[], take_focus), None);
+    }
 
     #[test]
     fn panel_pos_parses_x_comma_y() {

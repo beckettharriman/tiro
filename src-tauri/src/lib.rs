@@ -402,6 +402,14 @@ pub fn run() {
                     let _ = pill.set_focusable(false);
                 }
             }
+            // WM_HINTS input=False alone is NOT enough on X11: GDK also
+            // advertises WM_TAKE_FOCUS, which keeps the pill in the ICCCM
+            // "Globally Active" input model that KWin still activates on
+            // map (live failure: showing the pill deselected Chrome's
+            // search bar mid-dictation). Strip it to reach the true
+            // "No Input" model. See placement::pill_no_input_fixup.
+            #[cfg(target_os = "linux")]
+            placement::pill_no_input_fixup(app);
             // The panel is configured hidden (summoned by hotkey/tray, which
             // land in phase 2/3); dev builds show it at startup so there is
             // something to work against. The pill is driven by the recording
