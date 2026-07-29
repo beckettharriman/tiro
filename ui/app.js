@@ -266,8 +266,9 @@
     models: [],
     modelProgress: {},           // model name -> latest progress payload
     vocab: { hotwords: [], corrections: [] },
-    days: [],                    // iso days, newest first
-    dayIdx: 0,
+    days: [],                    // iso days, newest first; [0] is always today
+    dayIdx: 0,                   // day the jumper points at (scroll-spied)
+    histLoaded: 0,               // index of the oldest day section rendered
     dayCache: {},                // iso day -> entries (today reads App.entries live)
     allDaysLoaded: false
   };
@@ -353,9 +354,13 @@
 
   function loadDays() {
     return Promise.resolve(api.history_days()).then((days) => {
-      App.days = Array.isArray(days) && days.length ? days : [todayIso()];
+      App.days = Array.isArray(days) ? days.slice() : [];
+      // the backend only lists days that have transcripts on disk — today
+      // leads the list even before its first take (one-day default view)
+      if (App.days[0] !== todayIso()) App.days.unshift(todayIso());
+      if (App.histLoaded >= App.days.length) App.histLoaded = App.days.length - 1;
       if (App.dayIdx >= App.days.length) App.dayIdx = 0;
-    }).catch(() => { App.days = [todayIso()]; });
+    }).catch(() => { App.days = [todayIso()]; App.histLoaded = 0; App.dayIdx = 0; });
   }
 
   function ensureAllDays() {
@@ -364,6 +369,30 @@
       .then(() => { App.allDaysLoaded = true; });
   }
 
+  /* One day section: sticky header + that day's entries. Only today can
+     be empty (older days come from history_days, which lists only days
+     with transcripts on disk) — its empty state points back at the older
+     days one scroll away. */
+  function daySection(iso, list) {
+    const sec = h("section", { class: "dayseg", "data-day": iso },
+      h("div", { class: "dayhdr", text: dayLabel(iso) }));
+    const body = h("div", { class: "daybody" });
+    list.forEach((e) => body.appendChild(makeEntry(e)));
+    if (!list.length) {
+      body.appendChild(h("div", {
+        class: "dayempty",
+        text: App.days.length > 1
+          ? "No transcripts yet today — scroll down for earlier days."
+          : "No transcripts yet today."
+      }));
+    }
+    sec.appendChild(body);
+    return sec;
+  }
+
+  /* The advanced History view opens on TODAY only; older days append one
+     at a time as you scroll back (or via the day jumper), each fetched
+     once through history_entries and cached. */
   let advToken = 0;
   function renderAdv() {
     const token = ++advToken;
@@ -391,17 +420,82 @@
       return;
     }
     $("noRes").style.display = "none";
-    const day = App.days[App.dayIdx] || todayIso();
-    entriesForDay(day).then((list) => {
+    if (App.histLoaded >= App.days.length) App.histLoaded = Math.max(0, App.days.length - 1);
+    const daysToShow = App.days.slice(0, App.histLoaded + 1);
+    Promise.all(daysToShow.map(entriesForDay)).then((lists) => {
       if (token !== advToken) return;
       advList.innerHTML = "";
-      list.forEach((e) => advList.appendChild(makeEntry(e)));
+      daysToShow.forEach((d, i) => advList.appendChild(daySection(d, lists[i])));
       pager.style.display = "flex";
-      $("pagerDay").textContent = dayLabel(day);
-      $("pagerNewer").disabled = App.dayIdx === 0;
-      $("pagerOlder").disabled = App.dayIdx >= App.days.length - 1;
+      syncPager();
     });
   }
+
+  const mainEl = $("main");
+  function daySections() {
+    return Array.prototype.slice.call(advList.querySelectorAll(".dayseg"));
+  }
+  function histScrolling() {
+    return App.adv && App.view === "history" && !searchInput.value.trim();
+  }
+
+  /* Append the next older day below the ones already shown. */
+  let histLoading = false;
+  function loadOlderDay() {
+    if (histLoading || !histScrolling() || App.histLoaded >= App.days.length - 1) {
+      return Promise.resolve(false);
+    }
+    histLoading = true;
+    const idx = App.histLoaded + 1;
+    const iso = App.days[idx];
+    return entriesForDay(iso).then((list) => {
+      histLoading = false;
+      if (!histScrolling() || App.histLoaded >= idx) return true;
+      App.histLoaded = idx;
+      advList.appendChild(daySection(iso, list));
+      syncPager();
+      return true;
+    }, () => { histLoading = false; return false; });
+  }
+
+  /* Day jumper: label follows the day under the top of the viewport;
+     Older loads/scrolls one day back, Newer scrolls one day forward. */
+  function syncPager() {
+    const day = App.days[App.dayIdx] || todayIso();
+    $("pagerDay").textContent = dayLabel(day);
+    $("pagerNewer").disabled = App.dayIdx === 0;
+    $("pagerOlder").disabled = App.dayIdx >= App.days.length - 1;
+  }
+  function syncPagerFromScroll() {
+    const secs = daySections();
+    if (!secs.length) return;
+    const mtop = mainEl.getBoundingClientRect().top;
+    let idx = 0;
+    secs.forEach((s, i) => { if (s.getBoundingClientRect().top - mtop <= 40) idx = i; });
+    if (idx !== App.dayIdx) { App.dayIdx = idx; syncPager(); }
+  }
+  function scrollToDay(idx) {
+    const sec = daySections()[idx];
+    if (!sec) return;
+    const mtop = mainEl.getBoundingClientRect().top;
+    const y = mainEl.scrollTop + (sec.getBoundingClientRect().top - mtop) - 4;
+    mainEl.scrollTo({ top: Math.max(0, y), behavior: motionReduced() ? "auto" : "smooth" });
+    App.dayIdx = idx;
+    syncPager();
+  }
+
+  mainEl.addEventListener("scroll", () => {
+    if (!histScrolling()) return;
+    syncPagerFromScroll();
+    if (mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 120) loadOlderDay();
+  });
+  /* a short day never overflows, so bottom-of-scroll alone can't reach the
+     past — a downward wheel at the bottom (or with nothing to scroll) also
+     pulls in the previous day */
+  mainEl.addEventListener("wheel", (e) => {
+    if (!histScrolling() || e.deltaY <= 0) return;
+    if (mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4) loadOlderDay();
+  }, { passive: true });
 
   searchInput.addEventListener("input", () => {
     searchBox.classList.toggle("hasq", !!searchInput.value.trim());
@@ -414,10 +508,12 @@
     searchInput.focus();
   });
   $("pagerOlder").addEventListener("click", () => {
-    if (App.dayIdx < App.days.length - 1) { App.dayIdx++; renderAdv(); }
+    const target = Math.min(App.dayIdx + 1, App.days.length - 1);
+    if (target <= App.histLoaded) { scrollToDay(target); return; }
+    loadOlderDay().then((ok) => { if (ok) scrollToDay(App.histLoaded); });
   });
   $("pagerNewer").addEventListener("click", () => {
-    if (App.dayIdx > 0) { App.dayIdx--; renderAdv(); }
+    if (App.dayIdx > 0) scrollToDay(App.dayIdx - 1);
   });
 
   /* ════════════════════════════════════════════════════════════════════
@@ -489,8 +585,8 @@
      sees move:
        grow:   window jumps to 800 FIRST, then the glass animates 400->800
                inside the already-big window once the viewport is actually
-               wide (resize event — the invoke ack races the real resize,
-               so starting on the ack alone clips the animation);
+               wide (rAF poll on innerWidth — the invoke ack races the real
+               resize, so starting on the ack alone clips the animation);
        shrink: the glass animates down first, the window snaps to 400 only
                after the 520 ms settle (instantly under reduced motion).
      While the window is wider than the glass (~520 ms per direction) the
@@ -556,7 +652,12 @@
     void view.offsetWidth; /* restart entrance stagger */
     view.classList.add("on");
     $("main").scrollTop = 0;
-    if (v === "history") { loadDays().then(renderAdv); }
+    if (v === "history") {
+      /* one-day default: every visit starts at today only */
+      App.histLoaded = 0;
+      App.dayIdx = 0;
+      loadDays().then(renderAdv);
+    }
     if (v === "vocab") loadVocab();
     if (v === "models") refreshModels();
   }
@@ -1291,8 +1392,13 @@
     App.entries.unshift(entry);
     panel.classList.remove("is-empty");
     listEl.prepend(makeEntry(entry, true));
-    if (App.adv && App.view === "history" && App.dayIdx === 0 && !searchInput.value.trim()) {
-      advList.prepend(makeEntry(entry, true));
+    if (App.adv && App.view === "history" && !searchInput.value.trim()) {
+      const body = advList.querySelector('.dayseg[data-day="' + todayIso() + '"] .daybody');
+      if (body) {
+        const ph = body.querySelector(".dayempty");
+        if (ph) ph.remove();
+        body.prepend(makeEntry(entry, true));
+      }
     }
   };
 
