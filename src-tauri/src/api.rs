@@ -6,8 +6,9 @@
 //! Not yet live here: the `powerMode` device swap (device orchestration,
 //! task 3.5) — the config write is real, the side effect joins there.
 
-use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
@@ -420,6 +421,25 @@ pub fn get_state(app: &AppHandle) -> Value {
     })
 }
 
+/// `history_days`: every day with transcripts on disk, newest first — the
+/// advanced view's day pager and all-days search walk this list.
+pub fn history_days(app: &AppHandle) -> Value {
+    let ctx = app.state::<AppCtx>();
+    let cfg = lock(&ctx.cfg);
+    json!(store::list_days(&cfg))
+}
+
+/// `history_entries`: one day's records in the panel's entry shape.
+pub fn history_entries(app: &AppHandle, day: &str) -> Value {
+    let ctx = app.state::<AppCtx>();
+    let cfg = lock(&ctx.cfg);
+    let entries: Vec<Value> = store::read_day_entries(&cfg, day, 500)
+        .iter()
+        .map(|r| store::entry_from_rec(r, &cfg))
+        .collect();
+    json!(entries)
+}
+
 /// The `_ack` payload every `set_setting` returns.
 fn ack(app: &AppHandle, ctx: &AppCtx) -> Value {
     let (theme, effective) = {
@@ -435,9 +455,11 @@ fn ack(app: &AppHandle, ctx: &AppCtx) -> Value {
     })
 }
 
-/// Model names with a download currently in flight — prevents two threads
-/// pulling the same file at once (different models concurrently are fine).
-static DOWNLOADS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Downloads currently in flight, keyed by model name, each with its cancel
+/// flag — prevents two threads pulling the same file at once (different
+/// models concurrently are fine) and lets the panel's ✕ abort one mid-pull.
+static DOWNLOADS: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `list_models`: the model manager's catalog snapshot — every catalog entry
 /// with its plain-language hint, resolved file name/size for the current
@@ -446,7 +468,7 @@ pub fn list_models(app: &AppHandle) -> Value {
     let ctx = app.state::<AppCtx>();
     let compute_type = lock(&ctx.cfg).get("compute_type");
     let models_dir = flow::app_dir().join("models");
-    let in_flight = lock(&DOWNLOADS).clone();
+    let in_flight: HashSet<String> = lock(&DOWNLOADS).keys().cloned().collect();
     let list: Vec<Value> = transcribe::CATALOG
         .iter()
         .map(|m| {
@@ -479,8 +501,13 @@ pub fn download_model(app: &AppHandle, name: &str) -> Value {
     if transcribe::model_status(&models_dir, info.name, &compute_type).installed {
         return json!({ "ok": true, "installed": true });
     }
-    if !lock(&DOWNLOADS).insert(info.name.to_string()) {
-        return json!({ "ok": true, "downloading": true }); // already in flight
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut in_flight = lock(&DOWNLOADS);
+        if in_flight.contains_key(info.name) {
+            return json!({ "ok": true, "downloading": true }); // already in flight
+        }
+        in_flight.insert(info.name.to_string(), cancel.clone());
     }
     let app = app.clone();
     let model = info.name.to_string();
@@ -491,8 +518,11 @@ pub fn download_model(app: &AppHandle, name: &str) -> Value {
             &model,
             &compute_type,
             &mut |done, total| {
+                if cancel.load(Ordering::SeqCst) {
+                    return false;
+                }
                 let Some(total) = total.filter(|t| *t > 0) else {
-                    return;
+                    return true;
                 };
                 let pct = (done * 100 / total) as i64;
                 if pct > last_pct {
@@ -503,11 +533,17 @@ pub fn download_model(app: &AppHandle, name: &str) -> Value {
                         json!({ "model": model, "pct": pct, "done": false, "error": Value::Null }),
                     );
                 }
+                true
             },
         );
         lock(&DOWNLOADS).remove(&model);
         let payload = match result {
             Ok(_) => json!({ "model": model, "pct": 100, "done": true, "error": Value::Null }),
+            Err(e) if e == transcribe::DOWNLOAD_CANCELLED => {
+                // a cancel is a quiet outcome — the row returns to idle
+                json!({ "model": model, "pct": 0, "done": false,
+                        "error": Value::Null, "cancelled": true })
+            }
             Err(e) => {
                 eprintln!("model download failed: {e}");
                 json!({ "model": model, "pct": last_pct.max(0), "done": false, "error": e })
@@ -516,6 +552,19 @@ pub fn download_model(app: &AppHandle, name: &str) -> Value {
         flow::push_panel(&app, "tiroModelProgress", payload);
     });
     json!({ "ok": true, "started": true })
+}
+
+/// `cancel_download`: flag an in-flight model download to abort. The pull
+/// thread notices on its next chunk, deletes the partial file, and pushes a
+/// `cancelled` progress payload so the row returns to idle.
+pub fn cancel_download(name: &str) -> Value {
+    match lock(&DOWNLOADS).get(name) {
+        Some(flag) => {
+            flag.store(true, Ordering::SeqCst);
+            json!({ "ok": true })
+        }
+        None => json!({ "ok": false, "error": "no download in flight" }),
+    }
 }
 
 /// Force an engine reload after a battery/plugged model change — otherwise

@@ -130,10 +130,50 @@ fn write_log_at(
 /// `read_today_entries`: today's records, newest first, capped at `limit`
 /// (the panel shows up to 200). Unparseable lines are skipped.
 pub fn read_today_entries(cfg: &ConfigStore, limit: usize) -> Vec<Rec> {
+    read_day_entries(cfg, &Local::now().format("%Y-%m-%d").to_string(), limit)
+}
+
+/// The days that have any transcripts on disk (`YYYY-MM-DD`), newest first —
+/// the advanced view's day pager walks this list.
+pub fn list_days(cfg: &ConfigStore) -> Vec<String> {
     let Ok((base, _)) = log_dir(cfg) else {
         return Vec::new();
     };
-    let path = base.join(format!("{}.jsonl", Local::now().format("%Y-%m-%d")));
+    let Ok(dir) = fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut days: Vec<String> = dir
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| {
+            let day = name.strip_suffix(".jsonl")?;
+            valid_day(day).then(|| day.to_string())
+        })
+        .collect();
+    days.sort_unstable_by(|a, b| b.cmp(a));
+    days
+}
+
+/// Strictly `YYYY-MM-DD` — keeps stray files out of the pager and a
+/// bridge-supplied day from ever being a path fragment.
+pub fn valid_day(day: &str) -> bool {
+    day.len() == 10
+        && day.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// One day's records (`day` = `YYYY-MM-DD`), newest first, capped at
+/// `limit`. Unparseable lines are skipped.
+pub fn read_day_entries(cfg: &ConfigStore, day: &str, limit: usize) -> Vec<Rec> {
+    if !valid_day(day) {
+        return Vec::new();
+    }
+    let Ok((base, _)) = log_dir(cfg) else {
+        return Vec::new();
+    };
+    let path = base.join(format!("{day}.jsonl"));
     let Ok(raw) = fs::read_to_string(&path) else {
         return Vec::new();
     };

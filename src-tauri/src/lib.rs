@@ -20,6 +20,7 @@ pub mod placement;
 pub mod power;
 pub mod store;
 pub mod transcribe;
+pub mod vocab;
 
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
@@ -73,6 +74,11 @@ fn set_pin(on: bool, app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn set_expanded(on: bool, app: tauri::AppHandle) {
+    placement::set_panel_expanded(&app, on);
+}
+
+#[tauri::command]
 fn close_panel(window: WebviewWindow) -> Result<(), String> {
     // Capture the panel's spot while it is still mapped (mirrors the hotkey
     // hide path) so closing via the X button also remembers the position.
@@ -103,6 +109,31 @@ fn rebind_shortcut(app: tauri::AppHandle, which: String, combo: Value) -> Value 
     api::rebind_shortcut(&app, &which, &combo)
 }
 
+// Disk reads — spawn_blocking for the same reason as get_state.
+#[tauri::command]
+async fn history_days(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::history_days(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn history_entries(app: tauri::AppHandle, day: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::history_entries(&app, &day))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_vocab() -> Value {
+    vocab::list(&flow::app_dir())
+}
+
+#[tauri::command]
+fn set_vocab(hotwords: Value, corrections: Value) -> Value {
+    vocab::set(&flow::app_dir(), &hotwords, &corrections)
+}
+
 #[tauri::command]
 fn list_models(app: tauri::AppHandle) -> Value {
     api::list_models(&app)
@@ -111,6 +142,11 @@ fn list_models(app: tauri::AppHandle) -> Value {
 #[tauri::command]
 fn download_model(app: tauri::AppHandle, name: String) -> Value {
     api::download_model(&app, &name)
+}
+
+#[tauri::command]
+fn cancel_download(name: String) -> Value {
+    api::cancel_download(&name)
 }
 
 /// The original's 20 s `power_watcher` tick: keep the engine chip's power
@@ -452,12 +488,18 @@ pub fn run() {
             toggle_record,
             cancel_record,
             set_pin,
+            set_expanded,
             close_panel,
             begin_drag,
             pick_folder,
             rebind_shortcut,
+            history_days,
+            history_entries,
+            list_vocab,
+            set_vocab,
             list_models,
-            download_model
+            download_model,
+            cancel_download
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
