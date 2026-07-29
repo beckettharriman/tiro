@@ -1,0 +1,19 @@
+# Identity file for the XDG GlobalShortcuts portal: the portal only accepts
+# a host caller whose systemd unit parses to an app id AND whose
+# <app id>.desktop loads under GLib — which also requires the Exec binary
+# below to resolve in the portal's PATH. Tiro puts itself in an
+# app-dev.tiro.app-<pid>.scope at startup (src/app_scope.rs); this file
+# completes the pair. Install once for dev builds (both lines matter):
+#   cp src-tauri/linux/dev.tiro.app.desktop ~/.local/share/applications/
+#   ln -s "$PWD/src-tauri/target/release/tiro" ~/.local/bin/tiro
+# NoDisplay keeps it out of app menus — packaged builds ship their own
+# visible launcher entry.
+[Desktop Entry]
+Type=Application
+Name=Tiro
+Comment=Always-on offline dictation to your clipboard
+Exec=tiro
+Icon=tiro
+Terminal=false
+Categories=Utility;
+NoDisplay=true
