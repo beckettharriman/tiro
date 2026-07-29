@@ -258,7 +258,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             // orphan holding the dGPU awake until its EOF backstop fires.
             "restart" => {
                 flow::stop_worker(app);
-                app.restart()
+                // request_restart, NOT restart: on the main thread (where
+                // menu events run) plain restart skips ExitRequested/Exit,
+                // and the portal-session close hooks RunEvent::Exit.
+                app.request_restart()
             }
             "quit" => {
                 flow::stop_worker(app);
@@ -419,8 +422,19 @@ pub fn run() {
             list_models,
             download_model
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                // Graceful exits funnel through here — tray Quit (app.exit)
+                // and tray Restart (request_restart) both raise
+                // RunEvent::Exit. SIGTERM/SIGKILL never reach it; for those
+                // the backstop is process death dropping the D-Bus
+                // connection, which ends the portal session. Close the
+                // Wayland portal session exactly once, now.
+                inject::close_portal_session();
+            }
+        });
 }
 
 #[cfg(test)]

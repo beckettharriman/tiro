@@ -534,21 +534,20 @@ pub fn paste_take(app: &AppHandle) {
     start_recording(app, &ctx);
 }
 
-/// Deliver the synthetic Ctrl+V, persisting a refreshed portal restore token
-/// when the Wayland backend hands one back. Returns false on any failure —
-/// the callers fall back to the "On clipboard" pill, never an exception.
+/// Deliver the synthetic Ctrl+V. Returns false on any failure — the callers
+/// fall back to the "On clipboard" pill, never an exception.
+///
+/// The portal restore token is read and persisted by the injection layer
+/// itself, through these closures, under its paste lock: two overlapping
+/// finishes must never interleave reads/writes of the single-use token.
 fn inject_paste(app: &AppHandle, ctx: &AppCtx) -> bool {
     let _ = app; // signature symmetry; the injection needs no window handle
-    let token = lock(&ctx.cfg).get("portal_restore_token");
-    match crate::inject::paste_at_cursor(&token) {
-        Ok(new_token) => {
-            if let Some(t) = new_token {
-                if t != token {
-                    lock(&ctx.cfg).set("portal_restore_token", &t);
-                }
-            }
-            true
-        }
+    let result = crate::inject::paste_at_cursor(
+        || lock(&ctx.cfg).get("portal_restore_token"),
+        |t| lock(&ctx.cfg).set("portal_restore_token", t),
+    );
+    match result {
+        Ok(()) => true,
         Err(e) => {
             eprintln!("paste injection failed ({e}); text stays on the clipboard");
             false
