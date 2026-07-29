@@ -14,9 +14,11 @@
 //! PROTOCOL (parent <-> worker over stdin/stdout, binary, little-endian):
 //!
 //!   startup   argv: --gpu-worker --model NAME --models-dir DIR
-//!             [--device gpu|cpu] [--compute-type CT]
+//!             [--device gpu|cpu] [--compute-type CT] [--gpu-device N]
 //!             (--device cpu exists so the protocol can be tested on
-//!             battery without waking the dGPU). The worker loads the
+//!             battery without waking the dGPU; --gpu-device is the
+//!             whisper.cpp GPU/IGPU-counted index on multi-GPU machines,
+//!             the same counting `--gpu-enum` reports). The worker loads the
 //!             model, warms up on 1 s of silence, then writes exactly ONE
 //!             newline-terminated JSON line to stdout:
 //!               {"ready": true,  "model": ..., "device": ...}  -> serving
@@ -90,6 +92,9 @@ struct Opts {
     models_dir: Option<PathBuf>,
     device: String,
     compute_type: String,
+    /// whisper.cpp GPU/IGPU-counted device index (multi-GPU machines);
+    /// 0 — the first usable device — when absent or unparseable.
+    gpu_device: i32,
 }
 
 /// Tiny manual parse: an arg error must produce a JSON failure line on
@@ -100,6 +105,7 @@ fn parse_args(argv: &[String]) -> Opts {
         models_dir: None,
         device: "gpu".into(),
         compute_type: "int8".into(),
+        gpu_device: 0,
     };
     let mut i = 0;
     while i < argv.len() {
@@ -118,6 +124,10 @@ fn parse_args(argv: &[String]) -> Opts {
             }
             "--compute-type" if i + 1 < argv.len() => {
                 opts.compute_type = argv[i + 1].clone();
+                i += 2;
+            }
+            "--gpu-device" if i + 1 < argv.len() => {
+                opts.gpu_device = argv[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
             _ => i += 1,
@@ -147,7 +157,7 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
             None
         }
     };
-    let t = Transcriber::load_on(&model_path, vad_path, use_gpu)?;
+    let t = Transcriber::load_on(&model_path, vad_path, use_gpu, opts.gpu_device)?;
     // Warm-up on 1 s of silence: pays kernel/pipeline init NOW instead of
     // on the first real dictation, and proves the device works before we
     // claim readiness.
@@ -159,9 +169,10 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
 pub fn run(argv: &[String]) -> i32 {
     let opts = parse_args(argv);
     log(&format!(
-        "starting: model={:?} device={:?} models_dir={:?} gpu_built={}",
+        "starting: model={:?} device={:?} gpu_device={} models_dir={:?} gpu_built={}",
         opts.model,
         opts.device,
+        opts.gpu_device,
         opts.models_dir,
         cfg!(feature = "gpu")
     ));

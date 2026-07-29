@@ -417,18 +417,22 @@ impl Transcriber {
     /// for every transcription (mirroring the original's vad_filter=True).
     pub fn load(model_path: &Path, vad_model: Option<PathBuf>) -> Result<Self, String> {
         // The main process must NEVER touch a GPU (PORTING_NOTES §6).
-        Self::load_on(model_path, vad_model, false)
+        Self::load_on(model_path, vad_model, false, 0)
     }
 
     /// Load with an explicit GPU choice. `use_gpu` is only ever true inside
-    /// the `--gpu-worker` child process (PORTING_NOTES §6).
+    /// the `--gpu-worker` child process (PORTING_NOTES §6). `gpu_device`
+    /// is whisper.cpp's GPU/IGPU-counted device index (the same counting
+    /// `--gpu-enum` reports); ignored when `use_gpu` is false.
     pub fn load_on(
         model_path: &Path,
         vad_model: Option<PathBuf>,
         use_gpu: bool,
+        gpu_device: i32,
     ) -> Result<Self, String> {
         let mut params = WhisperContextParameters::default();
         params.use_gpu(use_gpu);
+        params.gpu_device(gpu_device);
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()

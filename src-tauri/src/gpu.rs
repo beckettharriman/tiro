@@ -72,12 +72,15 @@ fn read_frame(stdout: &mut impl Read) -> Result<Value, String> {
 impl GpuWorker {
     /// Spawn the worker and wait for its readiness line. `device` is "gpu"
     /// in production; "cpu" lets the protocol be exercised without waking
-    /// the dGPU (the original's `--device cpu` test hook).
+    /// the dGPU (the original's `--device cpu` test hook). `gpu_device` is
+    /// the chosen Vulkan device on multi-GPU machines (whisper.cpp's
+    /// GPU/IGPU-counted index, as reported by `--gpu-enum`).
     pub fn spawn(
         model: &str,
         models_dir: &Path,
         compute_type: &str,
         device: &str,
+        gpu_device: usize,
         ready_timeout: Duration,
     ) -> Result<Self, String> {
         let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
@@ -92,6 +95,8 @@ impl GpuWorker {
             compute_type,
             "--device",
             device,
+            "--gpu-device",
+            &gpu_device.to_string(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -326,6 +331,7 @@ pub fn gpu_test(wav: &str, device: &str) {
         Path::new("models"),
         "int8",
         device,
+        0,
         READY_TIMEOUT_DOWNLOAD,
     ) {
         Ok(w) => w,

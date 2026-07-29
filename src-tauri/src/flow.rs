@@ -510,7 +510,18 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
         compute_type,
     } = desired_models(ctx);
     if target == "gpu" {
-        eprintln!("Starting GPU worker for '{model_gpu}' ...");
+        // Multi-GPU machines: the configured device, validated against the
+        // live enumeration (a stale stored name falls back to the default
+        // — prefer discrete, then largest VRAM — and says so in the log).
+        let (idx_raw, name_raw) = {
+            let cfg = lock(&ctx.cfg);
+            (cfg.get("gpu_device_index"), cfg.get("gpu_device_name"))
+        };
+        let (gpu_device, note) = hw::resolve_gpu_device(&idx_raw, &name_raw, &hw::snapshot().gpus);
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
+        eprintln!("Starting GPU worker for '{model_gpu}' (device {gpu_device}) ...");
         let cached = models_dir
             .join(transcribe::model_file_name(&model_gpu, &compute_type))
             .exists();
@@ -519,7 +530,14 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
         } else {
             READY_TIMEOUT_DOWNLOAD
         };
-        match GpuWorker::spawn(&model_gpu, &models_dir, &compute_type, "gpu", timeout) {
+        match GpuWorker::spawn(
+            &model_gpu,
+            &models_dir,
+            &compute_type,
+            "gpu",
+            gpu_device,
+            timeout,
+        ) {
             Ok(w) => {
                 eprintln!("Ready on GPU (worker).");
                 engine.transcriber = None;
