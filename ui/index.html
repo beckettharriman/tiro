@@ -118,11 +118,15 @@
               <div class="lbl"><div class="name">Now running</div></div>
               <span class="nowrun" id="nowRun">&nbsp;</span>
             </div>
-            <div class="row">
+            <div class="row" id="rowPower">
               <div class="lbl"><div class="name">Compute device</div></div>
               <div class="seg" data-seg="power">
                 <button data-value="auto" class="on">Auto Switch</button><button data-value="cpu">Always CPU</button><button data-value="gpu">Always GPU</button>
               </div>
+            </div>
+            <div class="row" id="rowGpuPick" style="display:none;">
+              <div class="lbl"><div class="name">Graphics device</div></div>
+              <span class="selwrap"><select class="sel" id="selGpu"></select></span>
             </div>
             <div class="row" id="rowModel" style="display:none;">
               <div class="lbl"><div class="name">Model</div></div>
@@ -136,8 +140,12 @@
               <div class="lbl"><div class="name">Model when plugged in</div></div>
               <span class="selwrap"><select class="sel" id="selPlugged"></select></span>
             </div>
+            <div class="row" id="rowDesktop" style="display:none;">
+              <div class="lbl"><div class="name">Treat as desktop</div><div class="sub">Ignore battery state — always use plugged-in behavior.</div></div>
+              <button class="sw" id="swDesktop" role="switch" aria-checked="false" aria-label="Treat as desktop"></button>
+            </div>
           </div>
-          <p class="grp-help">Auto Switch uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power.</p>
+          <p class="grp-help" id="engineHelp">Auto Switch uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power.</p>
         </section>
 
         <!-- AUDIO -->
@@ -189,7 +197,7 @@
               </div>
             </div>
             <div class="row">
-              <div class="lbl"><div class="name">Smart vocabulary</div><div class="sub">Learns the names and jargon you correct most.</div></div>
+              <div class="lbl"><div class="name">Smart vocabulary</div><div class="sub">Applies your Vocabulary page's hot words and corrections.</div></div>
               <button class="sw" id="swVocab" role="switch" aria-checked="true" aria-label="Smart vocabulary"></button>
             </div>
           </div>
@@ -204,7 +212,7 @@
               <span class="selwrap"><select class="sel" id="selMic"></select></span>
             </div>
             <div class="row">
-              <div class="lbl"><div class="name">Input volume</div></div>
+              <div class="lbl"><div class="name">Input volume</div><div class="sub">Scales this level preview only — capture loudness comes from your system input settings.</div></div>
               <span class="rngwrap">
                 <input class="rng" type="range" min="0" max="100" value="75" id="rngGain" style="width:160px;">
                 <span class="rngval" id="gainVal">75%</span>
@@ -218,7 +226,7 @@
               </span>
             </div>
             <div class="row">
-              <div class="lbl"><div class="name">Test microphone</div><div class="sub" id="testSub">Echoes your mic back through your active output while on.</div></div>
+              <div class="lbl"><div class="name">Test microphone</div><div class="sub" id="testSub">Feeds the level meter above from your microphone while on.</div></div>
               <button class="mini" id="testBtn">Test</button>
             </div>
           </div>

@@ -59,6 +59,15 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("model_ac", "small.en".into()),
         ("device", "auto".into()),
         ("compute_type", "int8".into()),
+        // Ignore battery state — a battery machine the user runs docked
+        // can opt into desktop policy (single model, no AC/battery split).
+        ("treat_as_desktop", "false".into()),
+        // Multi-GPU machines: the chosen Vulkan device, stored as index +
+        // name so a hardware change invalidates sanely (a stale name falls
+        // back to the default device). Empty = auto (prefer discrete,
+        // then largest VRAM).
+        ("gpu_device_index", String::new()),
+        ("gpu_device_name", String::new()),
         ("cancel_hotkey", "ctrl+alt+x".into()),
         ("mic_name", String::new()),
         ("beeps", "true".into()),

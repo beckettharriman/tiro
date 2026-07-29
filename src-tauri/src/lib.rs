@@ -15,6 +15,7 @@ pub mod gpu_worker;
 pub mod hotkeys;
 #[cfg(target_os = "linux")]
 pub mod hotkeys_portal;
+pub mod hw;
 pub mod inject;
 pub mod placement;
 pub mod power;
@@ -134,6 +135,20 @@ fn set_vocab(hotwords: Value, corrections: Value) -> Value {
     vocab::set(&flow::app_dir(), &hotwords, &corrections)
 }
 
+// Opening the mic can take a moment and sync commands run inline on the
+// main thread (Linux/WebKitGTK) — same reasoning as get_state.
+#[tauri::command]
+async fn start_mic_monitor(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || flow::start_mic_monitor(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn stop_mic_monitor(app: tauri::AppHandle) {
+    flow::stop_mic_monitor(&app);
+}
+
 #[tauri::command]
 fn list_models(app: tauri::AppHandle) -> Value {
     api::list_models(&app)
@@ -154,6 +169,12 @@ fn cancel_download(name: String) -> Value {
 /// polling is needed because on Linux tao emits OS ThemeChanged with a
 /// dummy window id that never reaches on_window_event; the device swap on
 /// power flips joins in task 3.5.)
+///
+/// On DESKTOP machines (no battery, or treat_as_desktop) the AC/battery
+/// half is inert: no power sampling, no flip pushes — the policy table has
+/// no power-dependent cell there. The dead-worker latch and the policy
+/// reconcile stay on every class (they are crash recovery, not power
+/// flapping).
 fn power_watcher(app: tauri::AppHandle) {
     use tauri::Manager;
     std::thread::spawn(move || {
@@ -173,18 +194,21 @@ fn power_watcher(app: tauri::AppHandle) {
                 }
             }
             let target = flow::resolve_target(&ctx);
-            let device_now = flow::lock(&ctx.engine).device.clone();
-            if target != device_now {
+            // Device AND model must match the policy cell — an integrated
+            // laptop swaps models on a power flip without changing device.
+            if !flow::engine_in_policy(&ctx, target) {
                 eprintln!("Power/device change -> switching to {target}");
                 flow::ensure_device(&app, target); // kills/spawns; pushes the chip
             }
-            let ac = power::on_ac_power();
-            if ac != last_power {
-                last_power = ac;
-                eprintln!("power flip -> {}", if ac { "plugged" } else { "battery" });
-                // power may have flipped without a device swap; keep the
-                // footer chip's power label current.
-                flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
+            if !flow::machine_is_desktop(&ctx) {
+                let ac = power::on_ac_power();
+                if ac != last_power {
+                    last_power = ac;
+                    eprintln!("power flip -> {}", if ac { "plugged" } else { "battery" });
+                    // power may have flipped without a device swap; keep the
+                    // footer chip's power label current.
+                    flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
+                }
             }
             let eff = {
                 // snapshot then drop the lock: effective_theme can shell
@@ -353,6 +377,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Adopt CWD-era stray config/vocab files into the canonical app dir
+    // BEFORE anything loads the config (AppCtx::new below reads it).
+    flow::adopt_stray_app_files();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // LIFECYCLE-1: a second launch reaches the running instance.
@@ -474,6 +501,10 @@ pub fn run() {
             // so forwarding launches never churn scopes.
             #[cfg(target_os = "linux")]
             app_scope::ensure_app_scope(&app.config().identifier);
+            // Detect the hardware class off-thread NOW (the --gpu-enum
+            // child + battery probe) so the first get_state / resolve
+            // never pays the spawn latency inline.
+            hw::warm_up();
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
             power_watcher(app.handle().clone());
@@ -499,6 +530,8 @@ pub fn run() {
             history_entries,
             list_vocab,
             set_vocab,
+            start_mic_monitor,
+            stop_mic_monitor,
             list_models,
             download_model,
             cancel_download

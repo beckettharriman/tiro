@@ -16,6 +16,7 @@ use tauri::{AppHandle, Manager};
 use crate::audio;
 use crate::config::ConfigStore;
 use crate::flow::{self, lock, AppCtx};
+use crate::hw;
 use crate::store;
 use crate::transcribe;
 
@@ -359,6 +360,35 @@ fn as_cfg_str(v: &Value) -> String {
 
 // ---- the api methods -------------------------------------------------------
 
+/// The `hardware` object the panel's adaptive Engine section renders
+/// from: machine class, battery presence, the desktop verdict, and the
+/// usable GPU list with the resolved device choice. Uses the cached
+/// snapshot — call OUTSIDE any cfg-lock hold (the first snapshot can
+/// take a moment).
+fn hardware_dict(treat_as_desktop: bool, gpu_index: &str, gpu_name: &str) -> Value {
+    let hardware = hw::snapshot();
+    let (gpu_device, _) = hw::resolve_gpu_device(gpu_index, gpu_name, &hardware.gpus);
+    let gpus: Vec<Value> = hardware
+        .gpus
+        .iter()
+        .map(|g| {
+            json!({
+                "index": g.index,
+                "name": g.name,
+                "kind": g.kind,
+                "vramBytes": g.vram_bytes,
+            })
+        })
+        .collect();
+    json!({
+        "gpuClass": hardware.class.as_str(),
+        "batteryPresent": hardware.battery_present,
+        "desktop": treat_as_desktop || !hardware.battery_present,
+        "gpus": gpus,
+        "gpuDevice": gpu_device,
+    })
+}
+
 /// `get_state`: the full snapshot the panel renders from.
 pub fn get_state(app: &AppHandle) -> Value {
     let ctx = app.state::<AppCtx>();
@@ -385,6 +415,8 @@ pub fn get_state(app: &AppHandle) -> Value {
             "powerMode": device_to_powermode(&cfg.get("device")),
             "modelBattery": cfg.get("model_battery"),
             "modelPlugged": cfg.get("model_ac"),
+            // the single "Model" row shown while a forced mode is active
+            "model": cfg.get("model"),
             "soundCues": cfg.get_bool("beeps"),
             "volume": volume_to_int(&cfg.get("sound_volume")),
             "recordingPill": cfg.get_bool("pill"),
@@ -399,6 +431,7 @@ pub fn get_state(app: &AppHandle) -> Value {
             "transparency": clamp_int_str(&cfg.get("panel_transparency"), 0, 100, 45),
             "storageFallback": !is_vault,
             "storagePath": store_path,
+            "treatAsDesktop": cfg.get_bool("treat_as_desktop"),
         });
         let shortcuts = json!({
             "dictate": keys_to_combo(&cfg.get("dictation_hotkey")),
@@ -414,10 +447,24 @@ pub fn get_state(app: &AppHandle) -> Value {
             effective_theme(app, &cfg),
         )
     };
+    // hardware needs three cfg values but must not hold the cfg lock
+    // across the (first) snapshot; re-read them under a fresh short lock.
+    let hardware = {
+        let (treat, idx, name) = {
+            let cfg = lock(&ctx.cfg);
+            (
+                cfg.get_bool("treat_as_desktop"),
+                cfg.get("gpu_device_index"),
+                cfg.get("gpu_device_name"),
+            )
+        };
+        hardware_dict(treat, &idx, &name)
+    };
     json!({
         "entries": entries,
         "settings": settings,
         "engine": flow::engine_dict(&ctx),
+        "hardware": hardware,
         "mics": audio::list_mic_names(),
         "shortcuts": shortcuts,
         "theme": theme,
@@ -594,6 +641,8 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
     let ctx = app.state::<AppCtx>();
     let mut theme_changed = false;
     let mut pill_moved = false;
+    let mut engine_reresolve = false;
+    let mut gpu_pick: Option<usize> = None;
     {
         let mut cfg = lock(&ctx.cfg);
         match key {
@@ -616,6 +665,12 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
             }
             "modelPlugged" => {
                 cfg.set("model_ac", &as_cfg_str(value));
+                hot_apply_model_change(app);
+            }
+            // The forced-mode single "Model" row (legacy `model` key);
+            // applies live through the same spawned hot-apply path.
+            "model" => {
+                cfg.set("model", &as_cfg_str(value));
                 hot_apply_model_change(app);
             }
             "soundCues" => cfg.set("beeps", if truthy(value) { "true" } else { "false" }),
@@ -676,6 +731,27 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                 );
             }
             "launchAtLogin" => set_launch_at_login(app, truthy(value)),
+            // Desktop override: re-render is the panel's job (it derives
+            // desktop = !batteryPresent || treatAsDesktop locally); the
+            // engine re-resolves against the new policy cell below, after
+            // the cfg lock is released.
+            "treatAsDesktop" => {
+                cfg.set(
+                    "treat_as_desktop",
+                    if truthy(value) { "true" } else { "false" },
+                );
+                engine_reresolve = true;
+            }
+            // Multi-GPU picker: stored (index + name) after the lock — the
+            // name lookup needs the hardware snapshot, which must never be
+            // touched under the cfg lock.
+            "gpuDevice" => {
+                gpu_pick = match value {
+                    Value::Number(n) => n.as_u64().map(|v| v as usize),
+                    Value::String(s) => s.trim().parse::<usize>().ok(),
+                    _ => None,
+                };
+            }
             "theme" => {
                 let mut t = as_cfg_str(value).to_lowercase();
                 if !matches!(t.as_str(), "system" | "light" | "dark") {
@@ -692,6 +768,33 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
         // shell out to the settings portal (dbus-send)
         let cfg = lock(&ctx.cfg).clone();
         flow::push_panel(app, "tiroSetTheme", json!(effective_theme(app, &cfg)));
+    }
+    if let Some(idx) = gpu_pick {
+        match hw::snapshot().gpus.iter().find(|g| g.index == idx) {
+            Some(g) => {
+                {
+                    let mut cfg = lock(&ctx.cfg);
+                    cfg.set("gpu_device_index", &g.index.to_string());
+                    cfg.set("gpu_device_name", &g.name);
+                }
+                eprintln!("gpu picker: switching to device {} ({})", g.index, g.name);
+                // Tear down + rebuild so the worker respawns on the newly
+                // chosen device (same hot-apply path as a model change).
+                hot_apply_model_change(app);
+            }
+            None => eprintln!("gpu picker: unknown device index {idx}; ignored"),
+        }
+    }
+    if engine_reresolve {
+        // Apply the new policy cell live, off the command thread. ensure_
+        // device is device- AND model-aware, so this reloads exactly when
+        // the desktop flip actually changes the serving engine.
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let ctx = app.state::<AppCtx>();
+            let target = flow::resolve_target(&ctx);
+            flow::ensure_device(&app, target);
+        });
     }
     if pill_moved {
         // apply live: a currently-visible pill snaps to the new spot at once

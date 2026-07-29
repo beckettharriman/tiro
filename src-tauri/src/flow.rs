@@ -15,7 +15,7 @@
 //! The cpal stream is not Send, so the live `Recording` is owned by a
 //! dedicated recorder thread and driven through channel commands.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, TryLockError};
@@ -29,6 +29,7 @@ use crate::clipboard;
 use crate::config::ConfigStore;
 use crate::cues;
 use crate::gpu::{GpuWorker, READY_TIMEOUT_CACHED, READY_TIMEOUT_DOWNLOAD};
+use crate::hw;
 use crate::power;
 use crate::store;
 use crate::transcribe::{self, Transcriber};
@@ -124,6 +125,9 @@ pub struct AppCtx {
     /// Bumping this stops the previous take's level-pusher thread, so a
     /// stale pusher can never drive a newer take's pill.
     level_gen: AtomicU64,
+    /// Bumping this stops the settings-meter mic monitor (its thread owns
+    /// the cpal stream and exits within one poll tick of a bump).
+    monitor_gen: AtomicU64,
     /// Session id whose completed take should also be pasted at the cursor
     /// (0 = none). Consumed by `finish` ONLY while that session is current —
     /// a superseded take must never paste.
@@ -135,10 +139,110 @@ pub struct AppCtx {
     gpu_probe: Mutex<Option<std::time::Instant>>,
 }
 
-/// The app's working directory (config.ini, models/, vocab.txt live here,
-/// like the original's APP_DIR).
+static APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The app directory — config.ini, models/, vocab.txt, corrections.txt,
+/// tiro.log and the default fallback_dir ("logs") all resolve against this.
+///
+/// RESOLUTION RULE (deterministic and launch-method independent): the
+/// original resolved every app file against its script directory, never the
+/// process CWD (PORTING_NOTES §2: fallback_dir is "app-relative"). Resolving
+/// against CWD made a dev launch (CWD = src-tauri) and an autostart launch
+/// (CWD = $HOME) read and write DIFFERENT config/vocab files — settings
+/// appeared not to persist across reboots. The rule, applied once per
+/// process:
+///   1. `TIRO_APP_DIR` env var, when set (tests / portable installs).
+///   2. The executable's directory — the port's analog of the script dir.
+///      A cargo-built exe (`<crate>/target/<profile>/tiro`) walks up to the
+///      crate directory that owns the `target` tree (src-tauri), where the
+///      app files have always lived in dev; both dev and autostart launches
+///      run the same binary, so they converge on the same directory.
+///   3. The CWD, only if the exe path is unavailable.
 pub fn app_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    APP_DIR
+        .get_or_init(|| {
+            if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
+                if !dir.is_empty() {
+                    return PathBuf::from(dir);
+                }
+            }
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .as_deref()
+                .and_then(Path::parent)
+            {
+                return dev_crate_root(dir).unwrap_or_else(|| dir.to_path_buf());
+            }
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        })
+        .clone()
+}
+
+/// For a cargo-built exe, the crate directory owning the build tree: the
+/// nearest ancestor of `exe_dir` named `target` whose parent holds a
+/// `Cargo.toml`. None for an installed binary (its own directory is the
+/// app dir, like the original's script folder).
+fn dev_crate_root(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .ancestors()
+        .find(|a| {
+            a.file_name().is_some_and(|n| n == "target")
+                && a.parent().is_some_and(|p| p.join("Cargo.toml").is_file())
+        })
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// One-time adoption of CWD-era strays, run at startup before anything
+/// reads the config. Builds before the resolution rule above wrote
+/// config.ini / vocab.txt / corrections.txt into the process CWD, so an
+/// autostart launch (CWD = $HOME) grew a second set of files there. For
+/// each file missing at the canonical location, copy in the most recently
+/// modified stray from the old locations (CWD, then $HOME); nothing is
+/// ever deleted. models/ is intentionally NOT copied (gigabytes) — it
+/// re-resolves against the canonical dir and re-downloads if truly absent.
+pub fn adopt_stray_app_files() {
+    let canonical = app_dir();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        candidates.push(PathBuf::from(home));
+    }
+    adopt_strays_into(&canonical, &candidates);
+}
+
+fn adopt_strays_into(canonical: &Path, candidates: &[PathBuf]) {
+    let canon = std::fs::canonicalize(canonical).unwrap_or_else(|_| canonical.to_path_buf());
+    for name in ["config.ini", "vocab.txt", "corrections.txt"] {
+        let dst = canonical.join(name);
+        if dst.exists() {
+            continue;
+        }
+        let newest = candidates
+            .iter()
+            .filter(|c| std::fs::canonicalize(c).unwrap_or_else(|_| c.to_path_buf()) != canon)
+            .map(|c| c.join(name))
+            .filter(|p| p.is_file())
+            .filter_map(|p| {
+                std::fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| (t, p))
+            })
+            .max_by_key(|(t, _)| *t);
+        if let Some((_, src)) = newest {
+            match std::fs::copy(&src, &dst) {
+                Ok(_) => eprintln!(
+                    "adopted stray {name} from {} into {}",
+                    src.display(),
+                    canonical.display()
+                ),
+                Err(e) => eprintln!("could not adopt stray {}: {e}", src.display()),
+            }
+        }
+    }
 }
 
 pub(crate) fn lock<'a, T>(m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
@@ -213,6 +317,7 @@ impl AppCtx {
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
             level_gen: AtomicU64::new(0),
+            monitor_gen: AtomicU64::new(0),
             paste_session: AtomicU64::new(0),
             gpu_ok: AtomicBool::new(true),
             gpu_probe: Mutex::new(None),
@@ -235,30 +340,121 @@ fn maybe_reprobe_gpu(ctx: &AppCtx) {
     }
 }
 
-/// `resolve_target`: which device we SHOULD be on right now, honoring
-/// config + power + GPU availability. Config keeps the original's "cuda"
-/// value name; internally the GPU target is "gpu".
+/// Desktop machine = no battery hardware, or the user's `treat_as_desktop`
+/// override. Desktops have no AC/battery split anywhere in the policy.
+/// Short cfg lock, then the cached hardware snapshot — never the engine
+/// lock (safe from any thread).
+pub fn machine_is_desktop(ctx: &AppCtx) -> bool {
+    let treat = lock(&ctx.cfg).get_bool("treat_as_desktop");
+    treat || !hw::snapshot().battery_present
+}
+
+/// `resolve_target`: which device we SHOULD be on right now — the policy
+/// table's cell for this machine class, gated by GPU health. Config keeps
+/// the original's "cuda" value name; internally the GPU target is "gpu".
 pub fn resolve_target(ctx: &AppCtx) -> &'static str {
     maybe_reprobe_gpu(ctx);
-    let dev = lock(&ctx.cfg).get("device").to_lowercase();
-    let gpu_ok = ctx.gpu_ok.load(Ordering::SeqCst);
-    match dev.as_str() {
-        "cpu" => "cpu",
-        "cuda" => {
-            if gpu_ok {
-                "gpu"
-            } else {
-                "cpu"
-            }
+    let (pref, treat) = {
+        let cfg = lock(&ctx.cfg);
+        (
+            hw::PowerPref::from_cfg(&cfg.get("device")),
+            cfg.get_bool("treat_as_desktop"),
+        )
+    };
+    let hardware = hw::snapshot();
+    let desktop = treat || !hardware.battery_present;
+    let (device, _slot) = hw::policy(hardware.class, desktop, power::on_ac_power(), pref);
+    if device == "gpu" && !ctx.gpu_ok.load(Ordering::SeqCst) {
+        "cpu"
+    } else {
+        device
+    }
+}
+
+/// The models the two engine paths should serve RIGHT NOW. Pure core of
+/// `desired_models`, split out so every laptop/desktop cell is testable
+/// without live hardware:
+/// - forced modes and desktops run the single `model` key in BOTH slots
+///   (a forced-GPU engine that falls back to CPU still serves the chosen
+///   model); a battery laptop keeps the AC/battery split
+/// - laptop cells where the DEVICE stays put but the MODEL follows the
+///   power source: an integrated GPU serves the lighter battery model on
+///   battery (no D3cold prize on an iGPU, so the worker survives the
+///   flip), and a no-GPU laptop serves the AC model while plugged in
+fn select_models(
+    class: hw::GpuClass,
+    desktop: bool,
+    on_ac: bool,
+    pref: hw::PowerPref,
+    single: &str,
+    ac_raw: &str,
+    bat_raw: &str,
+) -> (String, String) {
+    let single_mode = !matches!(pref, hw::PowerPref::Auto) || desktop;
+    if single_mode && !single.is_empty() {
+        return (single.to_string(), single.to_string());
+    }
+    let pick = |raw: &str| {
+        if raw.is_empty() {
+            single.to_string()
+        } else {
+            raw.to_string()
         }
-        _ => {
-            // auto: GPU only when it works AND we're plugged in
-            if gpu_ok && power::on_ac_power() {
-                "gpu"
-            } else {
-                "cpu"
-            }
-        }
+    };
+    let (ac, bat) = (pick(ac_raw), pick(bat_raw));
+    // GPU slot: follows the power source, EXCEPT on discrete hardware —
+    // a discrete GPU never serves on battery (the D3cold cell kills the
+    // worker instead), so its slot is always the AC model.
+    let gpu = if class == hw::GpuClass::Discrete || on_ac {
+        ac.clone()
+    } else {
+        bat.clone()
+    };
+    let cpu = if class == hw::GpuClass::None && on_ac {
+        ac
+    } else {
+        bat
+    };
+    (gpu, cpu)
+}
+
+/// The desired GPU-path model, CPU-path model and compute type, resolved
+/// from config + machine class + live power source. Takes only the cfg
+/// lock (short); callers must not hold the engine lock's cfg-ordering
+/// inverse (none exists — lock order is engine -> cfg, never reversed).
+struct DesiredModels {
+    gpu: String,
+    cpu: String,
+    compute_type: String,
+}
+
+fn desired_models(ctx: &AppCtx) -> DesiredModels {
+    let (pref, treat, single, ac_raw, bat_raw, compute_type) = {
+        let cfg = lock(&ctx.cfg);
+        (
+            hw::PowerPref::from_cfg(&cfg.get("device")),
+            cfg.get_bool("treat_as_desktop"),
+            cfg.get("model"),
+            cfg.get("model_ac"),
+            cfg.get("model_battery"),
+            cfg.get("compute_type"),
+        )
+    };
+    let hardware = hw::snapshot();
+    let desktop = treat || !hardware.battery_present;
+    let (gpu, cpu) = select_models(
+        hardware.class,
+        desktop,
+        power::on_ac_power(),
+        pref,
+        &single,
+        &ac_raw,
+        &bat_raw,
+    );
+    DesiredModels {
+        gpu,
+        cpu,
+        compute_type,
     }
 }
 
@@ -305,43 +501,48 @@ pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
 /// falls back to CPU, exactly like the original's in-process CUDA failure.
 fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
     let models_dir = app_dir().join("models");
-    let (model_ac, model_battery, compute_type) = {
-        let cfg = lock(&ctx.cfg);
-        let fallback = cfg.get("model");
-        let ac = {
-            let m = cfg.get("model_ac");
-            if m.is_empty() {
-                fallback.clone()
-            } else {
-                m
-            }
-        };
-        let bat = {
-            let m = cfg.get("model_battery");
-            if m.is_empty() {
-                fallback.clone()
-            } else {
-                m
-            }
-        };
-        (ac, bat, cfg.get("compute_type"))
-    };
+    // Which model each path serves comes from the policy table via
+    // `desired_models` (forced modes and desktops: the single `model` key;
+    // battery laptops: the AC/battery pair, power-source-resolved).
+    let DesiredModels {
+        gpu: model_gpu,
+        cpu: model_cpu,
+        compute_type,
+    } = desired_models(ctx);
     if target == "gpu" {
-        eprintln!("Starting GPU worker for '{model_ac}' ...");
+        // Multi-GPU machines: the configured device, validated against the
+        // live enumeration (a stale stored name falls back to the default
+        // — prefer discrete, then largest VRAM — and says so in the log).
+        let (idx_raw, name_raw) = {
+            let cfg = lock(&ctx.cfg);
+            (cfg.get("gpu_device_index"), cfg.get("gpu_device_name"))
+        };
+        let (gpu_device, note) = hw::resolve_gpu_device(&idx_raw, &name_raw, &hw::snapshot().gpus);
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
+        eprintln!("Starting GPU worker for '{model_gpu}' (device {gpu_device}) ...");
         let cached = models_dir
-            .join(transcribe::model_file_name(&model_ac, &compute_type))
+            .join(transcribe::model_file_name(&model_gpu, &compute_type))
             .exists();
         let timeout = if cached {
             READY_TIMEOUT_CACHED
         } else {
             READY_TIMEOUT_DOWNLOAD
         };
-        match GpuWorker::spawn(&model_ac, &models_dir, &compute_type, "gpu", timeout) {
+        match GpuWorker::spawn(
+            &model_gpu,
+            &models_dir,
+            &compute_type,
+            "gpu",
+            gpu_device,
+            timeout,
+        ) {
             Ok(w) => {
                 eprintln!("Ready on GPU (worker).");
                 engine.transcriber = None;
                 engine.worker = Some(Arc::new(w));
-                engine.model_name = model_ac;
+                engine.model_name = model_gpu;
                 engine.device = "gpu".into();
                 refresh_status(ctx, engine);
                 return;
@@ -352,8 +553,8 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
             }
         }
     }
-    eprintln!("Loading '{model_battery}' on CPU ...");
-    let loaded = transcribe::ensure_model(&models_dir, &model_battery, &compute_type)
+    eprintln!("Loading '{model_cpu}' on CPU ...");
+    let loaded = transcribe::ensure_model(&models_dir, &model_cpu, &compute_type)
         .and_then(|model_path| {
             let vad = transcribe::ensure_vad_model(&models_dir)
                 .map_err(|e| {
@@ -367,7 +568,7 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
     match loaded {
         Ok(t) => {
             engine.transcriber = Some(Arc::new(t));
-            engine.model_name = model_battery;
+            engine.model_name = model_cpu;
             engine.device = "cpu".into();
             eprintln!("Ready on CPU.");
         }
@@ -383,16 +584,27 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
 }
 
 /// `ensure_device`: swap the serving engine to `target` if needed. Healthy
-/// means: for cpu the model is loaded; for gpu the worker child is ALIVE
-/// (a silently-crashed worker must not count as "already on gpu" or
+/// means: the device matches, the MODEL matches the policy's current pick
+/// (an integrated laptop swaps models on a power flip without changing
+/// device), and for cpu the model is loaded / for gpu the worker child is
+/// ALIVE (a silently-crashed worker must not count as "already on gpu" or
 /// dictation would dead-end). The outgoing (or dead) worker is killed
 /// BEFORE the replacement load — on the AC->battery flip the dGPU should
 /// be asleep during the seconds the CPU model spends loading, not after.
 pub fn ensure_device(app: &AppHandle, target: &str) {
     let ctx = app.state::<AppCtx>();
+    // Resolve the desired model BEFORE taking the engine lock (cfg lock
+    // only; keeps the documented engine -> cfg lock order one-way).
+    let desired = desired_models(&ctx);
+    let want_model = if target == "gpu" {
+        &desired.gpu
+    } else {
+        &desired.cpu
+    };
     {
         let mut engine = lock(&ctx.engine);
         let healthy = engine.device == target
+            && engine.model_name == *want_model
             && match target {
                 "gpu" => engine.worker.as_ref().is_some_and(|w| w.alive()),
                 _ => engine.transcriber.is_some(),
@@ -422,6 +634,33 @@ pub fn ensure_device(app: &AppHandle, target: &str) {
 /// periodic re-probe in `resolve_target` can lift it later.
 pub fn latch_gpu_off(ctx: &AppCtx) {
     ctx.gpu_ok.store(false, Ordering::SeqCst);
+}
+
+/// Watcher-tick check: does the live engine already serve the policy's
+/// target device AND model? Device alone is not enough — an integrated
+/// laptop swaps models on a power flip without changing device. An EMPTY
+/// engine (failed load -> "Model not ready" per take) is deliberately
+/// in-policy while its device matches, exactly like the old device-only
+/// check: the watcher must not become a 20-second retry loop hammering
+/// model downloads after a failed load. Blocking-locks the engine —
+/// background threads only (LOCK LAW above).
+pub fn engine_in_policy(ctx: &AppCtx, target: &str) -> bool {
+    let desired = desired_models(ctx);
+    let want = if target == "gpu" {
+        desired.gpu
+    } else {
+        desired.cpu
+    };
+    let engine = lock(&ctx.engine);
+    if engine.worker.is_none() && engine.transcriber.is_none() {
+        return engine.device == target;
+    }
+    engine.device == target
+        && engine.model_name == want
+        && match target {
+            "gpu" => engine.worker.as_ref().is_some_and(|w| w.alive()),
+            _ => engine.transcriber.is_some(),
+        }
 }
 
 /// Tear down whatever serves right now — worker stopped (immediately if a
@@ -508,6 +747,100 @@ fn start_level_pusher(app: &AppHandle, ctx: &AppCtx, meter: Arc<audio::LevelMete
         }
         push_pill_level(&app, audio::perceptual_level(meter.take_peak()));
     });
+}
+
+/// Hot-mic backstop: a monitor nobody remembered to stop closes itself.
+const MONITOR_MAX_SECS: u64 = 300;
+
+/// Push a live input level (0..1) to the PANEL's settings meter, guarded
+/// like the pill push so a panel without the hook is harmless.
+fn push_input_level(app: &AppHandle, level: f32) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.eval(format!(
+            "window.tiroInputLevel&&window.tiroInputLevel({level:.3})"
+        ));
+    }
+}
+
+/// Start the settings-meter mic monitor: a level-only tap on the SELECTED
+/// mic feeding the panel at ~15 Hz with the exact envelope the pill uses
+/// (peak-per-poll -> `perceptual_level`), so the two meters feel the same.
+/// The cpal stream is !Send, so a dedicated thread owns it (reusing the
+/// take pipeline's `Recording` device/rate/format walk, drained every poll
+/// so nothing accumulates); stopping is bumping `monitor_gen`. Recording
+/// always wins the device: starting is refused mid-take, `start_recording`
+/// preempts a live monitor, and the loop double-checks every tick. Pure
+/// cpal — the GPU is never touched.
+pub fn start_mic_monitor(app: &AppHandle) -> serde_json::Value {
+    let ctx = app.state::<AppCtx>();
+    if ctx.recording.load(Ordering::SeqCst) {
+        return json!({ "ok": false, "error": "Recording in progress" });
+    }
+    let mic = lock(&ctx.cfg).get("mic_name");
+    // Bump first: a re-start supersedes any previous monitor thread.
+    let gen = ctx.monitor_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, rx) = channel();
+    let app = app.clone();
+    std::thread::spawn(move || match Recording::start(&mic) {
+        Ok(rec) => {
+            let _ = tx.send(Ok(rec.mic_name().to_string()));
+            // LATE-OPEN GUARD: if this open outlived its start request —
+            // the caller timed out (it invalidated the gen below) or a
+            // stop/re-start/recording superseded it while the mic was
+            // opening — close the stream NOW, before the loop: a monitor
+            // the UI believes failed must never run as a hot mic.
+            if app.state::<AppCtx>().monitor_gen.load(Ordering::SeqCst) != gen {
+                drop(rec.stop());
+                notify_monitor_ended(&app);
+                return;
+            }
+            let meter = rec.level_meter();
+            let started = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(66));
+                let ctx = app.state::<AppCtx>();
+                if ctx.monitor_gen.load(Ordering::SeqCst) != gen
+                    || ctx.recording.load(Ordering::SeqCst)
+                    || ctx.shutting_down.load(Ordering::SeqCst)
+                    || started.elapsed().as_secs() >= MONITOR_MAX_SECS
+                {
+                    break;
+                }
+                rec.discard_frames();
+                push_input_level(&app, audio::perceptual_level(meter.take_peak()));
+            }
+            drop(rec.stop()); // close the stream; monitored audio is discarded
+            notify_monitor_ended(&app);
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e.to_string()));
+        }
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(mic_name)) => json!({ "ok": true, "mic": mic_name }),
+        Ok(Err(e)) => json!({ "ok": false, "error": e }),
+        Err(_) => {
+            // Invalidate this monitor's generation so a late-landing open
+            // hits the guard above and closes its stream instead of
+            // running a monitor the UI just reported as failed.
+            ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
+            json!({ "ok": false, "error": "microphone open timed out" })
+        }
+    }
+}
+
+/// Tell the panel the monitor ended — covers recording-wins, the hot-mic
+/// backstop, shutdown and the late-open guard, so the Test button resets.
+fn notify_monitor_ended(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.eval("window.tiroInputMonitor&&window.tiroInputMonitor(false)");
+    }
+}
+
+/// Stop the settings-meter monitor (idempotent; also safe with none live).
+pub fn stop_mic_monitor(app: &AppHandle) {
+    let ctx = app.state::<AppCtx>();
+    ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Show the pill window in the given state, cancelling any pending hide
@@ -663,6 +996,10 @@ fn inject_paste(app: &AppHandle, ctx: &AppCtx) -> bool {
 }
 
 fn start_recording(app: &AppHandle, ctx: &AppCtx) {
+    // Recording wins the mic: preempt any settings-meter monitor before
+    // opening the take's stream (the monitor thread exits within one poll
+    // tick and notifies the panel; PipeWire tolerates the brief overlap).
+    ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
     let mic = lock(&ctx.cfg).get("mic_name");
     let (reply_tx, reply_rx) = channel();
     let _ = lock(&ctx.rec_tx).send(RecCmd::Start {
@@ -1151,6 +1488,102 @@ pub fn cancel_record(app: &AppHandle) {
 }
 
 #[cfg(test)]
+mod app_dir_tests {
+    use super::{adopt_strays_into, dev_crate_root};
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    fn set_mtime(path: &std::path::Path, when: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn dev_crate_root_walks_out_of_the_target_tree() {
+        let dir = TempDir::new().unwrap();
+        let crate_dir = dir.path().join("src-tauri");
+        let exe_dir = crate_dir.join("target").join("release");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(crate_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(dev_crate_root(&exe_dir), Some(crate_dir.clone()));
+        // test binaries live one level deeper (target/<profile>/deps)
+        let deps = exe_dir.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        assert_eq!(dev_crate_root(&deps), Some(crate_dir));
+    }
+
+    #[test]
+    fn dev_crate_root_is_none_outside_a_cargo_tree() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        assert_eq!(dev_crate_root(&bin), None, "installed exe: no crate root");
+        // a `target` dir without Cargo.toml next to it is not a cargo tree
+        let odd = dir.path().join("target").join("release");
+        fs::create_dir_all(&odd).unwrap();
+        assert_eq!(dev_crate_root(&odd), None);
+    }
+
+    #[test]
+    fn strays_adopt_newest_and_never_clobber_canonical() {
+        let root = TempDir::new().unwrap();
+        let canonical = root.path().join("canonical");
+        let old_cwd = root.path().join("old-cwd");
+        let home = root.path().join("home");
+        for d in [&canonical, &old_cwd, &home] {
+            fs::create_dir_all(d).unwrap();
+        }
+        // canonical already has a config.ini -> must stay untouched
+        fs::write(canonical.join("config.ini"), "[general]\ntheme = dark\n").unwrap();
+        fs::write(old_cwd.join("config.ini"), "[general]\ntheme = light\n").unwrap();
+        // vocab.txt exists in both strays -> the newest one wins
+        fs::write(old_cwd.join("vocab.txt"), "old words\n").unwrap();
+        fs::write(home.join("vocab.txt"), "new words\n").unwrap();
+        let now = SystemTime::now();
+        set_mtime(&old_cwd.join("vocab.txt"), now - Duration::from_secs(600));
+        set_mtime(&home.join("vocab.txt"), now - Duration::from_secs(60));
+        // corrections.txt only in the autostart-era home dir
+        fs::write(home.join("corrections.txt"), "tyro => Tiro\n").unwrap();
+        adopt_strays_into(&canonical, &[old_cwd.clone(), home.clone()]);
+        assert_eq!(
+            fs::read_to_string(canonical.join("config.ini")).unwrap(),
+            "[general]\ntheme = dark\n",
+            "existing canonical config must never be overwritten"
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("vocab.txt")).unwrap(),
+            "new words\n",
+            "most recently modified stray wins"
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("corrections.txt")).unwrap(),
+            "tyro => Tiro\n"
+        );
+        // strays are copied, not moved
+        assert!(old_cwd.join("vocab.txt").exists());
+        assert!(home.join("vocab.txt").exists());
+    }
+
+    #[test]
+    fn adoption_skips_the_canonical_dir_and_handles_nothing_to_do() {
+        let root = TempDir::new().unwrap();
+        let canonical = root.path().join("app");
+        fs::create_dir_all(&canonical).unwrap();
+        // canonical listed as its own candidate (CWD == app dir in dev
+        // launches) must not self-copy or invent files
+        adopt_strays_into(&canonical, std::slice::from_ref(&canonical));
+        assert!(!canonical.join("config.ini").exists());
+        assert!(!canonical.join("vocab.txt").exists());
+        assert!(!canonical.join("corrections.txt").exists());
+    }
+}
+
+#[cfg(test)]
 mod lock_tests {
     use super::*;
     use std::sync::mpsc::channel;
@@ -1254,6 +1687,111 @@ mod lock_tests {
         assert_eq!(dict["model"], "base.en");
         assert_eq!(dict["device"], "CPU", "no live worker -> CPU");
         assert_eq!(lock(&ctx.status).model, "base.en", "snapshot refreshed");
+    }
+
+    /// `select_models` — the policy-table model slots against the real
+    /// config keys, for every laptop/desktop cell. The discrete-laptop
+    /// rows are the Blade 14 cell and must be byte-identical to the old
+    /// forced/auto split (model_ac on the GPU path, model_battery on CPU,
+    /// empty keys falling back to the single `model` key).
+    #[test]
+    fn select_models_covers_the_policy_cells() {
+        use crate::hw::{GpuClass, PowerPref};
+        let sel = |class, desktop, on_ac, pref| {
+            select_models(class, desktop, on_ac, pref, "single", "ac", "bat")
+        };
+        // discrete + laptop (Blade 14): TODAY'S BEHAVIOR EXACTLY
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            sel(GpuClass::Discrete, false, true, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        assert_eq!(
+            sel(GpuClass::Discrete, false, false, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        // forced modes: the single `model` key fills BOTH slots
+        for pref in [PowerPref::ForceCpu, PowerPref::ForceGpu] {
+            assert_eq!(
+                sel(GpuClass::Discrete, false, true, pref),
+                s("single", "single")
+            );
+        }
+        // desktops: single key everywhere, Auto included
+        for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
+            assert_eq!(
+                sel(class, true, true, PowerPref::Auto),
+                s("single", "single"),
+                "{class:?} desktop"
+            );
+        }
+        // integrated laptop: the GPU path swaps to the battery model on
+        // battery (the worker survives the flip; only the model changes)
+        assert_eq!(
+            sel(GpuClass::Integrated, false, true, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        assert_eq!(
+            sel(GpuClass::Integrated, false, false, PowerPref::Auto),
+            s("bat", "bat")
+        );
+        // no-GPU laptop: the CPU path follows the power source
+        assert_eq!(
+            sel(GpuClass::None, false, true, PowerPref::Auto),
+            s("ac", "ac")
+        );
+        assert_eq!(
+            sel(GpuClass::None, false, false, PowerPref::Auto),
+            s("bat", "bat")
+        );
+        // empty pair keys fall back to the single key (legacy configs)
+        assert_eq!(
+            select_models(
+                GpuClass::Discrete,
+                false,
+                true,
+                PowerPref::Auto,
+                "m",
+                "",
+                ""
+            ),
+            s("m", "m")
+        );
+        // forced mode with an EMPTY single key keeps the old pick fallback
+        assert_eq!(
+            select_models(
+                GpuClass::Discrete,
+                false,
+                true,
+                PowerPref::ForceCpu,
+                "",
+                "ac",
+                "bat"
+            ),
+            s("ac", "bat")
+        );
+    }
+
+    /// The watcher's in-policy check: an EMPTY engine with a matching
+    /// device is left alone (the old device-only semantics — no 20 s
+    /// download-retry loop), while a loaded engine serving the wrong model
+    /// reads out-of-policy so a power flip can swap models in place.
+    #[test]
+    fn engine_in_policy_keeps_the_empty_engine_semantics() {
+        let ctx = AppCtx::new();
+        // empty engine, device matches target -> in policy (left alone)
+        assert!(engine_in_policy(&ctx, "cpu"));
+        // empty engine, target flipped -> out of policy (watcher acts)
+        assert!(!engine_in_policy(&ctx, "gpu"));
+        // loaded engine serving some model: policy compares the model too
+        {
+            let mut engine = lock(&ctx.engine);
+            engine.transcriber = None; // (a real Transcriber needs a model file)
+            engine.model_name = "definitely-not-configured".into();
+            engine.device = "cpu".into();
+        }
+        // still "empty" (no transcriber), so device-only rule applies
+        assert!(engine_in_policy(&ctx, "cpu"));
     }
 
     /// The exit path (`stop_worker`, main thread via tray Restart/Quit)

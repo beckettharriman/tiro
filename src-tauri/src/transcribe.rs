@@ -571,18 +571,22 @@ impl Transcriber {
     /// for every transcription (mirroring the original's vad_filter=True).
     pub fn load(model_path: &Path, vad_model: Option<PathBuf>) -> Result<Self, String> {
         // The main process must NEVER touch a GPU (PORTING_NOTES §6).
-        Self::load_on(model_path, vad_model, false)
+        Self::load_on(model_path, vad_model, false, 0)
     }
 
     /// Load with an explicit GPU choice. `use_gpu` is only ever true inside
-    /// the `--gpu-worker` child process (PORTING_NOTES §6).
+    /// the `--gpu-worker` child process (PORTING_NOTES §6). `gpu_device`
+    /// is whisper.cpp's GPU/IGPU-counted device index (the same counting
+    /// `--gpu-enum` reports); ignored when `use_gpu` is false.
     pub fn load_on(
         model_path: &Path,
         vad_model: Option<PathBuf>,
         use_gpu: bool,
+        gpu_device: i32,
     ) -> Result<Self, String> {
         let mut params = WhisperContextParameters::default();
         params.use_gpu(use_gpu);
+        params.gpu_device(gpu_device);
         let ctx = WhisperContext::new_with_params(
             model_path
                 .to_str()
@@ -690,7 +694,9 @@ pub fn read_wav_mono(wav_path: &str) -> Result<(Vec<f32>, u32), String> {
 }
 
 pub fn transcribe_test(wav_path: &str) {
-    let app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Same resolution as the app proper (exe-dir rule, TIRO_APP_DIR
+    // override) so this headless path proves the REAL config/vocab chain.
+    let app_dir = crate::flow::app_dir();
     let cfg = ConfigStore::load(app_dir.join("config.ini"), &app_dir);
     let model = {
         let m = cfg.get("model_battery");
@@ -741,12 +747,34 @@ pub fn transcribe_test(wav_path: &str) {
         eprintln!("ERROR: warm-up failed: {e}");
         return;
     }
+    // The REAL vocab path: the same prompt the live take pipeline feeds
+    // whisper (vocab.txt via use_vocab_bias), logged so tests can assert
+    // the bias is actually wired without depending on model output.
     let vocab = get_vocab_prompt(&app_dir, &cfg);
+    match &vocab {
+        Some(p) => eprintln!("vocab prompt: {p}"),
+        None => eprintln!("vocab prompt: (none — bias off or vocab.txt empty)"),
+    }
     let start = std::time::Instant::now();
     match transcriber.transcribe(&audio, 1, vocab.as_deref()) {
         Ok(text) => {
             eprintln!("transcribed in {:.2} s", start.elapsed().as_secs_f32());
             println!("TEXT: {text}");
+            // Mirror the live take's clipboard layer (flow::transcribe_worker):
+            // cleanup per clipboard_cleanup, then corrections.txt — so the
+            // whole chain is provable headless. TEXT above stays verbatim,
+            // exactly like the transcript log.
+            let cleanup_mode = cfg.get("clipboard_cleanup");
+            let corrections = crate::vocab::read_corrections(&app_dir);
+            eprintln!(
+                "cleanup mode: {cleanup_mode}; corrections: {}",
+                corrections.len()
+            );
+            let clean = crate::vocab::apply_corrections(
+                &crate::clipboard::clipboard_text(&text, &cleanup_mode),
+                &corrections,
+            );
+            println!("CLEAN: {clean}");
         }
         Err(e) => eprintln!("ERROR: {e}"),
     }

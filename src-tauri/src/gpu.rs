@@ -72,12 +72,15 @@ fn read_frame(stdout: &mut impl Read) -> Result<Value, String> {
 impl GpuWorker {
     /// Spawn the worker and wait for its readiness line. `device` is "gpu"
     /// in production; "cpu" lets the protocol be exercised without waking
-    /// the dGPU (the original's `--device cpu` test hook).
+    /// the dGPU (the original's `--device cpu` test hook). `gpu_device` is
+    /// the chosen Vulkan device on multi-GPU machines (whisper.cpp's
+    /// GPU/IGPU-counted index, as reported by `--gpu-enum`).
     pub fn spawn(
         model: &str,
         models_dir: &Path,
         compute_type: &str,
         device: &str,
+        gpu_device: usize,
         ready_timeout: Duration,
     ) -> Result<Self, String> {
         let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
@@ -92,6 +95,8 @@ impl GpuWorker {
             compute_type,
             "--device",
             device,
+            "--gpu-device",
+            &gpu_device.to_string(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -316,8 +321,16 @@ pub fn gpu_test(wav: &str, device: &str) {
         }
     };
     let audio16 = audio::resample_to_16k(&samples, rate);
+    // Same default the app uses (prefer discrete, then VRAM) — on a
+    // two-device machine (iGPU + dGPU) testing device 0 would silently
+    // exercise the wrong card.
+    let gpu_device = if device == "gpu" {
+        crate::hw::default_gpu_index(&crate::hw::snapshot().gpus)
+    } else {
+        0
+    };
     eprintln!(
-        "{} samples @16k, spawning worker on {device} ...",
+        "{} samples @16k, spawning worker on {device} (device index {gpu_device}) ...",
         audio16.len()
     );
     let t0 = Instant::now();
@@ -326,6 +339,7 @@ pub fn gpu_test(wav: &str, device: &str) {
         Path::new("models"),
         "int8",
         device,
+        gpu_device,
         READY_TIMEOUT_DOWNLOAD,
     ) {
         Ok(w) => w,

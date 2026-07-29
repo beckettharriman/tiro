@@ -37,6 +37,8 @@
       history_days: function () { return invoke("history_days"); },
       history_entries: function (day) { return invoke("history_entries", { day: day }); },
       list_vocab: function () { return invoke("list_vocab"); },
+      start_mic_monitor: function () { return invoke("start_mic_monitor"); },
+      stop_mic_monitor: function () { return invoke("stop_mic_monitor"); },
       set_vocab: function (hotwords, corrections) {
         return invoke("set_vocab", { hotwords: hotwords, corrections: corrections });
       }

@@ -733,6 +733,17 @@ impl Recording {
         Arc::clone(&self.level)
     }
 
+    /// Drop everything captured so far, keeping the stream and level meter
+    /// alive. The settings-meter monitor reuses the take pipeline's stream
+    /// as a pure level tap: draining on every level poll (~15 Hz) keeps it
+    /// from ever accumulating a take's worth of audio.
+    pub fn discard_frames(&self) {
+        self.frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     /// Stop capturing and hand back the take. The recording flag is cleared
     /// before the stream is torn down so a trailing callback can't append.
     pub fn stop(self) -> Take {

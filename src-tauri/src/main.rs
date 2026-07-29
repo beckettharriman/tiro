@@ -3,17 +3,18 @@
 
 /// Release builds run without a console (windows_subsystem on Windows, a
 /// desktop launch on Linux), so diagnostics would vanish — send stderr to
-/// tiro.log in the working directory instead, the port's answer to the
-/// original's tiro.log. On Unix dup2 also captures whisper.cpp's C-level
-/// stderr; on Windows SetStdHandle covers the Rust side (C runtime output
-/// latched its handle at startup and is not recoverable there).
+/// tiro.log in the app dir instead (NOT the CWD: an autostart launch runs
+/// with CWD = $HOME), the port's answer to the original's tiro.log. On Unix
+/// dup2 also captures whisper.cpp's C-level stderr; on Windows SetStdHandle
+/// covers the Rust side (C runtime output latched its handle at startup and
+/// is not recoverable there).
 #[cfg(not(debug_assertions))]
 fn stderr_to_log() {
     use std::fs::OpenOptions;
     let Ok(file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("tiro.log")
+        .open(tiro_lib::flow::app_dir().join("tiro.log"))
     else {
         return;
     };
@@ -93,6 +94,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--gpu-worker") {
         std::process::exit(tiro_lib::gpu_worker::run(&args));
+    }
+    if args.iter().any(|a| a == "--gpu-enum") {
+        // Vulkan device enumeration in a disposable child: the GPU context
+        // it creates dies with this process (design rule 1 — the main
+        // process never touches the GPU, not even to enumerate).
+        std::process::exit(tiro_lib::hw::gpu_enum_main());
     }
     if std::env::args().any(|a| a == "--record-test") {
         tiro_lib::audio::record_test();
