@@ -321,8 +321,16 @@ pub fn gpu_test(wav: &str, device: &str) {
         }
     };
     let audio16 = audio::resample_to_16k(&samples, rate);
+    // Same default the app uses (prefer discrete, then VRAM) — on a
+    // two-device machine (iGPU + dGPU) testing device 0 would silently
+    // exercise the wrong card.
+    let gpu_device = if device == "gpu" {
+        crate::hw::default_gpu_index(&crate::hw::snapshot().gpus)
+    } else {
+        0
+    };
     eprintln!(
-        "{} samples @16k, spawning worker on {device} ...",
+        "{} samples @16k, spawning worker on {device} (device index {gpu_device}) ...",
         audio16.len()
     );
     let t0 = Instant::now();
@@ -331,7 +339,7 @@ pub fn gpu_test(wav: &str, device: &str) {
         Path::new("models"),
         "int8",
         device,
-        0,
+        gpu_device,
         READY_TIMEOUT_DOWNLOAD,
     ) {
         Ok(w) => w,
