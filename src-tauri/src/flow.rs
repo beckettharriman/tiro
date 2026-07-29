@@ -419,7 +419,7 @@ fn show_pill(app: &AppHandle, ctx: &AppCtx, state: &str, payload: Option<&str>) 
         }
     });
     push_pill(app, state, payload);
-    // dock bottom-center after the show settles
+    // dock at the configured edge (default bottom-center) after the show settles
     crate::placement::reposition_burst(app, "pill");
 }
 

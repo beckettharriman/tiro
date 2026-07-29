@@ -129,6 +129,7 @@
     settings: {
       powerMode: "auto", modelBattery: "base.en", modelPlugged: "small.en",
       soundCues: true, volume: 65, recordingPill: true,
+      pillPosition: "bottom", pillPadding: 110,
       clipboardCleanup: "light", smartVocab: true,
       micName: "", launchAtLogin: true,
       saveTranscripts: true, savePath: "", transparency: 45,
@@ -699,9 +700,18 @@
     const captureHelper = s.clipboardCleanup === "fillers"
       ? "“+ Fillers” also strips um, uh, like, you know before copying."
       : "Light cleanup fixes spacing and capitalization on copy.";
+    const pillPad = typeof s.pillPadding === "number" ? s.pillPadding : 110;
     body.appendChild(group("Capture", [
       row("Recording pill", "Show the floating indicator while dictating",
         switchControl(s.recordingPill, (v) => setSetting("recordingPill", v))),
+      rowCol("Pill position", segmented(s.pillPosition === "top" ? "top" : "bottom", [
+        { value: "top", label: "Top" },
+        { value: "bottom", label: "Bottom" }
+      ], (v) => setSetting("pillPosition", v))),
+      rowCol("Pill distance from edge", slider(pillPad, 0, Math.max(400, pillPad),
+        (v) => persistPillPadding(v),                  // release (also fires per-tick on WebKit)
+        Icon.UpDown(),
+        (v) => persistPillPadding(v))),                // live: backend repositions; write is debounced
       rowCol("Clipboard cleanup", segmented(s.clipboardCleanup, [
         { value: "off", label: "Off" },
         { value: "light", label: "Light" },
@@ -794,6 +804,19 @@
     transparencySaveTimer = setTimeout(() => {
       transparencySaveTimer = null;
       Promise.resolve(api.set_setting("transparency", t)).catch(() => {});
+    }, 200);
+  }
+
+  // Pill padding slider — same debounced-write pattern as transparency: the
+  // backend repositions a visible pill on each set_setting, but WebKit fires
+  // slider events per tick and each write is an fsync'd file save.
+  let pillPaddingSaveTimer = null;
+  function persistPillPadding(v) {
+    App.settings.pillPadding = v;
+    if (pillPaddingSaveTimer !== null) clearTimeout(pillPaddingSaveTimer);
+    pillPaddingSaveTimer = setTimeout(() => {
+      pillPaddingSaveTimer = null;
+      Promise.resolve(api.set_setting("pillPadding", v)).catch(() => {});
     }, 200);
   }
 
