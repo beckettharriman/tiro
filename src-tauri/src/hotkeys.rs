@@ -12,7 +12,9 @@
 //! the map/unmap; the fresh state snapshot follows asynchronously.
 //!
 //! Registration goes through tauri-plugin-global-shortcut (Win32 on Windows,
-//! X11 on Linux — the Wayland portal story is task 4.3).
+//! X11 on Linux); on Wayland sessions the GlobalShortcuts portal then takes
+//! over delivery (see `hotkeys_portal`), feeding the same `hotkey_event`
+//! entry point.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -705,15 +707,18 @@ fn panel_hotkey_warning(app: &AppHandle, hk: &str) {
 
 /// `_register_all_hotkeys`: (re)register every configured hotkey; an
 /// unmappable or conflicting one is skipped with a log, never a crash.
+///
+/// On a Wayland session the grabs registered here are only a bridge: they
+/// go up instantly (so the app is never hotkey-less) and the GlobalShortcuts
+/// portal then rebinds the same combos compositor-level on a worker thread,
+/// dropping the grabs on success (see `hotkeys_portal`). Rebinds re-run the
+/// whole pass, which on the portal side closes the old session and binds a
+/// fresh one.
 pub fn register_all(app: &AppHandle) {
     // Piggyback on the startup registration pass: seed the panel's
     // remembered position from config and start move-tracking (idempotent —
     // rebind passes are no-ops).
     crate::placement::init_panel_tracking(app);
-    let gs = app.global_shortcut();
-    if let Err(e) = gs.unregister_all() {
-        eprintln!("hotkey unregister_all failed: {e}");
-    }
     let ctx = app.state::<AppCtx>();
     let bindings: Vec<(&'static str, String)> = {
         let cfg = lock(&ctx.cfg);
@@ -722,12 +727,37 @@ pub fn register_all(app: &AppHandle) {
             .map(|(which, key)| (*which, cfg.get(key)))
             .collect()
     };
+    register_grabs(app, &bindings);
+    #[cfg(target_os = "linux")]
+    if crate::hotkeys_portal::wayland_session() {
+        let mappable: Vec<(&'static str, String)> = bindings
+            .into_iter()
+            .filter(|(_, hk)| api::parse_hotkey(hk))
+            .collect();
+        if !mappable.is_empty() {
+            eprintln!(
+                "Wayland session: binding hotkeys through the GlobalShortcuts \
+                 portal (the X11 grabs stay up until it succeeds)"
+            );
+            crate::hotkeys_portal::spawn_register(app, mappable);
+        }
+    }
+}
+
+/// Register `bindings` as plugin shortcuts (Win32 hooks on Windows, X11
+/// grabs on Linux), replacing whatever was registered before.
+fn register_grabs(app: &AppHandle, bindings: &[(&'static str, String)]) {
+    let gs = app.global_shortcut();
+    if let Err(e) = gs.unregister_all() {
+        eprintln!("hotkey unregister_all failed: {e}");
+    }
     for (which, hk) in bindings {
-        if !api::parse_hotkey(&hk) {
+        let which = *which;
+        if !api::parse_hotkey(hk) {
             eprintln!("hotkey '{which}' = '{hk}' is unmappable; skipped");
             continue;
         }
-        let Some(accel) = to_accelerator(&hk) else {
+        let Some(accel) = to_accelerator(hk) else {
             eprintln!("hotkey '{which}' = '{hk}' is unmappable; skipped");
             continue;
         };
@@ -741,22 +771,10 @@ pub fn register_all(app: &AppHandle) {
                     "hotkey registration FAILED for {which} = {hk} ({e}; in use by another app?)"
                 );
                 if which == "panel" {
-                    panel_hotkey_warning(app, &hk);
+                    panel_hotkey_warning(app, hk);
                 }
             }
         }
-    }
-    // Global hotkeys are X11 grabs on Linux; in a Wayland session they can
-    // only fire while an XWayland window has focus (or not at all with no
-    // X server). Point at the documented DE-shortcut fallback.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        eprintln!(
-            "Wayland session detected: global hotkeys use X11 grabs and may \
-             not fire while native Wayland apps have focus. Bind DE-level \
-             shortcuts to `tiro --toggle` / `tiro --panel` / `tiro --cancel` \
-             instead (see BUILDING.md)."
-        );
     }
 }
 
@@ -806,9 +824,18 @@ mod tests {
             to_portal_trigger("ctrl+alt+space").as_deref(),
             Some("CTRL+ALT+space")
         );
-        assert_eq!(to_portal_trigger("ctrl+alt+v").as_deref(), Some("CTRL+ALT+v"));
-        assert_eq!(to_portal_trigger("ctrl+alt+c").as_deref(), Some("CTRL+ALT+c"));
-        assert_eq!(to_portal_trigger("ctrl+alt+x").as_deref(), Some("CTRL+ALT+x"));
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+v").as_deref(),
+            Some("CTRL+ALT+v")
+        );
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+c").as_deref(),
+            Some("CTRL+ALT+c")
+        );
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+x").as_deref(),
+            Some("CTRL+ALT+x")
+        );
     }
 
     #[test]
@@ -1097,11 +1124,13 @@ mod tests {
         // physically held.
         let mut c = HoldCore::default();
         let t0 = Instant::now();
-        assert_eq!(c.press(t0, true), PressAction::Dispatch); // hold starts the take
+        // the hold starts the take
+        assert_eq!(c.press(t0, true), PressAction::Dispatch);
         // ~150ms in: synthetic Released from the focus change, then silence
         let synth = c.release(t0 + ms(150)).expect("hold is live");
         assert!(!synth.held);
-        assert_eq!(c.resolve(&synth, true), ReleaseAction::Inert); // commits, recording on
+        // the debounce expires with recording still on: it commits
+        assert_eq!(c.resolve(&synth, true), ReleaseAction::Inert);
         // autorepeat resumes at the 600ms repeat delay: a Released+Pressed
         // pair whose Released finds no live press...
         let t1 = t0 + ms(600);
