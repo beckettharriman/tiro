@@ -106,6 +106,11 @@ pub struct AppCtx {
     /// Taken ONLY by `transcribe_worker` threads — nothing main-thread-
     /// reachable can ever queue behind a take on this lock.
     xscribe: Mutex<()>,
+    /// Set on the tray Quit/Restart path (`stop_worker`): the process is
+    /// exiting, so the crash-fallback must not load a CPU model into a
+    /// dying process — the mid-take audio is abandoned, per the original's
+    /// shutdown contract (PORTING_NOTES §8: never block exit on cleanup).
+    shutting_down: AtomicBool,
     rec_tx: Mutex<Sender<RecCmd>>,
     recording: AtomicBool,
     busy: AtomicBool,
@@ -197,6 +202,7 @@ impl AppCtx {
                 device: "cpu".into(),
             }),
             xscribe: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
             rec_tx: Mutex::new(tx),
             recording: AtomicBool::new(false),
             busy: AtomicBool::new(false),
@@ -401,6 +407,10 @@ pub fn ensure_device(app: &AppHandle, target: &str) {
             // flip the dGPU no longer has to wait out the take to sleep.
             w.stop();
         }
+        // The worker is gone RIGHT NOW: refresh the chip snapshot before
+        // the (possibly minutes-long) load, so a mid-load get_state can
+        // never claim "GPU" over a dead worker (design rule 8).
+        refresh_status(&ctx, &engine);
         load_engine(&ctx, &mut engine, target);
         // The outgoing in-process CPU model (if any) drops here — or, when
         // an in-flight take still holds its Arc, when that take finishes.
@@ -412,6 +422,23 @@ pub fn ensure_device(app: &AppHandle, target: &str) {
 /// periodic re-probe in `resolve_target` can lift it later.
 pub fn latch_gpu_off(ctx: &AppCtx) {
     ctx.gpu_ok.store(false, Ordering::SeqCst);
+}
+
+/// Tear down whatever serves right now — worker stopped (immediately if a
+/// request is in flight), CPU model dropped — and refresh the chip
+/// snapshot in the same breath: the owner must never see "GPU" while the
+/// worker is dead, even for the minutes a follow-up load takes (design
+/// rule 8). Clearing `model_name` makes the chip fall back to the
+/// configured model — the existing "not ready" presentation — until the
+/// reload lands. Callers bring the replacement up via `ensure_device`.
+pub fn teardown_engine(ctx: &AppCtx) {
+    let mut engine = lock(&ctx.engine);
+    if let Some(w) = engine.worker.take() {
+        w.stop();
+    }
+    engine.transcriber = None;
+    engine.model_name = String::new();
+    refresh_status(ctx, &engine);
 }
 
 /// Kill the GPU worker synchronously (quit/restart path): its exit is what
@@ -427,6 +454,10 @@ pub fn latch_gpu_off(ctx: &AppCtx) {
 /// (PORTING_NOTES §8: "never block exit on cleanup").
 pub fn stop_worker(app: &AppHandle) {
     let ctx = app.state::<AppCtx>();
+    // Mark the shutdown FIRST: the crash-fallback of any take our kill
+    // interrupts checks this and abandons the take instead of loading a
+    // CPU model into a dying process (PORTING_NOTES §8).
+    ctx.shutting_down.store(true, Ordering::SeqCst);
     let worker = match ctx.engine.try_lock() {
         Ok(mut engine) => engine.worker.take(),
         Err(TryLockError::Poisoned(p)) => p.into_inner().worker.take(),
@@ -709,6 +740,105 @@ enum Outcome {
     Noop,
 }
 
+/// What a failed GPU take retries on (never-lose-a-take).
+enum Retry {
+    Gpu(Arc<GpuWorker>),
+    Cpu(Arc<Transcriber>),
+}
+
+/// The crash-fallback's decision core, pure so it can be unit-tested (the
+/// full interleaving needs live worker child processes, which headless
+/// tests cannot spawn). Inputs describe the engine at fallback time:
+/// - `ours`: the engine still serves (or has an empty slot for) the very
+///   worker whose request just failed,
+/// - `replacement_alive`: a DIFFERENT, live worker was installed meanwhile
+///   (a concurrent device swap / model change),
+/// - `allow_gpu`: this take has not burnt its one GPU retry yet,
+/// - `has_transcriber`: a CPU model is loaded.
+#[derive(Debug, PartialEq)]
+enum FallbackRoute {
+    /// Reap the failed/absent worker, load the CPU model, retry there.
+    TeardownLoadCpu,
+    /// Retry through the live replacement worker.
+    ReplacementGpu,
+    /// Retry on the already-loaded CPU model.
+    ExistingCpu,
+    /// A live replacement exists but this take may not use the GPU again,
+    /// and no CPU model is loaded: killing a healthy worker to load one
+    /// would punish an engine that did nothing wrong — give up (Error is
+    /// allowed only when no engine can be obtained; two GPU engines have
+    /// already failed this take by then).
+    GiveUp,
+}
+
+fn fallback_route(
+    ours: bool,
+    replacement_alive: bool,
+    allow_gpu: bool,
+    has_transcriber: bool,
+) -> FallbackRoute {
+    if ours {
+        FallbackRoute::TeardownLoadCpu
+    } else if replacement_alive && allow_gpu {
+        FallbackRoute::ReplacementGpu
+    } else if has_transcriber {
+        FallbackRoute::ExistingCpu
+    } else if replacement_alive {
+        FallbackRoute::GiveUp
+    } else {
+        FallbackRoute::TeardownLoadCpu
+    }
+}
+
+/// Apply `fallback_route` under the engine lock and hand back the engine
+/// this take retries on. Returns `None` only when no engine could be
+/// obtained at all (CPU load failed, or `GiveUp`). Holding the engine
+/// lock across the CPU load here is safe: nothing main-thread-reachable
+/// ever waits on it (LOCK LAW above).
+fn fallback_target(
+    ctx: &AppCtx,
+    failed: Option<&Arc<GpuWorker>>,
+    allow_gpu: bool,
+    model_name: &mut String,
+    flipped: &mut bool,
+) -> Option<Retry> {
+    let mut engine = lock(&ctx.engine);
+    let ours = match (&engine.worker, failed) {
+        (Some(cur), Some(f)) => Arc::ptr_eq(cur, f),
+        (None, _) => engine.device == "gpu",
+        (Some(_), None) => false,
+    };
+    let replacement_alive = !ours && engine.worker.as_ref().is_some_and(|w| w.alive());
+    match fallback_route(
+        ours,
+        replacement_alive,
+        allow_gpu,
+        engine.transcriber.is_some(),
+    ) {
+        FallbackRoute::TeardownLoadCpu => {
+            if let Some(w) = engine.worker.take() {
+                w.stop();
+            }
+            // The worker is gone RIGHT NOW — the chip must stop claiming
+            // GPU for the whole CPU load that follows (design rule 8).
+            refresh_status(ctx, &engine);
+            load_engine(ctx, &mut engine, "cpu");
+            *flipped = true;
+            *model_name = engine.model_name.clone();
+            engine.transcriber.clone().map(Retry::Cpu)
+        }
+        FallbackRoute::ReplacementGpu => {
+            *model_name = engine.model_name.clone();
+            engine.worker.clone().map(Retry::Gpu)
+        }
+        FallbackRoute::ExistingCpu => {
+            *model_name = engine.model_name.clone();
+            engine.transcriber.clone().map(Retry::Cpu)
+        }
+        FallbackRoute::GiveUp => None,
+    }
+}
+
 /// Transcribe off the command thread, then copy + log. An error can never
 /// skip `finish` — the pill must never wedge on "transcribing": every exit
 /// from the closure maps to an `Outcome`, and a panic anywhere inside it
@@ -774,48 +904,74 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
                 match result {
                     Ok(text) => (text, "gpu".to_string()),
                     Err(e) => {
-                        // The worker crashed / timed out MID-TAKE. The take
-                        // must not be lost: latch the GPU off (the periodic
-                        // re-probe allows a respawn later), swap the engine
-                        // to the battery model — holding the engine lock
-                        // across this load is safe now that nothing
-                        // main-thread-reachable ever waits on it — and
-                        // transcribe the SAME audio on CPU right here.
-                        eprintln!(
-                            "gpu-worker: request failed ({e}); \
-                             falling back to in-process CPU for this take"
-                        );
-                        ctx.gpu_ok.store(false, Ordering::SeqCst);
-                        let transcriber = {
-                            let mut engine = lock(&ctx.engine);
-                            // Only tear down OUR worker — a concurrent
-                            // device swap may already serve a replacement
-                            // engine, which must not be killed for a crash
-                            // it didn't have.
-                            let ours = match (&engine.worker, &gpu) {
-                                (Some(cur), Some(failed)) => Arc::ptr_eq(cur, failed),
-                                (None, _) => engine.device == "gpu",
-                                _ => false,
-                            };
-                            if ours {
-                                if let Some(w) = engine.worker.take() {
-                                    w.stop();
-                                }
-                                load_engine(&ctx, &mut engine, "cpu");
-                                engine_flipped = true;
+                        // The worker died MID-TAKE — crashed, timed out, or
+                        // deliberately killed (device swap, model change,
+                        // shutdown). The take must not be lost: retry the
+                        // SAME audio on whatever the engine serves now
+                        // (`fallback_target`); at most one retry lands on a
+                        // replacement GPU worker, after that it goes CPU.
+                        let mut err = e;
+                        let mut failed = gpu;
+                        let mut allow_gpu = true;
+                        loop {
+                            if ctx.shutting_down.load(Ordering::SeqCst) {
+                                // Exit in progress: do not load models into
+                                // a dying process. PORTING_NOTES §8: never
+                                // block exit on cleanup — take abandoned.
+                                eprintln!(
+                                    "gpu-worker: request failed ({err}); \
+                                     take abandoned at exit"
+                                );
+                                return Outcome::Noop;
                             }
-                            model_name = engine.model_name.clone();
-                            engine.transcriber.clone()
-                        };
-                        let Some(t) = transcriber else {
-                            eprintln!("CPU fallback load failed too");
-                            return Outcome::Error;
-                        };
-                        match t.transcribe(&audio16, 1, vocab.as_deref()) {
-                            Ok(text) => (text, "cpu".to_string()),
-                            Err(e) => {
-                                eprintln!("transcribe failed: {e}");
-                                return Outcome::Error;
+                            // Only a real crash latches the GPU off (the
+                            // periodic re-probe can lift it later). A
+                            // deliberate kill must not cost 10 minutes of
+                            // CPU-only service; an unattributable failure
+                            // (worker already gone) means a deliberate
+                            // taker was involved, so no latch either — the
+                            // power watcher still latches a silently-dead
+                            // worker it finds on its own.
+                            let crashed = failed.as_deref().is_some_and(|w| !w.was_stopped());
+                            if crashed {
+                                ctx.gpu_ok.store(false, Ordering::SeqCst);
+                            }
+                            eprintln!(
+                                "gpu-worker: request failed ({err}); \
+                                 retrying this take on the serving engine"
+                            );
+                            match fallback_target(
+                                &ctx,
+                                failed.as_ref(),
+                                allow_gpu,
+                                &mut model_name,
+                                &mut engine_flipped,
+                            ) {
+                                None => {
+                                    eprintln!("no engine available for the retry");
+                                    return Outcome::Error;
+                                }
+                                Some(Retry::Cpu(t)) => {
+                                    match t.transcribe(&audio16, 1, vocab.as_deref()) {
+                                        Ok(text) => break (text, "cpu".to_string()),
+                                        Err(e) => {
+                                            eprintln!("transcribe failed: {e}");
+                                            return Outcome::Error;
+                                        }
+                                    }
+                                }
+                                Some(Retry::Gpu(w)) => {
+                                    match w.transcribe(&audio16, 5, vocab.as_deref()) {
+                                        Ok(text) => break (text, "gpu".to_string()),
+                                        Err(e) => {
+                                            // One GPU retry per take; the
+                                            // next round goes CPU-ward.
+                                            err = e;
+                                            failed = Some(w);
+                                            allow_gpu = false;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1029,6 +1185,56 @@ mod lock_tests {
             assert_eq!(dict["model"], "large-v3-turbo", "snapshot model served");
             assert_eq!(dict["device"], "CPU", "snapshot device served");
         });
+    }
+
+    /// D1 decision table for the crash-fallback. The full interleaving
+    /// (kill a live worker mid-request, install a replacement, drive the
+    /// fallback) needs real worker child processes, which a headless test
+    /// cannot spawn — so the extracted pure core carries the coverage.
+    #[test]
+    fn fallback_route_never_discards_a_recoverable_take() {
+        use FallbackRoute::*;
+        // Engine still serves the failed worker (or its empty slot):
+        // reap + load CPU, regardless of anything else.
+        assert_eq!(fallback_route(true, false, true, false), TeardownLoadCpu);
+        assert_eq!(fallback_route(true, false, false, true), TeardownLoadCpu);
+        // The D1 incident shape: a live replacement worker was installed
+        // between the deliberate kill and the fallback's lock — the take
+        // retries THROUGH it, it is not an error.
+        assert_eq!(fallback_route(false, true, true, false), ReplacementGpu);
+        // Replacement present but this take already burnt its GPU retry:
+        // prefer a loaded CPU model; with none, give up rather than kill
+        // a healthy worker.
+        assert_eq!(fallback_route(false, true, false, true), ExistingCpu);
+        assert_eq!(fallback_route(false, true, false, false), GiveUp);
+        // Engine flipped to CPU meanwhile: retry there.
+        assert_eq!(fallback_route(false, false, true, true), ExistingCpu);
+        // Nothing serves at all: load CPU and retry.
+        assert_eq!(fallback_route(false, false, true, false), TeardownLoadCpu);
+        assert_eq!(fallback_route(false, false, false, false), TeardownLoadCpu);
+    }
+
+    /// D2: a teardown must flip the chip snapshot IMMEDIATELY — the owner
+    /// must never see "GPU"/the old model while the worker is dead and a
+    /// replacement load is still running.
+    #[test]
+    fn teardown_refreshes_the_chip_snapshot_at_once() {
+        let ctx = AppCtx::new();
+        {
+            let mut engine = lock(&ctx.engine);
+            engine.model_name = "large-v3-turbo".into();
+            engine.device = "gpu".into();
+        }
+        // Seed the snapshot as if a live worker had been serving (a real
+        // one can't exist headlessly — refresh would see it dead).
+        *lock(&ctx.status) = EngineStatus {
+            model: "large-v3-turbo".into(),
+            device: "gpu".into(),
+        };
+        teardown_engine(&ctx);
+        let s = lock(&ctx.status).clone();
+        assert_eq!(s.device, "cpu", "dead worker must not read GPU");
+        assert_eq!(s.model, "", "model falls back to the configured one");
     }
 
     /// When the engine lock is free, `engine_dict` must serve (and cache)

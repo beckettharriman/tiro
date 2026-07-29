@@ -13,6 +13,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
@@ -48,6 +49,11 @@ pub struct GpuWorker {
     /// transcription (the tray Restart/Quit handlers run on the main
     /// thread, which must never block on take-length work).
     child: Mutex<Child>,
+    /// Set by `stop()` before the pipes die: this worker was stopped ON
+    /// PURPOSE (device swap, model change, shutdown). The crash-fallback
+    /// reads it to tell a deliberate mid-take kill from a real crash —
+    /// only the latter may latch the GPU off.
+    stopped: AtomicBool,
     pub model: String,
 }
 
@@ -141,6 +147,7 @@ impl GpuWorker {
         let worker = Self {
             io: Mutex::new(WorkerIo { stdin, frames: rx }),
             child: Mutex::new(child),
+            stopped: AtomicBool::new(false),
             model: model.to_string(),
         };
         // The io guard is a temporary: it drops at the end of this statement,
@@ -252,7 +259,16 @@ impl GpuWorker {
     /// path runs on the main thread — so kill immediately instead: the
     /// dying pipes surface as an io error to the in-flight `transcribe`,
     /// whose caller retries the take on CPU (never-lose-a-take).
+    /// Whether `stop()` ran (or started) on this worker — i.e. its death
+    /// was deliberate, not a crash. Set BEFORE the pipes die, so by the
+    /// time an in-flight request surfaces the resulting error this flag is
+    /// already visible.
+    pub fn was_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
     pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         let graceful = match self.io.try_lock() {
             Ok(mut io) => {
                 drop(io.stdin.take());

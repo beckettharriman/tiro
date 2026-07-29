@@ -54,6 +54,11 @@ fn markdown_header(day: &str) -> String {
     )
 }
 
+/// Single-shot append: the whole record goes through ONE `write_all` on an
+/// `O_APPEND` handle — for these small records that is a single atomic
+/// `write(2)`, so a take finishing in the ms window around `process::exit`
+/// (shutdown never waits for in-flight takes, PORTING_NOTES §8) can only
+/// land complete or not at all — never as a truncated trailing line.
 fn append(path: &PathBuf, content: &str) -> std::io::Result<()> {
     let mut f = OpenOptions::new().append(true).create(true).open(path)?;
     f.write_all(content.as_bytes())

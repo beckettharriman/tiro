@@ -520,20 +520,17 @@ pub fn download_model(app: &AppHandle, name: &str) -> Value {
 
 /// Force an engine reload after a battery/plugged model change — otherwise
 /// the new choice would only take effect on the next device swap. Tear down
-/// whatever serves right now (worker stopped, CPU model dropped) under the
-/// engine lock — which serializes with any in-flight take — then bring the
-/// resolved target back up, which loads the newly-configured model.
+/// whatever serves right now (worker stopped — immediately if a take is in
+/// flight; that take retries via the crash-fallback, and the deliberate-
+/// kill mark keeps the GPU from being latched off), then bring the
+/// resolved target back up, which loads the newly-configured model. The
+/// teardown refreshes the chip snapshot at once, so the panel never shows
+/// "GPU" during the reload.
 fn hot_apply_model_change(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let ctx = app.state::<AppCtx>();
-        {
-            let mut engine = lock(&ctx.engine);
-            if let Some(w) = engine.worker.take() {
-                w.stop();
-            }
-            engine.transcriber = None;
-        }
+        flow::teardown_engine(&ctx);
         let target = flow::resolve_target(&ctx);
         flow::ensure_device(&app, target);
     });
