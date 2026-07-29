@@ -376,6 +376,11 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
                 let x = pos.x.min(wr - phys_w).max(wl);
                 if x != pos.x {
                     let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                    // Update the remembered spot NOW, not via the async
+                    // Moved event: a reposition burst racing this expand
+                    // re-applies whatever is remembered, and the pre-expand
+                    // x would hang the 800px surface off-screen.
+                    *lock(&state(&app).panel_pos) = Some((x, pos.y));
                 }
             }
         }
