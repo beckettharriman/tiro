@@ -47,6 +47,11 @@ pub struct Placement {
     save_gen: AtomicU64,
     /// One-time guard for `init_panel_tracking`.
     tracking: AtomicBool,
+    /// Whether the panel window is currently at the expanded width. Owned
+    /// here (not queried from the window) so a resize on an UNMAPPED
+    /// window — where geometry queries are unreliable — still knows which
+    /// width it is coming from.
+    expanded: AtomicBool,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, Placement> {
@@ -347,16 +352,39 @@ pub const PANEL_W_COMPACT: u32 = 400;
 pub const PANEL_W_EXPANDED: u32 = 800;
 pub const PANEL_H: u32 = 560;
 
-/// New window x that keeps the RIGHT edge fixed across a width change
-/// (the design's expand anchor is the top-right corner), clamped so the
-/// whole surface stays inside the work area — the left edge wins when the
-/// area is narrower than the window. Physical px. Pure, extracted for
-/// tests.
-fn anchored_right_x(old_x: i32, old_w: i32, new_w: i32, work: Option<(i32, i32, i32, i32)>) -> i32 {
-    let x = old_x + old_w - new_w;
+/// New window x for a width change of `delta` physical px (new minus old)
+/// that keeps the RIGHT edge fixed (the design's expand anchor is the
+/// top-right corner), clamped so the whole surface stays inside the work
+/// area — the left edge wins when the area is narrower than the window.
+/// Physical px. Pure, extracted for tests.
+fn anchored_right_x(old_x: i32, delta: i32, new_w: i32, work: Option<(i32, i32, i32, i32)>) -> i32 {
+    let x = old_x - delta;
     match work {
         Some((wl, _, wr, _)) => x.min(wr - new_w).max(wl),
         None => x,
+    }
+}
+
+/// Work area for panel expand/collapse geometry: the monitor the PANEL is
+/// on first — the cursor may be on another monitor by the time the
+/// deferred collapse resize fires 560 ms after the click — falling back
+/// to the cursor/primary chain only when the panel's monitor is unknown
+/// (e.g. the window is unmapped).
+fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
+    let monitor = app
+        .get_webview_window("panel")
+        .and_then(|w| w.current_monitor().ok().flatten());
+    match monitor {
+        Some(m) => {
+            let wa = m.work_area();
+            Some((
+                wa.position.x,
+                wa.position.y,
+                wa.position.x + wa.size.width as i32,
+                wa.position.y + wa.size.height as i32,
+            ))
+        }
+        None => active_work_area(app),
     }
 }
 
@@ -385,15 +413,18 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
         let Some(w) = app.get_webview_window("panel") else {
             return;
         };
+        let was = state(&app).expanded.swap(on, Ordering::SeqCst);
         let width = if on {
             PANEL_W_EXPANDED
         } else {
             PANEL_W_COMPACT
         };
+        let old_width = if was {
+            PANEL_W_EXPANDED
+        } else {
+            PANEL_W_COMPACT
+        };
         let size = tauri::LogicalSize::new(width, PANEL_H);
-        // Anchor math needs the CURRENT frame, captured before any resize
-        // (or hint enforcement) lands.
-        let old = w.outer_position().ok().zip(w.outer_size().ok());
         if on {
             let _ = w.set_max_size(Some(size));
             let _ = w.set_min_size(Some(size));
@@ -402,17 +433,42 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
             let _ = w.set_max_size(Some(size));
         }
         let _ = w.set_size(size);
-        if let Some((pos, osize)) = old {
-            let scale = w.scale_factor().unwrap_or(1.0);
-            let phys_w = (f64::from(width) * scale).round() as i32;
-            let x = anchored_right_x(pos.x, osize.width as i32, phys_w, active_work_area(&app));
-            if x != pos.x {
-                let _ = w.set_position(PhysicalPosition::new(x, pos.y));
-                // Update the remembered spot NOW, not via the async Moved
-                // event: a reposition burst racing this re-applies whatever
-                // is remembered, and the stale x would hang the resized
-                // surface at the wrong spot.
-                *lock(&state(&app).panel_pos) = Some((x, pos.y));
+        if was == on {
+            return; // idempotent re-apply: the width did not change
+        }
+        let scale = w.scale_factor().unwrap_or(1.0);
+        // One rounding of the DELTA, not of each absolute width: expand and
+        // collapse then shift by the same magnitude under fractional
+        // scaling, so a full toggle cycle cancels to zero px of creep.
+        let delta = ((f64::from(width) - f64::from(old_width)) * scale).round() as i32;
+        let phys_w = (f64::from(width) * scale).round() as i32;
+        let work = panel_work_area(&app);
+        if w.is_visible().unwrap_or(false) {
+            if let Ok(pos) = w.outer_position() {
+                let x = anchored_right_x(pos.x, delta, phys_w, work);
+                if x != pos.x {
+                    let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                    // Update the remembered spot NOW, not via the async
+                    // Moved event: a reposition burst racing this re-applies
+                    // whatever is remembered, and the stale x would hang the
+                    // resized surface at the wrong spot.
+                    *lock(&state(&app).panel_pos) = Some((x, pos.y));
+                }
+            }
+        } else {
+            // Hidden mid-transition (e.g. the panel hotkey during the
+            // 560 ms collapse settle): the window is unmapped, so
+            // outer_position() is unreliable and no Moved event will fire
+            // to persist anything. Reconcile from the REMEMBERED spot —
+            // captured right before the hide, while still mapped — and
+            // persist through note_panel_pos, so the panel reopens at the
+            // user's right edge and config agrees.
+            let remembered = *lock(&state(&app).panel_pos);
+            if let Some((rx, ry)) = remembered {
+                let x = anchored_right_x(rx, delta, phys_w, work);
+                if x != rx {
+                    note_panel_pos(&app, x, ry, 0);
+                }
             }
         }
     });
@@ -598,12 +654,12 @@ mod tests {
     #[test]
     fn expand_anchors_the_top_right_corner() {
         let work = Some((0, 0, 1920, 1080));
-        // 400 -> 800: x drops by the width delta, right edge unchanged.
+        // 400 -> 800 (delta +400): x drops by the delta, right edge fixed.
         assert_eq!(anchored_right_x(1000, 400, 800, work), 600);
-        // collapse restores the exact pre-expand spot (no drift)
-        assert_eq!(anchored_right_x(600, 800, 400, work), 1000);
-        // same width -> same x (idempotent re-apply)
-        assert_eq!(anchored_right_x(600, 800, 800, work), 600);
+        // collapse (delta -400) restores the exact pre-expand spot
+        assert_eq!(anchored_right_x(600, -400, 400, work), 1000);
+        // no width change -> same x
+        assert_eq!(anchored_right_x(600, 0, 800, work), 600);
     }
 
     #[test]
@@ -622,6 +678,22 @@ mod tests {
         );
         // no monitor info: raw anchor math, no clamp
         assert_eq!(anchored_right_x(50, 400, 800, None), -350);
+    }
+
+    #[test]
+    fn fractional_scale_cycle_has_no_creep() {
+        // 1.25 scale: the shift is one rounding of the DELTA (400 * 1.25),
+        // applied with opposite signs — expand + collapse must return to
+        // exactly the starting x, whatever the rounding did.
+        for scale in [1.25_f64, 1.5, 1.1, 2.0, 1.33] {
+            let delta = (400.0 * scale).round() as i32;
+            let w800 = (800.0 * scale).round() as i32;
+            let w400 = (400.0 * scale).round() as i32;
+            let work = Some((0, 0, 4000, 1600));
+            let expanded = anchored_right_x(2000, delta, w800, work);
+            let back = anchored_right_x(expanded, -delta, w400, work);
+            assert_eq!(back, 2000, "creep at scale {scale}");
+        }
     }
 
     #[test]
