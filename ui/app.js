@@ -623,7 +623,7 @@
   const cleanupCopy = {
     off: "Text lands on the clipboard exactly as transcribed.",
     light: "Light cleanup fixes spacing and capitalization on copy.",
-    fillers: "Also strips filler words — um, uh, you know — on copy."
+    fillers: "Also strips filler words — um, uh, erm, hmm — on copy."
   };
   const cleanupSub = $("cleanupSub");
   function setCleanupCopy(mode) {
