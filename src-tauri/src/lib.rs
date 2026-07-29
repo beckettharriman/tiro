@@ -408,11 +408,11 @@ pub fn run() {
         })
         .setup(|app| {
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
-            // so GTK refuses to make the pill window its configured 88 px.
+            // so GTK refuses to make the pill window its configured 76 px.
             // Clear the size request on every descendant widget and re-apply
-            // the intended size at the GTK level. (88 = the pill's CSS
-            // geometry: 38 px dock bottom offset + 44 px pill + headroom —
-            // a 72 px window clipped the pill's top by 10 px.)
+            // the intended size at the GTK level. (76 = the design's pill
+            // stage: a 44 px pill centered with headroom for the 14 px
+            // entrance travel.)
             #[cfg(target_os = "linux")]
             {
                 use gtk::prelude::*;
@@ -428,7 +428,7 @@ pub fn run() {
                 if let Some(pill) = app.webview_windows().get("pill") {
                     if let Ok(gtk_win) = pill.gtk_window() {
                         clear_size_request(gtk_win.upcast_ref::<gtk::Widget>());
-                        gtk_win.resize(300, 88);
+                        gtk_win.resize(300, 76);
                     }
                 }
             }
