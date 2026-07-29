@@ -3,6 +3,8 @@
 //! lives in `api`, the recording state machine in `flow`.
 
 pub mod api;
+#[cfg(target_os = "linux")]
+pub mod app_scope;
 pub mod audio;
 pub mod clipboard;
 pub mod config;
@@ -412,6 +414,13 @@ pub fn run() {
                 }
                 placement::reposition_burst(app.handle(), "panel");
             }
+            // The GlobalShortcuts portal identifies callers by their systemd
+            // unit; claim an app-<id> scope BEFORE hotkeys::register_all
+            // spawns the portal worker (first D-Bus contact resolves — and
+            // caches — our app id). Setup only runs in the primary instance,
+            // so forwarding launches never churn scopes.
+            #[cfg(target_os = "linux")]
+            app_scope::ensure_app_scope(&app.config().identifier);
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
             power_watcher(app.handle().clone());
