@@ -869,6 +869,8 @@
   function cancelDownload(name) {
     Promise.resolve(api.cancel_download && api.cancel_download(name)).catch(() => {});
     delete App.modelProgress[name];
+    const m = App.models.find((x) => x.name === name);
+    if (m) m.downloading = false;
     updateModelRow(name);
   }
 
@@ -1292,6 +1294,8 @@
     }
     if (p.cancelled) {
       delete App.modelProgress[p.model];
+      const m = App.models.find((x) => x.name === p.model);
+      if (m) m.downloading = false;
       updateModelRow(p.model);
       return;
     }
