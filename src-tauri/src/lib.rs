@@ -382,6 +382,19 @@ pub fn run() {
                     }
                 }
             }
+            // The pill is a pure overlay: it must never take keyboard focus,
+            // or showing it mid-take would steal focus from the app the user
+            // is dictating into (paste-at-cursor depends on the target app
+            // keeping focus). `focusable: false` in tauri.conf.json sets
+            // this at creation (GTK accept_focus(false) / WM_HINTS input on
+            // X11, WS_EX_NOACTIVATE on Windows); re-assert it here so a
+            // config regression can't quietly bring focus stealing back.
+            {
+                use tauri::Manager;
+                if let Some(pill) = app.webview_windows().get("pill") {
+                    let _ = pill.set_focusable(false);
+                }
+            }
             // The panel is configured hidden (summoned by hotkey/tray, which
             // land in phase 2/3); dev builds show it at startup so there is
             // something to work against. The pill is driven by the recording
