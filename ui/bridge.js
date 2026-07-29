@@ -26,12 +26,20 @@
       toggle_record: function () { return invoke("toggle_record"); },
       cancel_record: function () { return invoke("cancel_record"); },
       set_pin: function (on) { return invoke("set_pin", { on: on }); },
+      set_expanded: function (on) { return invoke("set_expanded", { on: on }); },
       close_panel: function () { return invoke("close_panel"); },
       begin_drag: function () { return invoke("begin_drag"); },
       pick_folder: function () { return invoke("pick_folder"); },
       rebind_shortcut: function (which, combo) { return invoke("rebind_shortcut", { which: which, combo: combo }); },
       list_models: function () { return invoke("list_models"); },
-      download_model: function (name) { return invoke("download_model", { name: name }); }
+      download_model: function (name) { return invoke("download_model", { name: name }); },
+      cancel_download: function (name) { return invoke("cancel_download", { name: name }); },
+      history_days: function () { return invoke("history_days"); },
+      history_entries: function (day) { return invoke("history_entries", { day: day }); },
+      list_vocab: function () { return invoke("list_vocab"); },
+      set_vocab: function (hotwords, corrections) {
+        return invoke("set_vocab", { hotwords: hotwords, corrections: corrections });
+      }
     }
   };
 

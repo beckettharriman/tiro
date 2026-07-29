@@ -1,76 +1,14 @@
-/* app.js — TIRO panel + settings (OFFLINE vanilla rewrite of
-   app.jsx + components.jsx + settings.jsx). No React, no Babel, no CDN. */
+/* app.js — TIRO panel: compact surface + advanced area (Transcribe /
+   Settings / Vocabulary / Models). Vanilla JS over the static DOM in
+   index.html; visual mechanics mirror the design source exactly, data
+   flows through the pywebview-shaped bridge (or the built-in mock when
+   previewing over file:// with no backend). */
 (function () {
   "use strict";
 
-  /* ════════════════════════════════════════════════════════════════════
-     ICONS — ported verbatim from components.jsx (currentColor line glyphs)
-     Each returns an SVG element. Optional extra class via `cls`.
-     ════════════════════════════════════════════════════════════════════ */
-  function svg(markup, cls) {
-    const wrap = document.createElement("div");
-    wrap.innerHTML = markup.trim();
-    const node = wrap.firstElementChild;
-    if (cls) node.setAttribute("class", cls);
-    return node;
-  }
-  const Icon = {
-    Mic: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
-      '<rect x="9" y="3" width="6" height="11" rx="3"/>' +
-      '<path d="M5.5 11a6.5 6.5 0 0 0 13 0"/>' +
-      '<path d="M12 17.5V21"/></svg>', cls),
-    Stop: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="currentColor">' +
-      '<rect x="7" y="7" width="10" height="10" rx="3"/></svg>', cls),
-    Pin: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M9 4h6l-.6 4.2 2.6 2.6V13H7v-2.2l2.6-2.6L9 4Z"/>' +
-      '<path d="M12 13v7"/></svg>', cls),
-    Gear: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">' +
-      '<circle cx="12" cy="12" r="3"/>' +
-      '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>', cls),
-    Close: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">' +
-      '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>', cls),
-    ChevronD: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M8 10l4 4 4-4"/></svg>', cls),
-    UpDown: (cls) => svg(
-      '<svg viewBox="0 0 12 16" fill="currentColor">' +
-      '<path d="M6 1 9 4.6H3zM6 15 3 11.4h6z"/></svg>', cls),
-    Back: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M14.5 6.5 9 12l5.5 5.5"/></svg>', cls),
-    Check: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M5 12.5l4.2 4.2L19 7"/></svg>', cls),
-    CheckCircle: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-      '<circle cx="12" cy="12" r="9"/>' +
-      '<path d="M8 12.4l2.6 2.6L16 9.4"/></svg>', cls),
-    Bolt: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="currentColor">' +
-      '<path d="M13 2 4.6 13.1c-.3.4 0 1 .5 1H10l-1 7.9c-.1.6.7.9 1 .4L18.4 11c.3-.4 0-1-.5-1H14l1-7.6c.1-.6-.6-.9-1-.4z"/></svg>', cls),
-    Battery: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">' +
-      '<rect x="2.5" y="8" width="16" height="9" rx="2.6"/>' +
-      '<rect x="4.3" y="9.8" width="8" height="5.4" rx="1.2" fill="currentColor" stroke="none"/>' +
-      '<path d="M21 11v3" stroke-linecap="round"/></svg>', cls),
-    Vol: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M4 9v6h3l5 4V5L7 9H4Z"/>' +
-      '<path d="M16 9.5a3.5 3.5 0 0 1 0 5"/></svg>', cls),
-    Transparency: (cls) => svg(
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">' +
-      '<circle cx="12" cy="12" r="8.5"/>' +
-      '<path d="M12 3.5a8.5 8.5 0 0 0 0 17z" fill="currentColor" stroke="none"/></svg>', cls)
-  };
+  function $(id) { return document.getElementById(id); }
 
-  /* ════════════════════════════════════════════════════════════════════
-     SMALL DOM HELPERS
-     ════════════════════════════════════════════════════════════════════ */
+  /* ── tiny DOM helper ─────────────────────────────────────────────────── */
   function h(tag, attrs, children) {
     const n = document.createElement(tag);
     if (attrs) {
@@ -82,16 +20,11 @@
         else if (k === "html") n.innerHTML = v;
         else if (k.slice(0, 2) === "on" && typeof v === "function") {
           n.addEventListener(k.slice(2).toLowerCase(), v);
-        } else if (k === "style" && typeof v === "object") {
-          Object.assign(n.style, v);
-        } else {
-          n.setAttribute(k, v);
-        }
+        } else n.setAttribute(k, v);
       }
     }
     if (children != null) {
-      const arr = Array.isArray(children) ? children : [children];
-      arr.forEach((c) => {
+      (Array.isArray(children) ? children : [children]).forEach((c) => {
         if (c == null || c === false) return;
         n.appendChild(typeof c === "string" || typeof c === "number"
           ? document.createTextNode(String(c)) : c);
@@ -100,7 +33,12 @@
     return n;
   }
 
-  /* ── shortcut helpers (ported from app.jsx) ──────────────────────────── */
+  /* ── shared svg bits (from the design source) ────────────────────────── */
+  const checkSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+  const xSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+  const arrSvg = '<svg class="arr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+
+  /* ── shortcut helpers (code-based, matches the backend combo shape) ──── */
   function keyLabel(code) {
     if (code.startsWith("Key")) return code.slice(3);
     if (code.startsWith("Digit")) return code.slice(5);
@@ -119,24 +57,55 @@
     return a;
   }
 
+  /* ── transparency: setting t (0 solid … 100 most see-through) <-> the
+     glass alpha the design's slider shows (0.95 … 0.30) ─────────────────── */
+  function tToAlpha(t) { return 0.95 - 0.65 * (Math.max(0, Math.min(100, t)) / 100); }
+  function alphaToT(a) { return Math.round((0.95 - Math.max(0.30, Math.min(0.95, a))) / 0.65 * 100); }
+
   /* ════════════════════════════════════════════════════════════════════
-     API — real pywebview bridge, or a MOCK fallback for standalone preview
+     API — real pywebview bridge, or a MOCK for standalone file:// preview
      ════════════════════════════════════════════════════════════════════ */
   const HAS_BRIDGE = !!(window.pywebview && window.pywebview.api);
+  function bridgeReady() { return !!(window.pywebview && window.pywebview.api); }
+
+  function isoDay(d) {
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+      "-" + String(d.getDate()).padStart(2, "0");
+  }
+  const MOCK_DAYS = (() => {
+    const now = new Date();
+    const day = (offset) => { const d = new Date(now); d.setDate(d.getDate() + offset); return isoDay(d); };
+    const y = now.getFullYear();
+    return {
+      today: day(0), yesterday: day(-1),
+      jul24: y + "-07-24", jun30: y + "-06-30", mar3: y + "-03-03"
+    };
+  })();
+  const MOCK_ENTRIES = [
+    { id: "m1", day: MOCK_DAYS.today, clock: "10:42 PM", dur: "0:11", text: "Remind me to swap the joycon shells on the OLED before I list it, and check whether the back plate screws are stripped." },
+    { id: "m2", day: MOCK_DAYS.today, clock: "10:31 PM", dur: "0:29", text: "Okay so for the vault entry tonight: I spent most of the day on the Tiro redesign, mostly arguing with myself about whether the advanced panel should slide or grow in place. Growing in place feels right because the panel never loses its anchor point, and the whole identity of the app is that it stays where you put it and never surprises you. Also need to remember to file the receipt from Micro Center." },
+    { id: "m3", day: MOCK_DAYS.today, clock: "9:58 PM", dur: "0:05", text: "Add vulkan headers to the build docs." },
+    { id: "m4", day: MOCK_DAYS.today, clock: "9:12 PM", dur: "0:14", text: "Draft reply to the guy asking about the Steam Deck: it's the 512 gig model, screen has zero scratches, comes with the case and the original box." },
+    { id: "m5", day: MOCK_DAYS.yesterday, clock: "4:20 PM", dur: "0:08", text: "Order thermal pads before the weekend, the 1.5 millimeter ones, not the 2s." },
+    { id: "m6", day: MOCK_DAYS.yesterday, clock: "11:05 AM", dur: "0:22", text: "Meeting note: Priya wants the export flow demoed Thursday. Keep it under five minutes, lead with the clipboard story, skip the settings tour unless she asks." },
+    { id: "m7", day: MOCK_DAYS.jul24, clock: "8:47 PM", dur: "0:12", text: "Idea: the pill could dim instead of hide when a video call is fullscreen, so you still know it's armed." },
+    { id: "m8", day: MOCK_DAYS.jun30, clock: "2:33 PM", dur: "0:19", text: "Vault entry: switched the whole build to static linking today. Binary is 40 megs heavier but installs are one file now, which is the point." },
+    { id: "m9", day: MOCK_DAYS.mar3, clock: "9:15 AM", dur: "0:07", text: "Call the dentist back about moving the Tuesday appointment." }
+  ];
 
   const MOCK_STATE = {
-    entries: [],
+    entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })),
     settings: {
       powerMode: "auto", modelBattery: "base.en", modelPlugged: "small.en",
-      soundCues: true, volume: 65, recordingPill: true,
+      soundCues: true, volume: 60, recordingPill: true,
       pillPosition: "bottom", pillPadding: 110,
       clipboardCleanup: "light", smartVocab: true,
-      micName: "", launchAtLogin: true,
-      saveTranscripts: true, savePath: "", transparency: 45,
+      micName: "MacBook Pro Microphone", launchAtLogin: true,
+      saveTranscripts: true, savePath: "~/Documents/Tiro", transparency: 35,
       storageFallback: false, storagePath: ""
     },
     engine: { model: "small.en", device: "GPU", power: "plugged" },
-    mics: [],
+    mics: ["MacBook Pro Microphone", "AirPods Pro", "Shure MV7"],
     shortcuts: {
       dictate: { ctrl: true, alt: true, shift: false, meta: false, code: "Space", keys: ["Ctrl", "Alt", "Space"] },
       paste:   { ctrl: true, alt: true, shift: false, meta: false, code: "KeyV", keys: ["Ctrl", "Alt", "V"] },
@@ -144,7 +113,6 @@
       cancel:  { ctrl: true, alt: true, shift: false, meta: false, code: "KeyX", keys: ["Ctrl", "Alt", "X"] }
     },
     theme: "dark", effectiveTheme: "dark",
-    // list_models() shape (mock preview only; the real list comes from Rust)
     models: [
       { name: "tiny",           hint: "Fastest — very low accuracy, all languages", curated: false, sizeBytes: 43537433,   installed: false, downloading: false },
       { name: "tiny.en",        hint: "Fastest — very low accuracy",                curated: true,  sizeBytes: 43550795,   installed: false, downloading: false },
@@ -158,13 +126,19 @@
       { name: "large-v2",       hint: "Very accurate — all languages",              curated: false, sizeBytes: 1656129691, installed: false, downloading: false },
       { name: "large-v3",       hint: "Very accurate — all languages",              curated: false, sizeBytes: 3095033483, installed: false, downloading: false },
       { name: "large-v3-turbo", hint: "Most accurate — GPU recommended, all languages", curated: true, sizeBytes: 874188075, installed: false, downloading: false }
-    ]
+    ],
+    vocab: {
+      hotwords: ["Beckett", "Tiro", "Tauri", "joycon", "PipeWire", "Fedora", "MedStar", "OLED", "Vulkan", "whisper"],
+      corrections: [["jira", "Jira"], ["tyro", "Tiro"], ["pipe wire", "PipeWire"], ["joy con", "Joy-Con"], ["med star", "MedStar"]]
+    }
   };
 
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
 
   const MockApi = {
     _state: clone(MOCK_STATE),
+    _recording: false,
+    _cancelled: {},
     _deriveEngine() {
       const s = this._state.settings;
       const power = this._state.engine.power;
@@ -175,7 +149,12 @@
       this._state.engine = { model, device, power };
       return this._state.engine;
     },
-    get_state() { this._deriveEngine(); return Promise.resolve(clone(this._state)); },
+    get_state() {
+      this._deriveEngine();
+      const s = clone(this._state);
+      delete s.models; delete s.vocab;
+      return Promise.resolve(s);
+    },
     copy_text() { return Promise.resolve(null); },
     set_setting(key, value) {
       if (key === "theme") {
@@ -192,31 +171,66 @@
       });
     },
     list_mics() { return Promise.resolve(clone(this._state.mics)); },
-    toggle_record() { return Promise.resolve(null); },
-    cancel_record() { return Promise.resolve(null); },
-    set_pin() { return Promise.resolve(null); },
-    close_panel() { return Promise.resolve(null); },
-    begin_drag() { return Promise.resolve(null); },
-    pick_folder() {
-      // Standalone preview has no real folder picker — resolve null so the
-      // panel keeps whatever (empty) savePath it already has.
+    toggle_record() {
+      // preview: mirror the backend's pushes so the whole flow is visible
+      this._recording = !this._recording;
+      if (window.tiroSetRecording) window.tiroSetRecording(this._recording);
+      if (!this._recording && window.tiroAddEntry) {
+        const now = new Date();
+        let hh = now.getHours();
+        const ap = hh >= 12 ? "PM" : "AM"; hh = hh % 12 || 12;
+        window.tiroAddEntry({
+          id: "m" + Date.now(),
+          clock: hh + ":" + String(now.getMinutes()).padStart(2, "0") + " " + ap,
+          dur: "0:07",
+          text: "Note to self: the pill should fade out half a second after the copy lands, not instantly — it reads as more deliberate."
+        });
+      }
       return Promise.resolve(null);
     },
+    cancel_record() { return Promise.resolve(null); },
+    set_pin() { return Promise.resolve(null); },
+    set_expanded() { return Promise.resolve(null); },
+    close_panel() { return Promise.resolve(null); },
+    begin_drag() { return Promise.resolve(null); },
+    pick_folder() { return Promise.resolve(null); },
     rebind_shortcut(which, combo) {
+      // reject a chord already claimed by another shortcut, like the backend
+      const clash = Object.keys(this._state.shortcuts).some((k) =>
+        k !== which &&
+        (this._state.shortcuts[k].keys || []).join("+") === (combo.keys || []).join("+"));
+      if (clash) return Promise.resolve({ ok: false, keys: combo.keys });
       this._state.shortcuts[which] = combo;
       return Promise.resolve({ ok: true, keys: combo.keys });
     },
+    history_days() {
+      const days = MOCK_ENTRIES.map((e) => e.day).filter((d, i, a) => a.indexOf(d) === i);
+      return Promise.resolve(days);
+    },
+    history_entries(day) {
+      return Promise.resolve(MOCK_ENTRIES.filter((e) => e.day === day)
+        .map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })));
+    },
+    list_vocab() { return Promise.resolve(clone(this._state.vocab)); },
+    set_vocab(hotwords, corrections) {
+      this._state.vocab = { hotwords: clone(hotwords), corrections: clone(corrections) };
+      return Promise.resolve({ ok: true });
+    },
     list_models() { return Promise.resolve(clone(this._state.models)); },
     download_model(name) {
-      // Simulate a download: ~1.6 s of 10% progress pushes, then done.
       const m = this._state.models.find((x) => x.name === name);
       if (!m || m.installed) return Promise.resolve({ ok: true, installed: true });
+      delete this._cancelled[name];
       let pct = 0;
       const tick = () => {
-        pct += 10;
+        if (this._cancelled[name]) {
+          delete this._cancelled[name];
+          if (window.tiroModelProgress) window.tiroModelProgress({ model: name, pct: 0, done: false, error: null, cancelled: true });
+          return;
+        }
+        pct += 4;
         if (pct >= 100) {
           m.installed = true;
-          m.installedBytes = m.sizeBytes;
           if (window.tiroModelProgress) window.tiroModelProgress({ model: name, pct: 100, done: true, error: null });
         } else {
           if (window.tiroModelProgress) window.tiroModelProgress({ model: name, pct: pct, done: false, error: null });
@@ -225,10 +239,10 @@
       };
       setTimeout(tick, 160);
       return Promise.resolve({ ok: true, started: true });
-    }
+    },
+    cancel_download(name) { this._cancelled[name] = true; return Promise.resolve({ ok: true }); }
   };
 
-  // `api` is mutable so a late-arriving pywebview bridge can replace the mock.
   let api = HAS_BRIDGE ? window.pywebview.api : MockApi;
 
   /* ════════════════════════════════════════════════════════════════════
@@ -243,315 +257,487 @@
     theme: "dark",
     recording: false,
     pinned: false,
-    view: "panel",        // panel | settings
-    models: [],           // list_models() snapshot (model manager)
-    modelsExpanded: false, // "Show all models" fold state
-    modelProgress: {},    // model name -> latest tiroModelProgress payload
-    copiedId: null,
-    expandedIds: new Set(),  // entry ids whose transcript fold is expanded
-    editing: null,        // shortcut key being captured: dictate | paste | panel | cancel
-    shortcutHint: null,   // transient "couldn't change shortcut" hint, or null
-    _copyTimer: null,
-    _captureHandler: null
+    adv: false,
+    view: "settings",
+    models: [],
+    modelProgress: {},           // model name -> latest progress payload
+    vocab: { hotwords: [], corrections: [] },
+    days: [],                    // iso days, newest first
+    dayIdx: 0,
+    dayCache: {},                // iso day -> entries (today reads App.entries live)
+    allDaysLoaded: false
   };
 
-  const els = {
-    panelPage: document.getElementById("panelPage"),
-    settingsPage: document.getElementById("settingsPage")
-  };
+  const panel = $("panel");
+  const listEl = $("list");
+  const advList = $("advList");
+  const searchInput = $("searchInput");
+  const searchBox = document.querySelector(".search");
 
   /* ════════════════════════════════════════════════════════════════════
-     ENGINE CHIP + small reusable pieces
+     ENTRIES (compact list + advanced Transcribe view)
      ════════════════════════════════════════════════════════════════════ */
+  function todayIso() { return isoDay(new Date()); }
+
+  function dayLabel(iso) {
+    if (!iso) return "";
+    if (iso === todayIso()) return "Today";
+    const now = new Date();
+    const yest = new Date(now); yest.setDate(yest.getDate() - 1);
+    if (iso === isoDay(yest)) return "Yesterday";
+    const parts = iso.split("-").map(Number);
+    const months = ["January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"];
+    const label = months[(parts[1] || 1) - 1] + " " + parts[2];
+    return parts[0] === now.getFullYear() ? label : label + ", " + parts[0];
+  }
+
+  function makeEntry(e, landing, showDay) {
+    const el = document.createElement("div");
+    el.className = "entry" + (landing ? " landing" : "");
+    el.dataset.id = e.id;
+    el.innerHTML =
+      '<div class="meta">' + (showDay && e.dayIso ? '<span class="day"></span><span class="dot">·</span>' : "") +
+      '<span class="time"></span><span class="dot">·</span><span class="dur"></span>' +
+      '<span class="copied-chip">' + checkSvg + "Copied</span></div>" +
+      '<div class="txt clamped"></div>' +
+      '<button class="showmore">Show more</button>';
+    if (showDay && e.dayIso) el.querySelector(".day").textContent = dayLabel(e.dayIso);
+    el.querySelector(".time").textContent = e.clock;
+    el.querySelector(".dur").textContent = e.dur;
+    el.querySelector(".txt").textContent = e.text;
+    const txt = el.querySelector(".txt");
+    const more = el.querySelector(".showmore");
+    more.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const open = el.classList.toggle("expanded");
+      more.textContent = open ? "Show less" : "Show more";
+    });
+    el.addEventListener("click", () => {
+      Promise.resolve(api.copy_text(e.text)).catch(() => {});
+      flashCopied(el);
+    });
+    requestAnimationFrame(() => {
+      if (txt.scrollHeight - txt.clientHeight > 4) el.classList.add("clampable");
+    });
+    return el;
+  }
+
+  let copyTimer;
+  function flashCopied(el) {
+    document.querySelectorAll(".entry.copied").forEach((x) => x.classList.remove("copied"));
+    el.classList.add("copied");
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => el.classList.remove("copied"), 1600);
+  }
+
+  function renderEntries() {
+    listEl.innerHTML = "";
+    App.entries.forEach((e) => listEl.appendChild(makeEntry(e)));
+    panel.classList.toggle("is-empty", !App.entries.length);
+  }
+
+  function entriesForDay(iso) {
+    if (iso === todayIso()) return Promise.resolve(App.entries);
+    if (App.dayCache[iso]) return Promise.resolve(App.dayCache[iso]);
+    return Promise.resolve(api.history_entries(iso)).then((list) => {
+      const arr = Array.isArray(list) ? list : [];
+      App.dayCache[iso] = arr;
+      return arr;
+    }).catch(() => []);
+  }
+
+  function loadDays() {
+    return Promise.resolve(api.history_days()).then((days) => {
+      App.days = Array.isArray(days) && days.length ? days : [todayIso()];
+      if (App.dayIdx >= App.days.length) App.dayIdx = 0;
+    }).catch(() => { App.days = [todayIso()]; });
+  }
+
+  function ensureAllDays() {
+    if (App.allDaysLoaded) return Promise.resolve();
+    return Promise.all(App.days.map((d) => entriesForDay(d)))
+      .then(() => { App.allDaysLoaded = true; });
+  }
+
+  let advToken = 0;
+  function renderAdv() {
+    const token = ++advToken;
+    const q = (searchInput.value || "").trim().toLowerCase();
+    const pager = $("pager");
+    if (q) {
+      ensureAllDays().then(() => {
+        if (token !== advToken) return;
+        advList.innerHTML = "";
+        const hits = [];
+        App.days.forEach((d) => {
+          const src = d === todayIso() ? App.entries : (App.dayCache[d] || []);
+          src.forEach((e) => {
+            const label = dayLabel(d).toLowerCase();
+            if (e.text.toLowerCase().includes(q) || e.clock.toLowerCase().includes(q) || label.includes(q)) {
+              hits.push(Object.assign({}, e, { dayIso: d }));
+            }
+          });
+        });
+        hits.forEach((e) => advList.appendChild(makeEntry(e, false, true)));
+        $("noRes").style.display = hits.length ? "none" : "block";
+        $("noResQ").textContent = searchInput.value.trim();
+        pager.style.display = "none";
+      });
+      return;
+    }
+    $("noRes").style.display = "none";
+    const day = App.days[App.dayIdx] || todayIso();
+    entriesForDay(day).then((list) => {
+      if (token !== advToken) return;
+      advList.innerHTML = "";
+      list.forEach((e) => advList.appendChild(makeEntry(e)));
+      pager.style.display = "flex";
+      $("pagerDay").textContent = dayLabel(day);
+      $("pagerNewer").disabled = App.dayIdx === 0;
+      $("pagerOlder").disabled = App.dayIdx >= App.days.length - 1;
+    });
+  }
+
+  searchInput.addEventListener("input", () => {
+    searchBox.classList.toggle("hasq", !!searchInput.value.trim());
+    renderAdv();
+  });
+  $("searchClr").addEventListener("click", () => {
+    searchInput.value = "";
+    searchBox.classList.remove("hasq");
+    renderAdv();
+    searchInput.focus();
+  });
+  $("pagerOlder").addEventListener("click", () => {
+    if (App.dayIdx < App.days.length - 1) { App.dayIdx++; renderAdv(); }
+  });
+  $("pagerNewer").addEventListener("click", () => {
+    if (App.dayIdx > 0) { App.dayIdx--; renderAdv(); }
+  });
+
+  /* ════════════════════════════════════════════════════════════════════
+     MICS — compact dropdown + the two settings selects, one source
+     ════════════════════════════════════════════════════════════════════ */
+  const micCap = $("micCap"), micMenu = $("micMenu"), micName = $("micName");
+  const selMic = $("selMic"), selMicT = $("selMicT");
+
+  function micList() {
+    const names = App.mics.length ? App.mics.slice() : [];
+    const cur = App.settings.micName;
+    if (cur && names.indexOf(cur) < 0) names.unshift(cur);
+    return names;
+  }
+
+  function renderMics() {
+    const names = micList();
+    const cur = App.settings.micName || names[0] || "";
+    micName.textContent = cur || "Default microphone";
+    micMenu.innerHTML = "";
+    names.forEach((m) => {
+      const b = document.createElement("button");
+      b.className = "mic-item"; b.setAttribute("role", "option");
+      b.setAttribute("aria-selected", m === cur);
+      b.innerHTML = "<span></span>" + checkSvg;
+      b.querySelector("span").textContent = m;
+      b.addEventListener("click", () => setMic(m, true));
+      micMenu.appendChild(b);
+    });
+    fillSelect(selMic, names, cur);
+    fillSelect(selMicT, names, cur);
+    const sub = $("levelSub");
+    if (sub) sub.textContent = cur ? "Live from " + cur + "." : "Live from the selected microphone.";
+  }
+
+  function setMic(name, closeMenu) {
+    if (closeMenu) setMicOpen(false);
+    setSetting("micName", name);
+    renderMics();
+    restartMic();
+  }
+  function setMicOpen(open) {
+    panel.classList.toggle("mic-open", open);
+    micCap.setAttribute("aria-expanded", open);
+  }
+  micCap.addEventListener("click", (e) => { e.stopPropagation(); setMicOpen(!panel.classList.contains("mic-open")); });
+  document.addEventListener("click", (e) => { if (!micMenu.contains(e.target)) setMicOpen(false); });
+
+  /* ════════════════════════════════════════════════════════════════════
+     HEADER — pin / expand / close / drag
+     ════════════════════════════════════════════════════════════════════ */
+  const pinBtn = $("pinBtn");
+  pinBtn.addEventListener("click", () => {
+    App.pinned = !App.pinned;
+    pinBtn.setAttribute("aria-pressed", String(App.pinned));
+    Promise.resolve(api.set_pin(App.pinned)).catch(() => {});
+  });
+  $("closeBtn").addEventListener("click", () => { Promise.resolve(api.close_panel()).catch(() => {}); });
+  $("hdr").addEventListener("mousedown", (ev) => {
+    if (ev.button !== 0) return;
+    if (ev.target && ev.target.closest("button")) return;
+    ev.preventDefault();
+    Promise.resolve(api.begin_drag && api.begin_drag()).catch(() => {});
+  });
+
+  /* ── expand / collapse: the OS window resizes 400<->800 around the
+     panel's own width transition (grow: window first so nothing clips;
+     shrink: window after the 520 ms settle) ─────────────────────────────── */
+  const expandBtn = $("expandBtn");
+  let advTimer = null;
+  function setAdv(on) {
+    if (App.adv === on) return;
+    App.adv = on;
+    clearTimeout(advTimer);
+    if (on) {
+      Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {}).then(() => {
+        panel.classList.add("adv");
+      });
+      expandBtn.title = "Collapse";
+      renderAdv();
+      ensureMic();
+    } else {
+      panel.classList.remove("adv");
+      expandBtn.title = "Expand";
+      advTimer = setTimeout(() => {
+        Promise.resolve(api.set_expanded && api.set_expanded(false)).catch(() => {});
+      }, 560);
+    }
+  }
+  expandBtn.addEventListener("click", () => {
+    const opening = !panel.classList.contains("adv");
+    if (opening) setView("history");
+    setAdv(opening);
+  });
+  $("gearBtn").addEventListener("click", () => { setView("settings"); setAdv(true); });
+
+  /* sidebar nav */
+  function setView(v) {
+    App.view = v;
+    document.querySelectorAll(".navitem").forEach((n) => n.classList.toggle("on", n.dataset.view === v));
+    document.querySelectorAll(".view").forEach((x) => x.classList.remove("on"));
+    const view = $("view-" + v);
+    void view.offsetWidth; /* restart entrance stagger */
+    view.classList.add("on");
+    $("main").scrollTop = 0;
+    if (v === "history") { loadDays().then(renderAdv); }
+    if (v === "vocab") loadVocab();
+    if (v === "models") refreshModels();
+  }
+  document.querySelectorAll(".navitem").forEach((n) => n.addEventListener("click", () => setView(n.dataset.view)));
+
+  /* ════════════════════════════════════════════════════════════════════
+     SETTINGS PLUMBING
+     ════════════════════════════════════════════════════════════════════ */
+  function setSetting(key, value) {
+    if (key === "theme") App.theme = value;
+    else App.settings[key] = value;
+    Promise.resolve(api.set_setting(key, value)).then((res) => {
+      if (!res) return;
+      if (res.engine && (res.engine.model !== App.engine.model ||
+          res.engine.device !== App.engine.device ||
+          res.engine.power !== App.engine.power)) {
+        App.engine = res.engine;
+        updateEngine();
+      }
+      if (res.theme != null && res.theme !== App.theme) { App.theme = res.theme; syncThemeSeg(); }
+      if (res.effectiveTheme) applyTheme(res.effectiveTheme);
+      if (res.launchAtLogin != null && res.launchAtLogin !== App.settings.launchAtLogin) {
+        App.settings.launchAtLogin = res.launchAtLogin;
+        setSw($("swLogin"), res.launchAtLogin);
+      }
+    }).catch(() => {});
+  }
+
+  function applyTheme(effective) {
+    document.documentElement.setAttribute("data-theme", effective === "light" ? "light" : "dark");
+  }
+  function applyTransparency(t) {
+    document.documentElement.style.setProperty("--glass-a", tToAlpha(t).toFixed(2));
+  }
+
   function powerWord(power) { return power === "plugged" ? "plugged in" : "battery"; }
 
-  function engineChip(engine) {
-    return h("span", { class: "chip", title: "Transcription engine — switches with power source" }, [
-      engine.power === "plugged" ? Icon.Bolt() : Icon.Battery(),
-      h("span", { text: engine.model }),
-      h("span", { text: "·" }),
-      h("span", { class: "dev", text: engine.device }),
-      h("span", { class: "pwr", text: "(" + powerWord(engine.power) + ")" })
-    ]);
+  /* engine chips (compact footer + sidebar) and the Now-running row */
+  function updateEngine() {
+    document.querySelectorAll(".engine").forEach((ch) => {
+      ch.textContent = App.engine.model + " · ";
+      ch.appendChild(h("b", { text: App.engine.device }));
+    });
+    const nr = $("nowRun");
+    nr.textContent = App.engine.model + " · ";
+    nr.appendChild(h("b", { text: App.engine.device }));
+    if (App.settings.powerMode === "auto") {
+      nr.appendChild(document.createTextNode(" · " + powerWord(App.engine.power)));
+    }
   }
 
-  /* ════════════════════════════════════════════════════════════════════
-     PANEL PAGE
-     ════════════════════════════════════════════════════════════════════ */
-  function entryNode(e) {
-    const time = h("div", { class: "entry-time" }, [
-      h("span", { text: e.clock }),
-      h("span", { class: "entry-dur", text: "· " + e.dur })
-    ]);
-    if (App.copiedId === e.id) {
-      time.appendChild(h("span", { class: "copied-chip" }, [Icon.Check(), "Copied"]));
-    }
-    // Long transcripts clamp to a few lines by default; a distinct "Show more"
-    // control toggles the fold. Track expanded-ids in App so it survives re-render.
-    const expanded = App.expandedIds.has(e.id);
-    const textEl = h("div", {
-      class: "entry-text clamped" + (expanded ? " expanded" : ""),
-      text: e.text
+  /* switches */
+  function setSw(sw, on) { sw.setAttribute("aria-checked", String(!!on)); }
+  function swOn(sw) { return sw.getAttribute("aria-checked") === "true"; }
+  const swWiring = {
+    swCues: (on) => { setSetting("soundCues", on); $("rowVolume").classList.toggle("disabled", !on); },
+    swPill: (on) => { setSetting("recordingPill", on); syncPillRows(); },
+    swVocab: (on) => setSetting("smartVocab", on),
+    swSave: (on) => setSetting("saveTranscripts", on),
+    swLogin: (on) => setSetting("launchAtLogin", on)
+  };
+  Object.keys(swWiring).forEach((id) => {
+    const sw = $(id);
+    sw.addEventListener("click", () => {
+      const on = !swOn(sw);
+      setSw(sw, on);
+      swWiring[id](on);
     });
-    const expandBtn = h("button", {
-      type: "button", class: "entry-expand",
-      "aria-expanded": String(expanded),
-      text: expanded ? "Show less" : "Show more",
-      // Distinct control — stop propagation so it doesn't also copy the entry.
-      onmousedown: (ev) => ev.stopPropagation(),
-      onclick: (ev) => { ev.stopPropagation(); toggleExpand(e.id); },
-      onkeydown: (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") { ev.stopPropagation(); }
+  });
+  function syncPillRows() {
+    const off = !swOn($("swPill"));
+    $("rowPillPos").classList.toggle("disabled", off);
+    $("rowPillDist").classList.toggle("disabled", off);
+  }
+
+  /* segmented controls */
+  function segSet(seg, value) {
+    seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.value === value));
+  }
+  document.querySelectorAll(".seg").forEach((seg) => {
+    seg.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+      seg.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
+      b.classList.add("on");
+      const v = b.dataset.value;
+      if (seg.dataset.seg === "power") { setSetting("powerMode", v); updateEngine(); }
+      if (seg.dataset.seg === "pillpos") setSetting("pillPosition", v);
+      if (seg.dataset.seg === "cleanup") { setSetting("clipboardCleanup", v); setCleanupCopy(v); }
+      if (seg.dataset.seg === "theme") {
+        setSetting("theme", v);
+        if (v === "light" || v === "dark") applyTheme(v);
       }
-    });
-    const node = h("div", {
-      class: "entry" + (App.copiedId === e.id ? " copied" : "") + (e.fresh ? " fresh" : ""),
-      "data-id": e.id,
-      role: "button", tabindex: "0",
-      // Prevent focus-on-mousedown: focusing a partially-visible entry makes the
-      // browser scroll it into view, which is the "it scrolled me around" jitter.
-      // The click (copy) still fires; keyboard users still Tab + Enter/Space.
-      onmousedown: (ev) => ev.preventDefault(),
-      onclick: () => copyEntry(e.id, e.text),
-      onkeydown: (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); copyEntry(e.id, e.text); }
-      }
-    }, [
-      time,
-      textEl,
-      expandBtn
-    ]);
-    return node;
-  }
-
-  // The "Show more" control is only useful when the text actually overflows its
-  // clamp. CSS can't measure overflow, so flag overflowing entries with a class
-  // (CSS hides .entry-expand unless .has-overflow is present). Run after layout.
-  function markOverflow(scope) {
-    const root = scope || els.panelPage;
-    const texts = root.querySelectorAll(".entry-text.clamped:not(.expanded)");
-    texts.forEach((t) => {
-      const entry = t.closest(".entry");
-      if (!entry) return;
-      // scrollHeight exceeds clientHeight by ~>1px when content is clipped.
-      const overflow = t.scrollHeight - t.clientHeight > 1;
-      entry.classList.toggle("has-overflow", overflow);
-    });
-  }
-  function scheduleOverflowCheck(scope) {
-    // Defer to after the browser has laid the (just-inserted) nodes out.
-    requestAnimationFrame(() => markOverflow(scope));
-  }
-
-  function toggleExpand(id) {
-    if (App.expandedIds.has(id)) App.expandedIds.delete(id);
-    else App.expandedIds.add(id);
-    // Update IN PLACE — a full renderPanel() would reset the list scroll position.
-    const node = els.panelPage.querySelector('.entry[data-id="' + id + '"]');
-    if (!node) return;
-    const expanded = App.expandedIds.has(id);
-    const textEl = node.querySelector(".entry-text");
-    const btn = node.querySelector(".entry-expand");
-    if (textEl) textEl.classList.toggle("expanded", expanded);
-    if (btn) {
-      btn.setAttribute("aria-expanded", String(expanded));
-      btn.textContent = expanded ? "Show less" : "Show more";
-    }
-    // Re-check overflow when collapsing (re-clamped text may overflow again).
-    if (!expanded) scheduleOverflowCheck(node);
-  }
-
-  function micControl() {
-    // A native <select> overlaid invisibly on the styled mic pill so the
-    // choice actually works inside pywebview (no React state needed).
-    const sel = h("select", {
-      class: "mic-native", title: "Choose input device",
-      onchange: (ev) => onMicChange(ev.target.value)
-    }, App.mics.map((m) =>
-      h("option", { value: m, selected: m === App.settings.micName ? "selected" : null, text: m })
-    ));
-    const pill = h("span", { class: "mic" }, [
-      h("span", { class: "mic-led" }),
-      h("span", { class: "mic-name", text: App.settings.micName || "Default microphone" }),
-      Icon.ChevronD()
-    ]);
-    return h("span", { class: "mic-shell" }, [pill, sel]);
-  }
-
-  function renderPanel() {
-    const page = els.panelPage;
-    page.innerHTML = "";
-    page.setAttribute("aria-hidden", App.view === "settings" ? "true" : "false");
-    page.style.left = App.view === "settings" ? "-100%" : "0";
-
-    /* header — drag handle (mousedown anywhere but a button starts a window drag) */
-    const header = h("div", { class: "hd", onmousedown: beginDrag }, [
-      h("div", { class: "hd-title", text: "Recent transcriptions:" }),
-      h("div", { class: "hd-actions" }, [
-        h("button", {
-          class: "ico pin", "data-on": App.pinned ? "1" : "0", "aria-pressed": String(App.pinned),
-          title: App.pinned ? "Pinned on top — click to unpin" : "Keep on top", onclick: onPin
-        }, [Icon.Pin()]),
-        h("button", { class: "ico", title: "Close", onclick: onClose }, [Icon.Close()])
-      ])
-    ]);
-    page.appendChild(header);
-
-    /* mic selector + record */
-    page.appendChild(h("div", { class: "mic-wrap" }, [
-      micControl(),
-      h("button", {
-        class: "ico rec", "data-on": App.recording ? "1" : "0",
-        "aria-pressed": String(App.recording),
-        title: App.recording ? "Stop recording" : "Start recording",
-        onclick: onRecord
-      }, [App.recording ? Icon.Stop() : Icon.Mic()])
-    ]));
-
-    /* transcript list or empty state */
-    if (!App.entries.length) {
-      page.appendChild(h("div", { class: "empty" }, [
-        h("div", { class: "empty-kbd" },
-          (App.shortcuts.dictate ? App.shortcuts.dictate.keys : ["Ctrl", "Alt", "Space"])
-            .map((k) => h("span", { class: "kbd", text: k }))),
-        h("div", { class: "empty-msg",
-          html: "Press the hotkey anywhere to start dictating.<br>Your words land here, ready to copy." })
-      ]));
-    } else {
-      const inner = h("div", { class: "list-inner" }, App.entries.map(entryNode));
-      page.appendChild(h("div", { class: "list" }, [inner]));
-    }
-
-    /* footer — live engine chip + settings gear */
-    page.appendChild(h("div", { class: "ft" }, [
-      engineChip(App.engine),
-      h("button", { class: "ico sm", title: "Settings", onclick: onGear }, [Icon.Gear()])
-    ]));
-
-    /* Flag which (re-rendered) entries actually overflow their clamp so the
-       "Show more" control only appears where it's needed (tiroApplyState +
-       tiroAddEntry both flow through here). */
-    if (App.entries.length) scheduleOverflowCheck();
-  }
-
-  /* ════════════════════════════════════════════════════════════════════
-     SETTINGS CONTROLS
-     ════════════════════════════════════════════════════════════════════ */
-  function switchControl(on, onChange) {
-    return h("button", {
-      type: "button", class: "sw", "data-on": on ? "1" : "0",
-      role: "switch", "aria-checked": String(!!on),
-      onclick: () => onChange(!on)
-    }, [h("i")]);
-  }
-
-  function segmented(value, options, onChange) {
-    const opts = options.map((o) => (typeof o === "object" ? o : { value: o, label: o }));
-    const idx = Math.max(0, opts.findIndex((o) => o.value === value));
-    const n = opts.length;
-    const thumb = h("div", { class: "segm-thumb", style: {
-      left: "calc(2px + " + idx + " * (100% - 4px) / " + n + ")",
-      width: "calc((100% - 4px) / " + n + ")"
-    }});
-    const buttons = opts.map((o) => h("button", {
-      type: "button", role: "radio", "aria-checked": String(o.value === value),
-      "data-on": o.value === value ? "1" : "0",
-      onclick: () => onChange(o.value), text: o.label
     }));
-    return h("div", { class: "segm", role: "radiogroup" }, [thumb].concat(buttons));
+  });
+  function syncThemeSeg() { segSet($("themeSeg"), App.theme); }
+
+  /* clipboard cleanup — dynamic helper copy */
+  const cleanupCopy = {
+    off: "Text lands on the clipboard exactly as transcribed.",
+    light: "Light cleanup fixes spacing and capitalization on copy.",
+    fillers: "Also strips filler words — um, uh, you know — on copy."
+  };
+  const cleanupSub = $("cleanupSub");
+  function setCleanupCopy(mode) {
+    cleanupSub.classList.add("swapping");
+    setTimeout(() => {
+      cleanupSub.textContent = cleanupCopy[mode] || cleanupCopy.light;
+      cleanupSub.classList.remove("swapping");
+    }, 170);
   }
 
-  function slider(value, min, max, onChange, icon, onInput) {
-    const pct = ((value - min) / (max - min)) * 100;
-    const fill = "linear-gradient(to right, var(--accent) 0 " + pct + "%, var(--fill-2) " + pct + "% 100%)";
-    const input = h("input", {
-      type: "range", class: "sldr", min: String(min), max: String(max), value: String(value),
-      style: { background: fill },
-      oninput: (ev) => {
-        const v = Number(ev.target.value);
-        const p = ((v - min) / (max - min)) * 100;
-        ev.target.style.background =
-          "linear-gradient(to right, var(--accent) 0 " + p + "%, var(--fill-2) " + p + "% 100%)";
-        if (onInput) onInput(v);            // live preview while dragging
-      },
-      onchange: (ev) => onChange(Number(ev.target.value))
+  /* sliders: track fill + readouts */
+  function syncFill(r) {
+    const min = parseFloat(r.min), max = parseFloat(r.max);
+    const pct = (parseFloat(r.value) - min) / (max - min) * 100;
+    r.style.setProperty("--fill", pct + "%");
+  }
+  document.querySelectorAll(".rng").forEach((r) => { syncFill(r); r.addEventListener("input", () => syncFill(r)); });
+
+  const rngVol = $("rngVol");
+  rngVol.addEventListener("input", () => { $("volVal").textContent = rngVol.value + "%"; });
+  rngVol.addEventListener("change", () => setSetting("volume", Number(rngVol.value)));
+
+  const rngDist = $("rngDist");
+  let distTimer = null;
+  rngDist.addEventListener("input", () => {
+    $("distVal").textContent = rngDist.value + " px";
+    App.settings.pillPadding = Number(rngDist.value);
+    if (distTimer !== null) clearTimeout(distTimer);
+    distTimer = setTimeout(() => {
+      distTimer = null;
+      Promise.resolve(api.set_setting("pillPadding", App.settings.pillPadding)).catch(() => {});
+    }, 200);
+  });
+
+  const rngGlass = $("rngGlass");
+  let glassTimer = null;
+  rngGlass.addEventListener("input", () => {
+    const a = parseFloat(rngGlass.value);
+    $("glassVal").textContent = a.toFixed(2);
+    document.documentElement.style.setProperty("--glass-a", a.toFixed(2));
+    App.settings.transparency = alphaToT(a);
+    if (glassTimer !== null) clearTimeout(glassTimer);
+    glassTimer = setTimeout(() => {
+      glassTimer = null;
+      Promise.resolve(api.set_setting("transparency", App.settings.transparency)).catch(() => {});
+    }, 200);
+  });
+
+  /* ════════════════════════════════════════════════════════════════════
+     CUSTOM DROPDOWNS (shared menu material, from the design source)
+     ════════════════════════════════════════════════════════════════════ */
+  function enhanceSelect(sel) {
+    const wrap = sel.parentElement;
+    if (wrap.closest(".toolbar")) wrap.classList.add("pill");
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = sel.className;
+    btn.innerHTML = '<span class="sellabel"></span>';
+    const menu = document.createElement("div");
+    menu.className = "ddmenu"; menu.setAttribute("role", "listbox");
+    wrap.appendChild(btn); wrap.appendChild(menu);
+    function refresh() {
+      btn.querySelector(".sellabel").textContent = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : "";
+      menu.innerHTML = "";
+      Array.from(sel.options).forEach((o, i) => {
+        const it = document.createElement("button");
+        it.type = "button"; it.className = "dditem"; it.setAttribute("role", "option");
+        it.setAttribute("aria-selected", i === sel.selectedIndex);
+        it.innerHTML = "<span></span>" + checkSvg;
+        it.querySelector("span").textContent = o.text;
+        it.addEventListener("click", () => {
+          sel.selectedIndex = i;
+          wrap.classList.remove("open");
+          refresh();
+          sel.dispatchEvent(new Event("change"));
+        });
+        menu.appendChild(it);
+      });
+    }
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = !wrap.classList.contains("open");
+      document.querySelectorAll(".selwrap.open").forEach((w) => w.classList.remove("open"));
+      wrap.classList.toggle("open", open);
     });
-    return h("div", { class: "sldr-wrap" }, [icon, input]);
+    sel.__ddRefresh = refresh;
+    refresh();
+  }
+  document.querySelectorAll(".selwrap select").forEach(enhanceSelect);
+  document.addEventListener("click", (e) => {
+    document.querySelectorAll(".selwrap.open").forEach((w) => { if (!w.contains(e.target)) w.classList.remove("open"); });
+  });
+
+  function fillSelect(sel, options, value) {
+    const want = options.join(" ") + "" + value;
+    if (sel.__filled === want) return;
+    sel.__filled = want;
+    sel.innerHTML = "";
+    options.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.textContent = o;
+      opt.selected = o === value;
+      sel.appendChild(opt);
+    });
+    if (sel.__ddRefresh) sel.__ddRefresh();
   }
 
-  function selectControl(value, options, onChange) {
-    // title = current value so a name truncated by the ellipsis is still
-    // readable on hover (the native dropdown always shows full names).
-    const sel = h("select", {
-      class: "sel", title: value || null,
-      onchange: (ev) => { ev.target.title = ev.target.value; onChange(ev.target.value); }
-    }, options.map((o) => h("option", { value: o, selected: o === value ? "selected" : null, text: o })));
-    return h("span", { class: "sel-wrap" }, [sel, Icon.UpDown("sel-chev")]);
-  }
+  selMic.addEventListener("change", () => setMic(selMic.options[selMic.selectedIndex].text, false));
+  selMicT.addEventListener("change", () => setMic(selMicT.options[selMicT.selectedIndex].text, false));
+  $("selBattery").addEventListener("change", function () {
+    setSetting("modelBattery", this.options[this.selectedIndex].text);
+    updateEngine();
+  });
+  $("selPlugged").addEventListener("change", function () {
+    setSetting("modelPlugged", this.options[this.selectedIndex].text);
+    updateEngine();
+  });
 
-  function shortcutRow(label, which) {
-    const combo = App.shortcuts[which] || { keys: [] };
-    let keysEl;
-    if (App.editing === which) {
-      keysEl = h("span", { class: "keys listening" }, [
-        h("span", { class: "keys-listen-lbl", text: "Press keys…" }),
-        h("button", { class: "keys-edit", text: "Cancel", onclick: cancelEdit })
-      ]);
-    } else {
-      keysEl = h("span", { class: "keys" },
-        combo.keys.map((k) => h("span", { class: "kbd2", text: k }))
-          .concat([h("button", { class: "keys-edit", text: "Edit", onclick: () => startEdit(which) })]));
-    }
-    return h("div", { class: "row" }, [
-      h("div", { class: "row-l" }, [h("span", { class: "row-label", text: label })]),
-      keysEl
-    ]);
-  }
-
-  function row(label, sub, control) {
-    const left = h("div", { class: "row-l" }, [h("span", { class: "row-label", text: label })]);
-    if (sub != null) {
-      if (typeof sub === "string") left.appendChild(h("span", { class: "row-sub", text: sub }));
-      else left.appendChild(sub);
-    }
-    return h("div", { class: "row" }, [left, control]);
-  }
-
-  function rowCol(label, control) {
-    return h("div", { class: "row col" }, [
-      h("span", { class: "row-label", text: label }),
-      control
-    ]);
-  }
-
-  function group(title, rows, helper) {
-    const node = h("div", { class: "grp" }, [
-      h("div", { class: "grp-h", text: title }),
-      h("div", { class: "card" }, rows)
-    ]);
-    if (helper) node.appendChild(h("div", { class: "grp-helper", text: helper }));
-    return node;
-  }
-
-  // Calm inline banner shown inside the Storage card when writes fell back to a
-  // safe folder because the chosen vault dir was unwritable. Plain text only
-  // (never innerHTML), existing row/separator tokens, no shadow.
-  function storageBanner(path) {
-    return h("div", { class: "row storage-fallback" }, [
-      h("span", { class: "row-sub",
-        text: "Saving to fallback folder — " + (path || "chosen folder") + " unavailable" })
-    ]);
-  }
-
-  /* ── model manager (Models group + selector options) ─────────────────── */
-  function fmtSize(bytes) {
-    if (!bytes) return "";
-    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
-    return Math.round(bytes / 1e6) + " MB";
-  }
-
-  // Battery/plugged selector options: installed models (catalog order) plus
-  // the currently-configured values even when not installed.
+  /* battery/plugged options: installed models plus the configured values */
   function modelOptions() {
     const opts = App.models.filter((m) => m.installed).map((m) => m.name);
     [App.settings.modelBattery, App.settings.modelPlugged].forEach((v) => {
@@ -560,13 +746,107 @@
     if (!opts.length) opts.push("base.en");
     return opts;
   }
+  function syncModelSelects() {
+    const opts = modelOptions();
+    fillSelect($("selBattery"), opts, App.settings.modelBattery);
+    fillSelect($("selPlugged"), opts, App.settings.modelPlugged);
+  }
+
+  /* ════════════════════════════════════════════════════════════════════
+     MODELS VIEW
+     ════════════════════════════════════════════════════════════════════ */
+  function fmtSize(bytes) {
+    if (!bytes) return "";
+    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
+    return Math.round(bytes / 1e6) + " MB";
+  }
 
   function refreshModels() {
     Promise.resolve(api.list_models && api.list_models()).then((list) => {
       if (!Array.isArray(list)) return;
       App.models = list;
-      renderSettings();
+      renderModels();
+      syncModelSelects();
     }).catch(() => {});
+  }
+
+  function modelState(m) {
+    const p = App.modelProgress[m.name];
+    if (p && p.error) return "failed";
+    if (p && !p.done) return "downloading";
+    if (m.installed) return "installed";
+    if (m.downloading) return "downloading";
+    return "idle";
+  }
+
+  function renderModelState(el) {
+    const s = el.dataset.state;
+    const name = el.dataset.model;
+    if (s === "installed") {
+      el.innerHTML = '<span class="installed">' + checkSvg + "Installed</span>";
+    } else if (s === "idle") {
+      el.innerHTML = '<button class="mini">Download</button>';
+      el.querySelector(".mini").addEventListener("click", () => startDownload(name));
+    } else if (s === "failed") {
+      el.innerHTML = '<span class="failedtxt">Failed</span><button class="mini">Retry</button>';
+      const p = App.modelProgress[name];
+      if (p && p.error) el.querySelector(".failedtxt").title = p.error;
+      el.querySelector(".mini").addEventListener("click", () => startDownload(name));
+    } else if (s === "downloading") {
+      el.innerHTML = '<span class="dl"><span class="bar"><i></i></span><span class="pct">0%</span>' +
+        '<button class="ghost" title="Cancel">' + xSvg + "</button></span>";
+      const p = App.modelProgress[name];
+      const pct = p && p.pct ? p.pct : 0;
+      el.querySelector(".bar i").style.width = pct + "%";
+      el.querySelector(".pct").textContent = Math.round(pct) + "%";
+      el.querySelector(".ghost").addEventListener("click", () => cancelDownload(name));
+    }
+  }
+
+  function modelRow(m) {
+    const row = h("div", { class: "row mrow" });
+    const hint = m.hint + (m.sizeBytes ? " · " + fmtSize(m.sizeBytes) : "");
+    row.appendChild(h("div", { class: "lbl" }, [
+      h("div", { class: "name", text: m.name }),
+      h("div", { class: "hint", text: hint })
+    ]));
+    const st = h("span", { class: "mstate" });
+    st.dataset.model = m.name;
+    st.dataset.state = modelState(m);
+    renderModelState(st);
+    row.appendChild(st);
+    return row;
+  }
+
+  function renderModels() {
+    const installedCard = $("installedCard"), modelsCard = $("modelsCard");
+    installedCard.innerHTML = "";
+    modelsCard.innerHTML = "";
+    const installed = App.models.filter((m) => m.installed);
+    const available = App.models.filter((m) => !m.installed);
+    installed.forEach((m) => installedCard.appendChild(modelRow(m)));
+    available.forEach((m) => modelsCard.appendChild(modelRow(m)));
+    installedCard.closest(".grp").style.display = installed.length ? "" : "none";
+    modelsCard.closest(".grp").style.display = available.length ? "" : "none";
+  }
+
+  function updateModelRow(name) {
+    const el = document.querySelector('.mstate[data-model="' + name + '"]');
+    const m = App.models.find((x) => x.name === name);
+    if (!el || !m) return;
+    const next = modelState(m);
+    if (el.dataset.state !== next) {
+      el.dataset.state = next;
+      renderModelState(el);
+      return;
+    }
+    if (next === "downloading") {
+      const p = App.modelProgress[name];
+      const pct = p && p.pct ? p.pct : 0;
+      const bar = el.querySelector(".bar i"), lab = el.querySelector(".pct");
+      if (bar) bar.style.width = pct + "%";
+      if (lab) lab.textContent = Math.round(pct) + "%";
+    }
   }
 
   function startDownload(name) {
@@ -577,7 +857,6 @@
         App.modelProgress[name] = { model: name, pct: 0, done: false, error: res.error || "Download failed" };
         updateModelRow(name);
       } else if (res && res.installed) {
-        // already on disk (race with another path) — no pushes will come
         delete App.modelProgress[name];
         refreshModels();
       }
@@ -587,397 +866,354 @@
     });
   }
 
-  // The right-hand state cell of one model row: ✓ installed, Download,
-  // live percent, or error + Retry.
-  function modelStateEl(m) {
-    const p = App.modelProgress[m.name];
-    if (p && p.error) {
-      return h("span", { class: "model-state" }, [
-        h("span", { class: "model-err", title: p.error, text: "Failed" }),
-        h("button", { class: "btn-mini", text: "Retry", onclick: () => startDownload(m.name) })
-      ]);
-    }
-    if (p && !p.done) {
-      return h("span", { class: "model-state pct", text: p.pct + "%" });
-    }
-    if (m.installed) {
-      return h("span", { class: "model-state ok", title: "Installed" }, [Icon.Check(), "Installed"]);
-    }
-    if (m.downloading) {
-      return h("span", { class: "model-state pct", text: "…" });
-    }
-    return h("button", { class: "btn-mini", text: "Download", onclick: () => startDownload(m.name) });
-  }
-
-  function modelRow(m) {
-    const sub = m.hint + (m.sizeBytes ? " · " + fmtSize(m.sizeBytes) : "");
-    const node = row(m.name, sub, h("span", { class: "model-slot" }, [modelStateEl(m)]));
-    node.setAttribute("data-model", m.name);
-    return node;
-  }
-
-  // Update one row's state cell in place — a full renderSettings() per 1%
-  // progress tick would tear down open dropdowns and reset scroll.
-  function updateModelRow(name) {
-    const slot = els.settingsPage.querySelector('.row[data-model="' + name + '"] .model-slot');
-    const m = App.models.find((x) => x.name === name);
-    if (!slot || !m) return;
-    slot.innerHTML = "";
-    slot.appendChild(modelStateEl(m));
-  }
-
-  function renderSettings() {
-    const page = els.settingsPage;
-    // Rebuilding the DOM resets the body's scroll position — remember it so a
-    // re-render (e.g. after a set_setting ack) doesn't jump back to the top.
-    const prevBody = page.querySelector(".set-body");
-    const keepScroll = prevBody ? prevBody.scrollTop : 0;
-    page.innerHTML = "";
-    page.setAttribute("aria-hidden", App.view === "panel" ? "true" : "false");
-    page.style.left = App.view === "settings" ? "0" : "100%";
-
-    const s = App.settings;
-    const engine = App.engine;
-
-    /* header — drag handle, same rule as the main page (buttons still click) */
-    page.appendChild(h("div", { class: "set-hd", onmousedown: beginDrag }, [
-      h("button", { class: "back", title: "Back to Tiro", onclick: onBack }, [Icon.Back(), "Tiro"]),
-      h("span", { class: "set-title", text: "Settings" })
-    ]));
-
-    const body = h("div", { class: "set-body" });
-
-    /* ENGINE */
-    const nowRow = h("div", { class: "now-row" }, [
-      h("span", { class: "now-ico" }, [engine.power === "plugged" ? Icon.Bolt() : Icon.Battery()]),
-      h("span", { class: "now-txt" }, [
-        h("span", { class: "now-lab", text: "Now running" }),
-        h("span", { class: "now-val" }, [
-          engine.model + " · ",
-          h("b", { text: engine.device }),
-          " · " + powerWord(engine.power)
-        ])
-      ])
-    ]);
-    body.appendChild(group("Engine", [
-      nowRow,
-      rowCol("Power mode", segmented(s.powerMode, [
-        { value: "auto", label: "Auto" },
-        { value: "cpu", label: "Always CPU" },
-        { value: "gpu", label: "Always GPU" }
-      ], (v) => setSetting("powerMode", v))),
-      row("Model on battery", null, selectControl(s.modelBattery, modelOptions(), (v) => setSetting("modelBattery", v))),
-      row("Model when plugged in", null, selectControl(s.modelPlugged, modelOptions(), (v) => setSetting("modelPlugged", v)))
-    ], "Auto uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power."));
-
-    /* MODELS — curated rows always visible; "Show all models" reveals the rest */
-    const curated = App.models.filter((m) => m.curated);
-    const extras = App.models.filter((m) => !m.curated);
-    const modelRows = curated.map(modelRow);
-    if (App.modelsExpanded) extras.forEach((m) => modelRows.push(modelRow(m)));
-    if (extras.length) {
-      modelRows.push(h("div", { class: "row models-toggle" }, [
-        h("button", {
-          type: "button", class: "models-more",
-          "aria-expanded": String(App.modelsExpanded),
-          text: App.modelsExpanded ? "Hide extra models" : "Show all models",
-          onclick: () => { App.modelsExpanded = !App.modelsExpanded; renderSettings(); }
-        })
-      ]));
-    }
-    if (modelRows.length) {
-      body.appendChild(group("Models", modelRows,
-        "Models download once and run fully offline. Downloaded models appear in the selectors above."));
-    }
-
-    /* AUDIO */
-    body.appendChild(group("Audio", [
-      row("Sound cues", null, switchControl(s.soundCues, (v) => setSetting("soundCues", v))),
-      rowCol("Volume", slider(s.volume, 0, 100, (v) => setSetting("volume", v), Icon.Vol()))
-    ]));
-
-    /* CAPTURE */
-    const captureHelper = s.clipboardCleanup === "fillers"
-      ? "“+ Fillers” also strips um, uh, like, you know before copying."
-      : "Light cleanup fixes spacing and capitalization on copy.";
-    const pillPad = typeof s.pillPadding === "number" ? s.pillPadding : 110;
-    body.appendChild(group("Capture", [
-      row("Recording pill", "Show the floating indicator while dictating",
-        switchControl(s.recordingPill, (v) => setSetting("recordingPill", v))),
-      rowCol("Pill position", segmented(s.pillPosition === "top" ? "top" : "bottom", [
-        { value: "top", label: "Top" },
-        { value: "bottom", label: "Bottom" }
-      ], (v) => setSetting("pillPosition", v))),
-      rowCol("Pill distance from edge", slider(pillPad, 0, Math.max(400, pillPad),
-        (v) => persistPillPadding(v),                  // release (also fires per-tick on WebKit)
-        Icon.UpDown(),
-        (v) => persistPillPadding(v))),                // live: backend repositions; write is debounced
-      rowCol("Clipboard cleanup", segmented(s.clipboardCleanup, [
-        { value: "off", label: "Off" },
-        { value: "light", label: "Light" },
-        { value: "fillers", label: "+ Fillers" }
-      ], (v) => setSetting("clipboardCleanup", v))),
-      row("Smart vocabulary", "Better spelling of your names & slang",
-        switchControl(s.smartVocab, (v) => setSetting("smartVocab", v)))
-    ], captureHelper));
-
-    /* INPUT */
-    body.appendChild(group("Input", [
-      row("Microphone", null,
-        selectControl(s.micName, App.mics.length ? App.mics : [s.micName], (v) => setSetting("micName", v)))
-    ]));
-
-    /* SHORTCUTS */
-    body.appendChild(group("Shortcuts", [
-      shortcutRow("Dictate", "dictate"),
-      shortcutRow("Paste at cursor", "paste"),
-      shortcutRow("Open panel", "panel"),
-      shortcutRow("Cancel recording", "cancel")
-    ], App.shortcutHint || null));
-
-    /* STORAGE */
-    const saveOn = s.saveTranscripts !== false;
-    const pathRow = row("Save transcripts to",
-      h("span", { class: "path-val", text: s.savePath }),
-      h("button", { class: "btn-mini", text: "Change…", onclick: onChangePath }));
-    if (!saveOn) pathRow.classList.add("disabled");
-    const storageRows = [
-      row("Save transcripts", "Write each take to the folder below",
-        switchControl(saveOn, (v) => setSetting("saveTranscripts", v))),
-      pathRow
-    ];
-    // Calm inline fallback banner — only when the vault dir was unwritable.
-    if (s.storageFallback) {
-      storageRows.push(storageBanner(s.storagePath || s.savePath));
-    }
-    body.appendChild(group("Storage", storageRows));
-
-    /* APPEARANCE (NEW group — immediately before System) */
-    const transp = typeof s.transparency === "number" ? s.transparency : 45;
-    body.appendChild(group("Appearance", [
-      rowCol("Theme", segmented(App.theme, [
-        { value: "light", label: "Light" },
-        { value: "dark", label: "Dark" },
-        { value: "system", label: "Follow system" }
-      ], (v) => setSetting("theme", v))),
-      rowCol("Transparency", slider(transp, 0, 100,
-        (v) => persistTransparency(v),                 // release (also fires per-tick on WebKit)
-        Icon.Transparency(),
-        (v) => persistTransparency(v)))                // live preview; write is debounced
-    ]));
-
-    /* SYSTEM */
-    body.appendChild(group("System", [
-      row("Launch at login", null, switchControl(s.launchAtLogin, (v) => setSetting("launchAtLogin", v)))
-    ]));
-
-    page.appendChild(body);
-    body.scrollTop = keepScroll;
+  function cancelDownload(name) {
+    Promise.resolve(api.cancel_download && api.cancel_download(name)).catch(() => {});
+    delete App.modelProgress[name];
+    updateModelRow(name);
   }
 
   /* ════════════════════════════════════════════════════════════════════
-     ACTIONS / WIRING
+     SHORTCUTS
      ════════════════════════════════════════════════════════════════════ */
-  function applyEngine(engine) {
-    if (!engine) return;
-    App.engine = engine;
+  const SHORTCUTS = [
+    { id: "dictate", name: "Dictate" },
+    { id: "paste", name: "Paste at cursor" },
+    { id: "panel", name: "Open panel" },
+    { id: "cancel", name: "Cancel recording" }
+  ];
+  const scCard = $("shortcutsCard");
+  let listeningRow = null;
+  function comboHtml(keys) {
+    return (keys || []).map((k) => {
+      const s = document.createElement("span");
+      s.className = "kbd sm";
+      s.textContent = k;
+      return s.outerHTML;
+    }).join("");
+  }
+  function renderShortcuts() {
+    stopListening();
+    scCard.innerHTML = "";
+    SHORTCUTS.forEach((sc) => {
+      const combo = App.shortcuts[sc.id] || { keys: [] };
+      const row = document.createElement("div");
+      row.className = "row srow";
+      row.dataset.id = sc.id;
+      row.innerHTML =
+        '<div class="lbl"><div class="name"></div><div class="err"></div></div>' +
+        '<span class="scombo">' + comboHtml(combo.keys) + "</span>" +
+        '<span class="listen"><span class="prompt">Press keys…</span></span>' +
+        '<button class="tbtn">Edit</button>';
+      row.querySelector(".name").textContent = sc.name;
+      const btn = row.querySelector(".tbtn");
+      btn.addEventListener("click", () => {
+        if (row.classList.contains("listening")) stopListening();
+        else startListening(row);
+      });
+      scCard.appendChild(row);
+    });
+  }
+  function startListening(row) {
+    stopListening();
+    clearFailed();
+    listeningRow = row;
+    row.classList.add("listening");
+    row.querySelector(".tbtn").textContent = "Cancel";
+  }
+  function stopListening() {
+    if (!listeningRow) return;
+    listeningRow.classList.remove("listening");
+    listeningRow.querySelector(".tbtn").textContent = "Edit";
+    listeningRow = null;
+  }
+  let failTimer;
+  function clearFailed() {
+    clearTimeout(failTimer);
+    document.querySelectorAll(".srow.failed").forEach((r) => r.classList.remove("failed"));
+  }
+  function failRebind(row, keys) {
+    stopListening();
+    clearFailed();
+    row.classList.add("failed");
+    row.querySelector(".err").textContent =
+      "Couldn’t claim " + keys.join(" ") + " — it’s in use elsewhere.";
+    failTimer = setTimeout(() => row.classList.remove("failed"), 3200);
+  }
+  function acceptRebind(row, combo) {
+    App.shortcuts[row.dataset.id] = combo;
+    stopListening();
+    clearFailed();
+    row.querySelector(".scombo").innerHTML = comboHtml(combo.keys);
+    if (row.dataset.id === "dictate") renderEmptyKeys();
+  }
+  document.addEventListener("keydown", (e) => {
+    if (!listeningRow) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return; // wait for a full chord
+    const combo = {
+      ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey,
+      code: e.code, keys: comboKeys(e)
+    };
+    const row = listeningRow;
+    Promise.resolve(api.rebind_shortcut(row.dataset.id, combo)).then((res) => {
+      if (res && res.ok === false) { failRebind(row, combo.keys); return; }
+      if (res && res.keys) combo.keys = res.keys;
+      acceptRebind(row, combo);
+    }).catch(() => failRebind(row, combo.keys));
+  }, true);
+
+  function renderEmptyKeys() {
+    const box = $("emptyKeys");
+    box.innerHTML = "";
+    const keys = (App.shortcuts.dictate && App.shortcuts.dictate.keys) || ["Ctrl", "Alt", "Space"];
+    keys.forEach((k) => box.appendChild(h("span", { class: "kbd", text: k })));
   }
 
-  function applyTheme(effective) {
-    document.documentElement.setAttribute("data-theme", effective === "light" ? "light" : "dark");
+  /* ════════════════════════════════════════════════════════════════════
+     VOCABULARY
+     ════════════════════════════════════════════════════════════════════ */
+  function persistVocab() {
+    Promise.resolve(api.set_vocab && api.set_vocab(App.vocab.hotwords, App.vocab.corrections)).catch(() => {});
   }
-
-  // Transparency slider (0 = solid, 100 = most see-through) -> panel alpha.
-  // Maps to opacity 0.95 (t=0) .. 0.30 (t=100) so the panel never goes invisible.
-  function applyTransparency(t) {
-    const op = 0.95 - 0.65 * (Math.max(0, Math.min(100, t)) / 100);
-    document.documentElement.style.setProperty("--panel-alpha", op.toFixed(3));
+  function loadVocab() {
+    Promise.resolve(api.list_vocab && api.list_vocab()).then((v) => {
+      if (!v) return;
+      App.vocab = {
+        hotwords: Array.isArray(v.hotwords) ? v.hotwords : [],
+        corrections: Array.isArray(v.corrections) ? v.corrections : []
+      };
+      renderHw();
+      renderCorr();
+    }).catch(() => {});
   }
-  // The visual change applies immediately, but the config write is debounced:
-  // WebKit fires slider events on every tick of a drag, and each set_setting
-  // is an fsync'd file write — persisting per tick lags the whole system.
-  let transparencySaveTimer = null;
-  function persistTransparency(t) {
-    App.settings.transparency = t;
-    applyTransparency(t);
-    if (transparencySaveTimer !== null) clearTimeout(transparencySaveTimer);
-    transparencySaveTimer = setTimeout(() => {
-      transparencySaveTimer = null;
-      Promise.resolve(api.set_setting("transparency", t)).catch(() => {});
-    }, 200);
+  function renderHw(newIdx) {
+    const box = $("hwChips");
+    box.innerHTML = "";
+    App.vocab.hotwords.forEach((w, i) => {
+      const c = document.createElement("span");
+      c.className = "chip" + (i === newIdx ? " landing" : "");
+      c.innerHTML = '<span></span><button class="x" title="Remove">' + xSvg + "</button>";
+      c.querySelector("span").textContent = w;
+      c.querySelector(".x").addEventListener("click", () => {
+        App.vocab.hotwords.splice(i, 1);
+        persistVocab();
+        renderHw();
+      });
+      box.appendChild(c);
+    });
+    box.style.display = App.vocab.hotwords.length ? "" : "none";
+    $("hwEmpty").style.display = App.vocab.hotwords.length ? "none" : "block";
   }
-
-  // Pill padding slider — same debounced-write pattern as transparency: the
-  // backend repositions a visible pill on each set_setting, but WebKit fires
-  // slider events per tick and each write is an fsync'd file save.
-  let pillPaddingSaveTimer = null;
-  function persistPillPadding(v) {
-    App.settings.pillPadding = v;
-    if (pillPaddingSaveTimer !== null) clearTimeout(pillPaddingSaveTimer);
-    pillPaddingSaveTimer = setTimeout(() => {
-      pillPaddingSaveTimer = null;
-      Promise.resolve(api.set_setting("pillPadding", v)).catch(() => {});
-    }, 200);
+  function renderCorr(newIdx) {
+    const listBox = $("corrList");
+    listBox.innerHTML = "";
+    App.vocab.corrections.forEach((p, i) => {
+      const r = document.createElement("div");
+      r.className = "crow" + (i > 0 ? " hair" : "") + (i === newIdx ? " landing" : "");
+      r.innerHTML = '<span class="heard"></span>' + arrSvg + '<span class="written"></span>' +
+        '<button class="ghost del" title="Delete">' + xSvg + "</button>";
+      r.querySelector(".heard").textContent = p[0];
+      r.querySelector(".written").textContent = p[1];
+      r.querySelector(".del").addEventListener("click", () => {
+        App.vocab.corrections.splice(i, 1);
+        persistVocab();
+        renderCorr();
+      });
+      listBox.appendChild(r);
+    });
+    $("corrEmpty").style.display = App.vocab.corrections.length ? "none" : "block";
   }
-
-  function setSetting(key, value) {
-    // optimistic local update, painted immediately (renderSettings keeps the
-    // body's scroll position, so this never jumps the page)
-    if (key === "theme") App.theme = value;
-    else App.settings[key] = value;
-    renderSettings();
-    renderPanel();
-
-    Promise.resolve(api.set_setting(key, value)).then((res) => {
-      if (!res) return;
-      // Re-render only when the ack actually changed something beyond the
-      // optimistic update — not on every ack.
-      let dirty = false;
-      if (res.engine && (res.engine.model !== App.engine.model ||
-          res.engine.device !== App.engine.device ||
-          res.engine.power !== App.engine.power)) {
-        applyEngine(res.engine);
-        dirty = true;
-      }
-      if (res.theme != null && res.theme !== App.theme) { App.theme = res.theme; dirty = true; }
-      if (res.effectiveTheme) applyTheme(res.effectiveTheme);
-      if (res.launchAtLogin != null && res.launchAtLogin !== App.settings.launchAtLogin) {
-        App.settings.launchAtLogin = res.launchAtLogin;
-        dirty = true;
-      }
-      if (dirty) { renderSettings(); renderPanel(); }
-    }).catch(() => { renderSettings(); renderPanel(); });
-  }
-
-  function onMicChange(name) {
-    // setSetting repaints both pages, so no extra render needed here.
-    setSetting("micName", name);
-  }
-
-  function clearCopiedMark() {
-    const prev = els.panelPage.querySelector(".entry.copied");
-    if (prev) {
-      prev.classList.remove("copied");
-      const chip = prev.querySelector(".copied-chip");
-      if (chip) chip.remove();
+  /* hot word add */
+  const hwInput = $("hwInput"), hwAdd = $("hwAdd");
+  hwInput.addEventListener("input", () => hwAdd.classList.toggle("hasq", !!hwInput.value.trim()));
+  hwInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const w = hwInput.value.trim();
+    if (!w) return;
+    if (!App.vocab.hotwords.some((x) => x.toLowerCase() === w.toLowerCase())) {
+      App.vocab.hotwords.push(w);
+      persistVocab();
+      renderHw(App.vocab.hotwords.length - 1);
     }
+    hwInput.value = "";
+    hwAdd.classList.remove("hasq");
+  });
+  /* correction add */
+  const cHeard = $("cHeard"), cWritten = $("cWritten"), cAddBtn = $("cAddBtn");
+  function corrReady() { return !!(cHeard.value.trim() && cWritten.value.trim()); }
+  function syncCorrBtn() { cAddBtn.disabled = !corrReady(); }
+  function commitCorr() {
+    App.vocab.corrections.push([cHeard.value.trim(), cWritten.value.trim()]);
+    persistVocab();
+    renderCorr(App.vocab.corrections.length - 1);
+    cHeard.value = ""; cWritten.value = "";
+    syncCorrBtn();
+    cHeard.focus();
   }
+  [cHeard, cWritten].forEach((el) => {
+    el.addEventListener("input", syncCorrBtn);
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      if (corrReady()) commitCorr();
+      else if (el === cHeard && cHeard.value.trim()) cWritten.focus();
+    });
+  });
+  cAddBtn.addEventListener("click", commitCorr);
 
-  function copyEntry(id, text) {
-    Promise.resolve(api.copy_text(text)).catch(() => {});
-    clearTimeout(App._copyTimer);
-    // Remember the scroll position up front so nothing can yank the list around.
-    const list = els.panelPage.querySelector(".list");
-    const keepTop = list ? list.scrollTop : 0;
-    // Update the clicked entry IN PLACE — no full re-render, so the list's
-    // scroll position is preserved (a renderPanel() here jumps it to the top).
-    clearCopiedMark();
-    App.copiedId = id;
-    const node = els.panelPage.querySelector('.entry[data-id="' + id + '"]');
-    if (node) {
-      node.classList.add("copied");
-      const timeRow = node.querySelector(".entry-time");
-      if (timeRow && !timeRow.querySelector(".copied-chip")) {
-        timeRow.appendChild(h("span", { class: "copied-chip" }, [Icon.Check(), "Copied"]));
-      }
-    }
-    // Belt-and-suspenders: if focus/layout nudged the scroll, snap it right back
-    // (now and on the next frame, since some scroll adjustments fire async).
-    if (list) {
-      list.scrollTop = keepTop;
-      requestAnimationFrame(() => { list.scrollTop = keepTop; });
-    }
-    App._copyTimer = setTimeout(() => {
-      App.copiedId = null;
-      clearCopiedMark();
-    }, 1500);
-  }
-
+  /* ════════════════════════════════════════════════════════════════════
+     RECORD BUTTONS
+     ════════════════════════════════════════════════════════════════════ */
   function onRecord() { Promise.resolve(api.toggle_record()).catch(() => {}); }
+  $("recBtn").addEventListener("click", onRecord);
+  $("recBtn2").addEventListener("click", onRecord);
 
-  function onPin() {
-    App.pinned = !App.pinned;
-    Promise.resolve(api.set_pin(App.pinned)).catch(() => {});
-    // Update the pin button in place (don't renderPanel — that would reset scroll).
-    const btn = els.panelPage.querySelector(".ico.pin");
-    if (btn) {
-      btn.setAttribute("data-on", App.pinned ? "1" : "0");
-      btn.setAttribute("aria-pressed", String(App.pinned));
-      btn.title = App.pinned ? "Pinned on top — click to unpin" : "Keep on top";
+  /* ════════════════════════════════════════════════════════════════════
+     INPUT LEVEL PREVIEW + TEST (design-native webview audio; inside the
+     real app getUserMedia is not attempted — the meter breathes idle)
+     ════════════════════════════════════════════════════════════════════ */
+  let audioCtx = null, analyser = null, micStream = null, micTried = false;
+  let gainVal = 0.75, testing = false, monitorGain = null;
+  const waveCanvas = $("waveCanvas");
+  const wctx = waveCanvas.getContext("2d");
+  async function ensureMic() {
+    if (micTried) return;
+    micTried = true;
+    await restartMic();
+  }
+  async function restartMic() {
+    if (!micTried) return;
+    stopMonitor();
+    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; analyser = null; }
+    if (bridgeReady()) return; /* no webview mic grabs inside the app */
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const src = audioCtx.createMediaStreamSource(micStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+    } catch (_) { analyser = null; } /* no permission — idle simulation */
+  }
+  /* always-running waveform (functional status motion — kept under reduced motion) */
+  const NBARS = 26, bars = new Array(NBARS).fill(0.08);
+  let simPhase = 0;
+  function sampleLevel() {
+    if (analyser) {
+      const d = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(d);
+      let sum = 0;
+      for (let i = 0; i < d.length; i++) { const v = (d[i] - 128) / 128; sum += v * v; }
+      return Math.min(1, Math.sqrt(sum / d.length) * 3.2);
     }
+    simPhase += 0.045;
+    return 0.06 + Math.abs(Math.sin(simPhase * 0.7)) * 0.05 + Math.random() * 0.03;
   }
-
-  function beginDrag(ev) {
-    if (ev.button !== 0) return;                            // left button only
-    if (ev.target && ev.target.closest("button")) return;  // header buttons still click
-    ev.preventDefault();                                   // no text selection
-    Promise.resolve(api.begin_drag && api.begin_drag()).catch(() => {});
+  function drawWave() {
+    const lvl = sampleLevel() * gainVal * 1.33;
+    bars.pop(); bars.unshift(lvl);
+    const db = 20 * Math.log10(Math.max(0.001, Math.min(1, lvl)));
+    $("levelVal").textContent = (db <= -60 ? "−∞" : Math.round(db)) + " dB";
+    const w = waveCanvas.width, hgt = waveCanvas.height;
+    const ink = getComputedStyle(document.body).getPropertyValue("--ink").trim() || "255,255,255";
+    wctx.clearRect(0, 0, w, hgt);
+    const bw = 5, gap = (w - NBARS * bw) / (NBARS - 1);
+    for (let i = 0; i < NBARS; i++) {
+      const v = Math.max(0.06, Math.min(1, bars[i]));
+      const bh = Math.max(3, v * (hgt - 6));
+      const a = testing ? .9 : (.28 + v * .6);
+      wctx.fillStyle = "rgba(" + ink + "," + a.toFixed(2) + ")";
+      const x = i * (bw + gap), y = (hgt - bh) / 2;
+      wctx.beginPath();
+      wctx.roundRect(x, y, bw, bh, 2.5);
+      wctx.fill();
+    }
+    requestAnimationFrame(drawWave);
   }
+  requestAnimationFrame(drawWave);
+  /* input volume (webview preview gain only) */
+  const rngGain = $("rngGain");
+  rngGain.addEventListener("input", () => {
+    gainVal = rngGain.value / 100;
+    $("gainVal").textContent = rngGain.value + "%";
+    if (monitorGain) monitorGain.gain.value = gainVal;
+  });
+  /* test: toggle live echo of the mic through the active output */
+  const testBtn = $("testBtn");
+  function stopMonitor() {
+    if (monitorGain) { try { monitorGain.disconnect(); } catch (_) { /* noop */ } monitorGain = null; }
+    testing = false;
+    testBtn.textContent = "Test";
+  }
+  testBtn.addEventListener("click", async () => {
+    if (testing) { stopMonitor(); return; }
+    await ensureMic();
+    if (!micStream) await restartMic();
+    if (micStream && audioCtx) {
+      const src = audioCtx.createMediaStreamSource(micStream);
+      monitorGain = audioCtx.createGain();
+      monitorGain.gain.value = gainVal;
+      src.connect(monitorGain);
+      monitorGain.connect(audioCtx.destination);
+    }
+    testing = true;
+    testBtn.textContent = "Stop";
+  });
 
-  function onClose() { Promise.resolve(api.close_panel()).catch(() => {}); }
-
-  function onGear() { App.view = "settings"; renderPanel(); renderSettings(); }
-  function onBack() { App.view = "panel"; renderPanel(); renderSettings(); }
-
-  function onChangePath() {
+  /* ════════════════════════════════════════════════════════════════════
+     STORAGE
+     ════════════════════════════════════════════════════════════════════ */
+  $("changePathBtn").addEventListener("click", () => {
     Promise.resolve(api.pick_folder()).then((res) => {
       if (res && res.path) {
         App.settings.savePath = res.path;
-        renderSettings();
+        $("savePath").textContent = res.path;
       }
     }).catch(() => {});
-  }
-
-  /* shortcut press-keys capture (ported from app.jsx) */
-  function startEdit(which) {
-    App.editing = which;
-    renderSettings();
-    const MODS = ["ControlLeft", "ControlRight", "AltLeft", "AltRight",
-      "ShiftLeft", "ShiftRight", "MetaLeft", "MetaRight"];
-    const cap = (e) => {
-      if (MODS.includes(e.code)) return;
-      e.preventDefault(); e.stopPropagation();
-      if (e.code === "Escape") { cancelEdit(); return; }
-      const combo = {
-        ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey,
-        code: e.code, keys: comboKeys(e)
-      };
-      teardownCapture();
-      App.editing = null;
-      // Snapshot the current binding so a rejected rebind can be reverted —
-      // never apply an unvalidated combo on failure.
-      const prev = App.shortcuts[which];
-      Promise.resolve(api.rebind_shortcut(which, combo)).then((res) => {
-        if (res && res.keys) combo.keys = res.keys;
-        if (!res || res.ok !== false) App.shortcuts[which] = combo;
-        renderSettings();
-        renderPanel();
-      }).catch(() => {
-        // Rebind failed — keep the previous shortcut, don't apply the new combo.
-        App.shortcuts[which] = prev;
-        App.shortcutHint = "Couldn't change shortcut — try a different key.";
-        renderSettings();
-        setTimeout(() => { App.shortcutHint = null; renderSettings(); }, 2400);
-      });
-    };
-    App._captureHandler = cap;
-    window.addEventListener("keydown", cap, true);
-  }
-  function teardownCapture() {
-    if (App._captureHandler) {
-      window.removeEventListener("keydown", App._captureHandler, true);
-      App._captureHandler = null;
-    }
-  }
-  function cancelEdit() {
-    teardownCapture();
-    App.editing = null;
-    renderSettings();
+  });
+  function syncStorage() {
+    $("savePath").textContent = App.settings.savePath || "";
+    const fallback = !!App.settings.storageFallback;
+    document.body.classList.toggle("fallback", fallback);
+    if (fallback) $("fallbackPath").textContent = App.settings.storagePath || "";
   }
 
   /* ════════════════════════════════════════════════════════════════════
-     STATE INGEST + PUBLIC BACKEND-FACING FUNCTIONS (the contract)
+     STATE INGEST + FULL SYNC
      ════════════════════════════════════════════════════════════════════ */
+  function syncSettings() {
+    const s = App.settings;
+    segSet(document.querySelector('[data-seg="power"]'), s.powerMode || "auto");
+    setSw($("swCues"), s.soundCues);
+    $("rowVolume").classList.toggle("disabled", !s.soundCues);
+    if (typeof s.volume === "number") {
+      rngVol.value = s.volume; syncFill(rngVol);
+      $("volVal").textContent = s.volume + "%";
+    }
+    setSw($("swPill"), s.recordingPill);
+    segSet(document.querySelector('[data-seg="pillpos"]'), s.pillPosition === "top" ? "top" : "bottom");
+    if (typeof s.pillPadding === "number") {
+      rngDist.max = String(Math.max(400, s.pillPadding));
+      rngDist.value = s.pillPadding; syncFill(rngDist);
+      $("distVal").textContent = s.pillPadding + " px";
+    }
+    syncPillRows();
+    segSet(document.querySelector('[data-seg="cleanup"]'), s.clipboardCleanup || "light");
+    cleanupSub.textContent = cleanupCopy[s.clipboardCleanup] || cleanupCopy.light;
+    setSw($("swVocab"), s.smartVocab);
+    setSw($("swSave"), s.saveTranscripts !== false);
+    setSw($("swLogin"), s.launchAtLogin);
+    syncThemeSeg();
+    if (typeof s.transparency === "number") {
+      const a = tToAlpha(s.transparency);
+      rngGlass.value = a.toFixed(2); syncFill(rngGlass);
+      $("glassVal").textContent = a.toFixed(2);
+    }
+    syncStorage();
+    syncModelSelects();
+  }
+
   function ingestState(state) {
     if (!state) return;
     if (Array.isArray(state.entries)) App.entries = state.entries;
@@ -993,58 +1229,58 @@
     }
   }
 
-  // window.tiroApplyState(state) — re-render everything from a get_state()-shaped object
+  function renderAll() {
+    renderEntries();
+    renderEmptyKeys();
+    renderMics();
+    renderShortcuts();
+    syncSettings();
+    updateEngine();
+    if (App.adv && App.view === "history") renderAdv();
+  }
+
+  /* ════════════════════════════════════════════════════════════════════
+     PUBLIC BACKEND-FACING FUNCTIONS (the contract)
+     ════════════════════════════════════════════════════════════════════ */
   window.tiroApplyState = function (state) {
     ingestState(state);
-    renderPanel();
-    renderSettings();
+    renderAll();
   };
 
-  // window.tiroAddEntry(entry) — prepend one entry with the .fresh entrance animation
   window.tiroAddEntry = function (entry) {
     if (!entry) return;
-    const e = Object.assign({}, entry, { fresh: true });
-    App.entries.unshift(e);
-    renderPanel();
-    // settle: drop the .fresh flag after the entrance animation
-    setTimeout(() => {
-      const found = App.entries.find((x) => x.id === e.id);
-      if (found) { found.fresh = false; renderPanel(); }
-    }, 600);
+    App.entries.unshift(entry);
+    panel.classList.remove("is-empty");
+    listEl.prepend(makeEntry(entry, true));
+    if (App.adv && App.view === "history" && App.dayIdx === 0 && !searchInput.value.trim()) {
+      advList.prepend(makeEntry(entry, true));
+    }
   };
 
-  // window.tiroSetEngine(engine) — update footer chip + Settings "Now running"
   window.tiroSetEngine = function (engine) {
-    applyEngine(engine);
-    renderPanel();
-    renderSettings();
+    if (!engine) return;
+    App.engine = engine;
+    updateEngine();
   };
 
-  // window.tiroSetTheme(effective) — "light"|"dark" -> data-theme on <html>
   window.tiroSetTheme = function (effective) {
     applyTheme(effective);
   };
 
-  // window.tiroSetRecording(on) — reflect record button (mic <-> stop + accent)
   window.tiroSetRecording = function (on) {
     App.recording = !!on;
-    renderPanel();
+    panel.classList.toggle("recording", App.recording);
+    $("recBtn").title = App.recording ? "Stop" : "Record";
+    $("recBtn2").title = App.recording ? "Stop" : "Record";
   };
 
-  // window.tiroSetStorage(obj) — { fallback: bool, path: str } pushed when a
-  // transcription finishes writing. Mirror it into settings so the Storage card
-  // shows the calm inline banner ONLY while obj.fallback is true.
   window.tiroSetStorage = function (obj) {
     if (!obj) return;
     App.settings.storageFallback = !!obj.fallback;
     if (typeof obj.path === "string") App.settings.storagePath = obj.path;
-    renderSettings();
+    syncStorage();
   };
 
-  // window.tiroModelProgress({ model, pct, done, error }) — pushed by the
-  // backend while a model downloads (~every 1%). Progress updates the row in
-  // place; completion re-queries list_models so the row flips to Installed
-  // and the battery/plugged selectors pick the model up.
   window.tiroModelProgress = function (p) {
     if (!p || !p.model) return;
     if (p.done) {
@@ -1054,6 +1290,11 @@
       refreshModels();
       return;
     }
+    if (p.cancelled) {
+      delete App.modelProgress[p.model];
+      updateModelRow(p.model);
+      return;
+    }
     App.modelProgress[p.model] = p;
     updateModelRow(p.model);
   };
@@ -1061,50 +1302,33 @@
   /* ════════════════════════════════════════════════════════════════════
      BOOT
      ════════════════════════════════════════════════════════════════════ */
-  // Recompute bridge availability at call time — HAS_BRIDGE is only the
-  // parse-time snapshot and the bridge can arrive after this script runs.
-  function bridgeReady() {
-    return !!(window.pywebview && window.pywebview.api);
-  }
-
   let _booted = false;
   function boot() {
-    if (_booted) return;            // guard against a double boot flash
+    if (_booted) return;
     _booted = true;
     if (bridgeReady()) api = window.pywebview.api;
     Promise.resolve(api.get_state()).then((state) => {
       ingestState(state);
-      renderPanel();
-      renderSettings();
+      renderAll();
       refreshModels();
-    }).catch((err) => {
-      // last-resort: render with whatever defaults we have
+      loadVocab();
+      loadDays();
+    }).catch(() => {
       ingestState(MOCK_STATE);
-      renderPanel();
-      renderSettings();
+      renderAll();
     });
   }
 
-  // Render a neutral empty skeleton so a truly-standalone preview (no bridge)
-  // isn't blank while we wait — replaced the moment boot() runs.
   function renderSkeleton() {
     ingestState(MOCK_STATE);
-    renderPanel();
-    renderSettings();
+    renderAll();
   }
 
-  // pywebview injects window.pywebview.api asynchronously; the `pywebviewready`
-  // event fires once the bridge is live. Boot ONCE — eagerly if the bridge is
-  // already here, otherwise wait for it and only fall back to standalone if it
-  // never arrives (so there's no mock->real double render flash).
   if (bridgeReady()) {
     boot();
   } else {
     window.addEventListener("pywebviewready", boot);
-    // Neutral placeholder until the bridge arrives (or we give up below).
     renderSkeleton();
-    // If no bridge ever shows up (real standalone browser preview), boot the
-    // mock so the page is interactive instead of frozen on the skeleton.
     setTimeout(function () { if (!_booted) boot(); }, 1500);
   }
 
