@@ -97,6 +97,7 @@
     entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })),
     settings: {
       powerMode: "auto", modelBattery: "base.en", modelPlugged: "small.en",
+      model: "base.en",
       soundCues: true, volume: 60, recordingPill: true,
       pillPosition: "bottom", pillPadding: 110,
       clipboardCleanup: "light", smartVocab: true,
@@ -145,7 +146,10 @@
       const device = s.powerMode === "auto"
         ? (power === "plugged" ? "GPU" : "CPU")
         : (s.powerMode === "gpu" ? "GPU" : "CPU");
-      const model = power === "plugged" ? s.modelPlugged : s.modelBattery;
+      /* forced modes run the single Model row; auto keeps the pair */
+      const model = s.powerMode === "auto"
+        ? (power === "plugged" ? s.modelPlugged : s.modelBattery)
+        : (s.model || s.modelBattery);
       this._state.engine = { model, device, power };
       return this._state.engine;
     },
@@ -604,7 +608,7 @@
       seg.querySelectorAll("button").forEach((x) => x.classList.remove("on"));
       b.classList.add("on");
       const v = b.dataset.value;
-      if (seg.dataset.seg === "power") { setSetting("powerMode", v); updateEngine(); }
+      if (seg.dataset.seg === "power") { setSetting("powerMode", v); syncEngineRows(); updateEngine(); }
       if (seg.dataset.seg === "pillpos") setSetting("pillPosition", v);
       if (seg.dataset.seg === "cleanup") { setSetting("clipboardCleanup", v); setCleanupCopy(v); }
       if (seg.dataset.seg === "theme") {
@@ -736,20 +740,35 @@
     setSetting("modelPlugged", this.options[this.selectedIndex].text);
     updateEngine();
   });
+  $("selModel").addEventListener("change", function () {
+    setSetting("model", this.options[this.selectedIndex].text);
+    updateEngine();
+  });
 
-  /* battery/plugged options: installed models plus the configured values */
+  /* model select options: installed models plus the configured values */
   function modelOptions() {
     const opts = App.models.filter((m) => m.installed).map((m) => m.name);
-    [App.settings.modelBattery, App.settings.modelPlugged].forEach((v) => {
+    [App.settings.modelBattery, App.settings.modelPlugged, App.settings.model].forEach((v) => {
       if (v && opts.indexOf(v) < 0) opts.push(v);
     });
     if (!opts.length) opts.push("base.en");
     return opts;
   }
+  /* forced power modes (Always CPU / Always GPU) run ONE model — show the
+     single Model row; Auto Switch keeps the battery/plugged pair. Swaps
+     live when the Compute device segment changes. */
+  function syncEngineRows() {
+    const forced = App.settings.powerMode === "cpu" || App.settings.powerMode === "gpu";
+    $("rowModel").style.display = forced ? "" : "none";
+    $("rowBattery").style.display = forced ? "none" : "";
+    $("rowPlugged").style.display = forced ? "none" : "";
+  }
   function syncModelSelects() {
     const opts = modelOptions();
     fillSelect($("selBattery"), opts, App.settings.modelBattery);
     fillSelect($("selPlugged"), opts, App.settings.modelPlugged);
+    fillSelect($("selModel"), opts, App.settings.model || App.settings.modelBattery || "base.en");
+    syncEngineRows();
   }
 
   /* ════════════════════════════════════════════════════════════════════

@@ -407,22 +407,25 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
     let models_dir = app_dir().join("models");
     let (model_ac, model_battery, compute_type) = {
         let cfg = lock(&ctx.cfg);
-        let fallback = cfg.get("model");
-        let ac = {
-            let m = cfg.get("model_ac");
-            if m.is_empty() {
-                fallback.clone()
-            } else {
-                m
-            }
-        };
-        let bat = {
-            let m = cfg.get("model_battery");
-            if m.is_empty() {
-                fallback.clone()
-            } else {
-                m
-            }
+        let single = cfg.get("model");
+        // FORCED power modes (device = cpu | cuda) run ONE user-chosen
+        // model — the panel's single "Model" row, stored in the legacy
+        // `model` key. It fills BOTH slots so a forced-GPU engine that has
+        // to fall back to CPU still serves the chosen model. Auto keeps
+        // the battery/AC split.
+        let forced = matches!(cfg.get("device").to_lowercase().as_str(), "cpu" | "cuda");
+        let (ac, bat) = if forced && !single.is_empty() {
+            (single.clone(), single.clone())
+        } else {
+            let pick = |key: &str| {
+                let m = cfg.get(key);
+                if m.is_empty() {
+                    single.clone()
+                } else {
+                    m
+                }
+            };
+            (pick("model_ac"), pick("model_battery"))
         };
         (ac, bat, cfg.get("compute_type"))
     };

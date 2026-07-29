@@ -381,6 +381,8 @@ pub fn get_state(app: &AppHandle) -> Value {
             "powerMode": device_to_powermode(&cfg.get("device")),
             "modelBattery": cfg.get("model_battery"),
             "modelPlugged": cfg.get("model_ac"),
+            // the single "Model" row shown while a forced mode is active
+            "model": cfg.get("model"),
             "soundCues": cfg.get_bool("beeps"),
             "volume": volume_to_int(&cfg.get("sound_volume")),
             "recordingPill": cfg.get_bool("pill"),
@@ -612,6 +614,12 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
             }
             "modelPlugged" => {
                 cfg.set("model_ac", &as_cfg_str(value));
+                hot_apply_model_change(app);
+            }
+            // The forced-mode single "Model" row (legacy `model` key);
+            // applies live through the same spawned hot-apply path.
+            "model" => {
+                cfg.set("model", &as_cfg_str(value));
                 hot_apply_model_change(app);
             }
             "soundCues" => cfg.set("beeps", if truthy(value) { "true" } else { "false" }),
