@@ -6,9 +6,10 @@
 //! installed portal (1.22.1, `src/xdp-app-info-host.c`): it asks systemd for
 //! the caller's user unit (`sd_pid_get_user_unit`), requires an `app-…` name
 //! in the systemd desktop-environment format, extracts the app id from the
-//! unit name, and then requires `<app id>.desktop` to exist in the XDG
-//! applications dirs (`g_desktop_app_info_new`). Any miss leaves the app id
-//! empty, and `GlobalShortcuts.CreateSession` then refuses with NotAllowed
+//! unit name, and then requires `<app id>.desktop` to LOAD under GLib
+//! (`g_desktop_app_info_new`): present in the XDG applications dirs AND
+//! carrying an Exec whose argv0 resolves to an executable in the portal
+//! process's PATH. Any miss leaves the app id empty, and `GlobalShortcuts.CreateSession` then refuses with NotAllowed
 //! ("An app id is required") — so a terminal/script launch, which sits in
 //! the terminal's scope, could never engage the portal hotkey path.
 //!
@@ -22,8 +23,18 @@
 //! logs and leaves the X11-grab fallback in place. The id parsing below
 //! mirrors the portal's own regexes so the no-op check agrees with what the
 //! portal will conclude.
+//!
+//! Future alternative (not implemented): xdg-desktop-portal >= 1.18 also
+//! exposes `org.freedesktop.host.portal.Registry.Register(app_id)` (present
+//! in the installed 1.22.1: data/org.freedesktop.host.portal.Registry.xml,
+//! src/registry.c), which associates a D-Bus connection with an app id
+//! directly — no systemd-unit derivation and no upfront desktop-file gate.
+//! It must be that connection's FIRST portal contact ("Registered too
+//! late"), and ashpd owns its own connection, so adopting it means hooking
+//! ashpd's connection before the first GlobalShortcuts call.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Ensure the GlobalShortcuts portal can identify this process. `app_id` is
 /// the Tauri `identifier` from tauri.conf.json — the single app id, reused.
@@ -33,33 +44,33 @@ pub fn ensure_app_scope(app_id: &str) {
         return; // the portal hotkey path is only used on Wayland sessions
     }
     if let Some(unit) = current_unit() {
-        if let Some(id) = parse_app_id_from_unit(&unit) {
-            // Launched as an app already (e.g. a .desktop launch).
-            if desktop_file_installed(&id) {
-                eprintln!(
-                    "app scope: already in {unit} -> app id '{id}'; \
-                     the GlobalShortcuts portal can identify us"
-                );
-                return;
-            }
-            if id == app_id {
-                // Migrating would derive the same id; only the desktop
-                // file is missing, and that we must not install at runtime.
-                eprintln!(
-                    "app scope: in {unit} -> app id '{id}', but no {id}.desktop \
-                     is installed in the XDG applications dirs — the \
-                     GlobalShortcuts portal will refuse and the X11-grab \
+        if !should_migrate(Some(&unit), app_id) {
+            // Launched AS our app (a .desktop launch): the unit already
+            // derives our id — a migration would be a no-op. Only the
+            // OUR-id case may skip: a foreign app id (a terminal like
+            // Alacritty or xterm keeps children in its own app-… scope)
+            // would file our shortcuts under THAT app in the compositor's
+            // store, varying per launch and orphaning bindings.
+            match desktop_file_status(app_id) {
+                Ok(file) => eprintln!(
+                    "app scope: already in {unit} -> app id '{app_id}' ({}); \
+                     the GlobalShortcuts portal can identify us",
+                    file.display()
+                ),
+                Err(why) => eprintln!(
+                    "app scope: in {unit} -> app id '{app_id}', but {why} — \
+                     the GlobalShortcuts portal will refuse and the X11-grab \
                      hotkeys stay; see BUILDING.md"
-                );
-                return;
+                ),
             }
-            // An app- unit under a foreign id the portal cannot verify:
-            // fall through and claim our own.
+            return;
         }
     }
+    // The terminal's scope, no systemd unit at all, or a foreign app scope:
+    // claim our own.
     let pid = std::process::id();
     let scope = scope_name(app_id, pid);
-    if let Err(e) = tauri::async_runtime::block_on(start_transient_scope(&scope, pid)) {
+    if let Err(e) = start_transient_scope_bounded(scope.clone(), pid) {
         eprintln!(
             "app scope: could not move into {scope}: {e}; the GlobalShortcuts \
              portal cannot identify us (the X11-grab hotkeys stay)"
@@ -71,19 +82,30 @@ pub fn ensure_app_scope(app_id: &str) {
             "app scope: {scope} started but the cgroup move never showed up; \
              the GlobalShortcuts portal may still refuse"
         );
-    } else if desktop_file_installed(app_id) {
-        eprintln!(
-            "app scope: moved into {scope} (app id '{app_id}') for the GlobalShortcuts portal"
-        );
-    } else {
-        eprintln!(
-            "app scope: moved into {scope}, but no {app_id}.desktop is \
-             installed in the XDG applications dirs — the GlobalShortcuts \
-             portal will refuse and the X11-grab hotkeys stay; install \
-             src-tauri/linux/{app_id}.desktop to ~/.local/share/applications \
-             (see BUILDING.md)"
-        );
+        return;
     }
+    match desktop_file_status(app_id) {
+        Ok(file) => eprintln!(
+            "app scope: moved into {scope} (app id '{app_id}', {}) for the \
+             GlobalShortcuts portal",
+            file.display()
+        ),
+        Err(why) => eprintln!(
+            "app scope: moved into {scope}, but {why} — the GlobalShortcuts \
+             portal will refuse and the X11-grab hotkeys stay; see BUILDING.md \
+             (install src-tauri/linux/{app_id}.desktop and put a `tiro` \
+             executable on PATH)"
+        ),
+    }
+}
+
+/// Migrate unless the inherited unit already derives OUR app id. Any other
+/// outcome — no unit, an unparseable unit, or a unit that parses to a
+/// foreign id — needs a scope of our own.
+fn should_migrate(current_unit: Option<&str>, app_id: &str) -> bool {
+    current_unit
+        .and_then(parse_app_id_from_unit)
+        .is_none_or(|id| id != app_id)
 }
 
 /// `app-<id>-<pid>.scope` — the systemd desktop-environment spec's
@@ -91,6 +113,29 @@ pub fn ensure_app_scope(app_id: &str) {
 /// the (unique-per-process) random part.
 fn scope_name(app_id: &str, pid: u32) -> String {
     format!("app-{app_id}-{pid}.scope")
+}
+
+/// zbus's connect handshake and method call carry no timeout of their own,
+/// and this runs on the main thread during setup — a wedged session bus or
+/// user manager must not hang startup invisibly forever. Run the whole
+/// D-Bus phase on a detached thread and give up after a few seconds; a
+/// timed-out thread is leaked (it holds nothing but a bus connection), and
+/// a migration landing late is harmless.
+const DBUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn start_transient_scope_bounded(scope: String, pid: u32) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tauri::async_runtime::block_on(start_transient_scope(&scope, pid));
+        let _ = tx.send(result.map_err(|e| e.to_string()));
+    });
+    match rx.recv_timeout(DBUS_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "no reply from the session bus / systemd user manager within {}s",
+            DBUS_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// Move `pid` into a fresh transient scope on the systemd *user* manager
@@ -237,15 +282,94 @@ fn cunescape_relax(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Does `<id>.desktop` exist where the portal's `g_desktop_app_info_new`
-/// will look? Advisory only (the check runs in the portal's process with its
-/// own environment) — this powers log lines, never control flow the portal
-/// disagrees with in the failing direction.
-fn desktop_file_installed(id: &str) -> bool {
+/// Would the portal's `g_desktop_app_info_new` accept `id`? GLib does more
+/// than stat the file: it parses it and REJECTS an entry whose Exec argv0
+/// does not resolve to an executable (absolute path, else $PATH search) —
+/// a bare existence check would log success while the portal still refuses.
+/// Ok carries the satisfying file; Err says precisely which half is broken.
+/// Advisory only (the real check runs in the portal's process with its own
+/// environment): powers log lines, never control flow.
+fn desktop_file_status(id: &str) -> Result<PathBuf, String> {
     let name = format!("{id}.desktop");
-    xdg_data_dirs()
+    let Some(file) = xdg_data_dirs()
         .iter()
-        .any(|dir| dir.join("applications").join(&name).is_file())
+        .map(|dir| dir.join("applications").join(&name))
+        .find(|p| p.is_file())
+    else {
+        return Err(format!("no {name} in the XDG applications dirs"));
+    };
+    let content = std::fs::read_to_string(&file)
+        .map_err(|e| format!("{} is unreadable: {e}", file.display()))?;
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    match exec_resolves(&content, &path_dirs) {
+        Ok(()) => Ok(file),
+        Err(why) => Err(format!("{}: {why}", file.display())),
+    }
+}
+
+/// The GLib-essential Exec validation, pure for testing: the
+/// `[Desktop Entry]` group must carry an Exec whose argv0 resolves to an
+/// executable — an argv0 with a path separator is checked directly, a bare
+/// name is searched in `path_dirs`.
+fn exec_resolves(content: &str, path_dirs: &[PathBuf]) -> Result<(), String> {
+    let argv0 = exec_argv0(content)
+        .ok_or("no Exec key in its [Desktop Entry] group (GLib rejects the file)")?;
+    let found = if argv0.contains('/') {
+        is_executable(Path::new(&argv0))
+    } else {
+        path_dirs.iter().any(|dir| is_executable(&dir.join(&argv0)))
+    };
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "its Exec argv0 '{argv0}' does not resolve to an executable, \
+             so GLib rejects the file (and the portal the app id)"
+        ))
+    }
+}
+
+/// argv0 of the `[Desktop Entry]` group's Exec key: the first
+/// double-quoted or whitespace-delimited token, mirroring how GLib's
+/// `g_shell_parse_argv` would split it for the common cases.
+fn exec_argv0(content: &str) -> Option<String> {
+    let mut in_entry = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(group) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_entry = group == "Desktop Entry";
+            continue;
+        }
+        if !in_entry || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "Exec" {
+            continue;
+        }
+        let value = value.trim();
+        let argv0 = match value.strip_prefix('"') {
+            Some(rest) => rest.split('"').next().unwrap_or_default(),
+            None => value.split_whitespace().next().unwrap_or_default(),
+        };
+        return if argv0.is_empty() {
+            None
+        } else {
+            Some(argv0.to_string())
+        };
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 fn xdg_data_dirs() -> Vec<PathBuf> {
@@ -357,5 +481,63 @@ mod tests {
         assert_eq!(cunescape_relax("a\\xZZb"), "a\\xZZb");
         assert_eq!(cunescape_relax("trailing\\x2"), "trailing\\x2");
         assert_eq!(cunescape_relax("plain"), "plain");
+    }
+
+    const OUR_ID: &str = "dev.tiro.app";
+
+    #[test]
+    fn own_id_no_ops_foreign_id_migrates() {
+        // Only a unit deriving OUR id may skip migration; inheriting a
+        // terminal's app scope must not leave us identified as the terminal.
+        assert!(!should_migrate(
+            Some("app-dev.tiro.app-41234.scope"),
+            OUR_ID
+        ));
+        assert!(!should_migrate(
+            Some("app-dev.tiro.app@deadbeef.service"),
+            OUR_ID
+        ));
+        assert!(should_migrate(
+            Some("app-org.kde.konsole-1234.scope"),
+            OUR_ID
+        ));
+        assert!(should_migrate(Some("app-Alacritty-77.scope"), OUR_ID));
+        assert!(should_migrate(Some("tmux-spawn-c0a11fb2.scope"), OUR_ID));
+        assert!(should_migrate(None, OUR_ID));
+    }
+
+    #[test]
+    fn exec_argv0_extraction() {
+        let entry = "[Desktop Entry]\nType=Application\nExec=/usr/bin/tiro --flag\n";
+        assert_eq!(exec_argv0(entry).as_deref(), Some("/usr/bin/tiro"));
+        let quoted = "[Desktop Entry]\nExec=\"/opt/spaced dir/tiro\" %U\n";
+        assert_eq!(exec_argv0(quoted).as_deref(), Some("/opt/spaced dir/tiro"));
+        let spaced_eq = "[Desktop Entry]\nExec = tiro\n";
+        assert_eq!(exec_argv0(spaced_eq).as_deref(), Some("tiro"));
+        assert_eq!(exec_argv0("[Desktop Entry]\nName=Tiro\n"), None);
+        // Exec outside [Desktop Entry] (e.g. a Desktop Action) is GLib-invisible
+        assert_eq!(
+            exec_argv0("[Desktop Action new]\nExec=/bin/sh\n[Desktop Entry]\nName=T\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn exec_resolution_mirrors_glib() {
+        // Absolute argv0: checked directly, PATH irrelevant.
+        let abs = "[Desktop Entry]\nExec=/bin/sh -c true\n";
+        assert!(exec_resolves(abs, &[]).is_ok());
+        // Bare argv0: found via the given PATH dirs.
+        let bare = "[Desktop Entry]\nExec=sh\n";
+        assert!(exec_resolves(bare, &[PathBuf::from("/usr/bin")]).is_ok());
+        // Missing binary: GLib would reject the file -> so do we.
+        let missing = "[Desktop Entry]\nExec=definitely-not-a-real-binary-4213\n";
+        let err = exec_resolves(missing, &[PathBuf::from("/usr/bin")]).expect_err("must fail");
+        assert!(err.contains("definitely-not-a-real-binary-4213"), "{err}");
+        assert!(err.contains("does not resolve"), "{err}");
+        // No Exec at all: GLib rejects too.
+        let none = "[Desktop Entry]\nName=Tiro\n";
+        let err = exec_resolves(none, &[]).expect_err("must fail");
+        assert!(err.contains("no Exec"), "{err}");
     }
 }

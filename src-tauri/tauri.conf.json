@@ -62,6 +62,11 @@
         "files": {
           "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
         }
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
+        }
       }
     },
     "icon": [
