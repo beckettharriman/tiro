@@ -193,14 +193,31 @@ pub struct ModelStatus {
     pub bytes: u64,
 }
 
-/// Whether `model`'s resolved GGUF is present under `models_dir`, and how
-/// large the file on disk is.
+/// Whether `model`'s resolved GGUF is present AND complete under
+/// `models_dir`, and how large the file on disk is.
+///
+/// Completeness rule: catalog entries must match their pinned upstream
+/// size exactly — a file truncated by an older build (which renamed short
+/// bodies into place) must read as NOT installed, so the UI offers
+/// Download and a re-download atomically replaces it (the repair path).
+/// Model names outside the catalog have no known size; existence is the
+/// only signal for those.
 pub fn model_status(models_dir: &Path, model: &str, compute_type: &str) -> ModelStatus {
     match fs::metadata(models_dir.join(model_file_name(model, compute_type))) {
-        Ok(md) if md.is_file() => ModelStatus {
-            installed: true,
-            bytes: md.len(),
-        },
+        Ok(md) if md.is_file() => {
+            let expected = catalog_find(model).map(|m| m.size_bytes(compute_type));
+            if expected.is_none_or(|e| md.len() == e) {
+                ModelStatus {
+                    installed: true,
+                    bytes: md.len(),
+                }
+            } else {
+                ModelStatus {
+                    installed: false,
+                    bytes: 0,
+                }
+            }
+        }
         _ => ModelStatus {
             installed: false,
             bytes: 0,
@@ -259,8 +276,10 @@ impl Drop for PartGuard {
 /// removes the partial file. Concurrent downloaders of the same file — the
 /// panel, an engine load, the gpu-worker child process — each write their
 /// own temp; whoever renames last wins with an identical complete file, and
-/// a rename loser treats an already-present `dest` as success. `dest` only
-/// ever appears via this rename, so its existence implies a complete file.
+/// a rename loser treats an already-present `dest` of the right size as
+/// success. `dest` only ever appears via this rename, so it is complete —
+/// [`model_status`] additionally re-checks size against the catalog to
+/// repair files truncated by older builds.
 fn download_with(
     url: &str,
     dest: &Path,
@@ -282,6 +301,16 @@ fn download_with(
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    // Content-length is only the on-disk byte count when the body is not
+    // content-encoded (ureq decompresses transparently; the header would
+    // report the compressed length). HF serves the GGUFs identity-encoded
+    // today, but the completeness checks below must not hard-fail if that
+    // ever changes — `expected` is None whenever an encoding is present.
+    let expected = if response.headers().get("content-encoding").is_some() {
+        None
+    } else {
+        total
+    };
     let mut reader = response.into_body().into_reader();
     let part = part_path(dest);
     let mut guard = PartGuard {
@@ -289,11 +318,13 @@ fn download_with(
         keep: false,
     };
     let mut out = fs::File::create(&part).map_err(|e| e.to_string())?;
-    // Socket reads happen on a helper thread feeding a bounded channel:
-    // ureq has no per-read timeout, so a stalled connection (no bytes, no
-    // EOF, no error) would otherwise block this thread — and its DOWNLOADS
-    // entry — forever. The helper exits on EOF, error, or when this side
-    // hangs up (its send fails after we bail out).
+    // Socket reads happen on a helper thread feeding a bounded channel.
+    // ureq 3.3 offers timeout_recv_body, but that caps the WHOLE body —
+    // unusable for multi-GB models on slow links — and has no per-read /
+    // idle timeout, so a stalled connection (no bytes, no EOF, no error)
+    // would otherwise block this thread — and its DOWNLOADS entry —
+    // forever. The helper exits on EOF, error, or when this side hangs up
+    // (its send fails after we bail out).
     let (tx, rx) = mpsc::sync_channel::<std::io::Result<Vec<u8>>>(4);
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 1 << 20];
@@ -319,6 +350,14 @@ fn download_with(
                     return Err(DOWNLOAD_CANCELLED.into());
                 }
                 if last_data.elapsed() >= DOWNLOAD_IO_TIMEOUT {
+                    // Bounded leak, accepted: ureq gives no way to close
+                    // the socket from outside the blocked read (BodyReader
+                    // has no abort handle and can't be split), so the
+                    // helper thread stays parked in read() — holding the
+                    // socket and its 1 MiB buffer — until the OS tears the
+                    // dead connection down (TCP keepalive/RST), then exits
+                    // via the error/EOF path. One parked thread per stall,
+                    // never an unbounded pile-up per download slot.
                     return Err(format!(
                         "download of {label} stalled (no data for {}s)",
                         DOWNLOAD_IO_TIMEOUT.as_secs()
@@ -348,21 +387,25 @@ fn download_with(
             }
         }
     }
-    if let Some(total) = total {
-        if done != total {
+    if let Some(expected) = expected {
+        if done != expected {
             // a truncated body must never be renamed into place — dest's
             // existence is the "complete" signal for everyone else
             return Err(format!(
-                "download of {label} incomplete ({done}/{total} bytes)"
+                "download of {label} incomplete ({done}/{expected} bytes)"
             ));
         }
     }
     out.flush().map_err(|e| e.to_string())?;
     drop(out);
     if let Err(e) = fs::rename(&part, dest) {
-        // Lost a rename race (Windows refuses to replace): the winner's
-        // file is complete, so the model is installed either way.
-        if !dest.is_file() {
+        // Lost a rename race (Windows refuses to replace): success only if
+        // the winner's file is really there at the expected size — never
+        // declare a model installed on existence alone.
+        let winner_ok = fs::metadata(dest)
+            .map(|m| m.is_file() && expected.is_none_or(|want| m.len() == want))
+            .unwrap_or(false);
+        if !winner_ok {
             return Err(format!("finalize of {label} failed: {e}"));
         }
         eprintln!("  {label}: another download completed first");
@@ -390,7 +433,10 @@ pub fn download_model_with(
     fs::create_dir_all(models_dir).map_err(|e| e.to_string())?;
     let file = model_file_name(model, compute_type);
     let path = models_dir.join(&file);
-    if !path.exists() {
+    // model_status, not exists(): a catalog file at the wrong size (e.g.
+    // truncated by an older build) is re-downloaded and atomically
+    // replaced — the engine-load path self-repairs too.
+    if !model_status(models_dir, model, compute_type).installed {
         download_with(&format!("{HF_BASE}{file}"), &path, &file, progress)?;
     }
     Ok(path)
@@ -770,18 +816,55 @@ mod tests {
         assert!(catalog_find("nope").is_none());
     }
 
+    /// Create a sparse file of exactly `len` bytes (no need to write GBs).
+    fn sparse_file(path: &std::path::Path, len: u64) {
+        let f = std::fs::File::create(path).unwrap();
+        f.set_len(len).unwrap();
+    }
+
     #[test]
     fn model_status_reports_install_state_and_size() {
         let dir = TempDir::new().unwrap();
         let st = model_status(dir.path(), "tiny.en", "int8");
         assert!(!st.installed);
         assert_eq!(st.bytes, 0);
-        std::fs::write(dir.path().join("ggml-tiny.en-q8_0.bin"), b"stub").unwrap();
+        // catalog entry at its exact pinned size -> installed
+        let expected = catalog_find("tiny.en").unwrap().q8_bytes;
+        sparse_file(&dir.path().join("ggml-tiny.en-q8_0.bin"), expected);
         let st = model_status(dir.path(), "tiny.en", "int8");
         assert!(st.installed);
-        assert_eq!(st.bytes, 4);
+        assert_eq!(st.bytes, expected);
         // a different compute_type resolves to a different (absent) file
         assert!(!model_status(dir.path(), "tiny.en", "float16").installed);
+    }
+
+    #[test]
+    fn truncated_or_oversized_catalog_files_read_as_not_installed() {
+        let dir = TempDir::new().unwrap();
+        let expected = catalog_find("tiny.en").unwrap().q8_bytes;
+        let path = dir.path().join("ggml-tiny.en-q8_0.bin");
+        // truncated (older builds renamed short bodies into place)
+        sparse_file(&path, expected - 1);
+        let st = model_status(dir.path(), "tiny.en", "int8");
+        assert!(!st.installed, "truncated file must offer re-download");
+        assert_eq!(st.bytes, 0);
+        // oversized is just as wrong
+        sparse_file(&path, expected + 1);
+        assert!(!model_status(dir.path(), "tiny.en", "int8").installed);
+        // repaired to the exact size -> installed again
+        sparse_file(&path, expected);
+        assert!(model_status(dir.path(), "tiny.en", "int8").installed);
+    }
+
+    #[test]
+    fn unknown_models_fall_back_to_existence() {
+        // No pinned size outside the catalog: existence is the only signal.
+        let dir = TempDir::new().unwrap();
+        assert!(!model_status(dir.path(), "distil-x", "int8").installed);
+        std::fs::write(dir.path().join("ggml-distil-x-q8_0.bin"), b"stub").unwrap();
+        let st = model_status(dir.path(), "distil-x", "int8");
+        assert!(st.installed);
+        assert_eq!(st.bytes, 4);
     }
 
     /// Real-network check of the model manager's download path; run manually
