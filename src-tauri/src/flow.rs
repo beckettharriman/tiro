@@ -864,6 +864,7 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
                 transcribe::get_vocab_prompt(&app_dir(), &cfg),
             )
         };
+        let corrections = crate::vocab::read_corrections(&app_dir());
         /// What serves this take, cloned out of the engine under a short
         /// lock; the transcription runs on the Arcs with the lock released.
         enum Serving {
@@ -993,7 +994,12 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             return Outcome::Empty;
         }
         // STATE-3: never copy "" — all-fillers falls back to verbatim.
-        let text = clipboard::clipboard_text(&verbatim, &cleanup_mode);
+        // Vocabulary corrections apply to the clipboard/clean layer only;
+        // the verbatim transcript below is logged unchanged.
+        let text = crate::vocab::apply_corrections(
+            &clipboard::clipboard_text(&verbatim, &cleanup_mode),
+            &corrections,
+        );
         if let Err(e) = clipboard::copy(&text) {
             eprintln!("clipboard copy failed: {e}");
             return Outcome::CopyFail;

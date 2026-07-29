@@ -341,6 +341,47 @@ pub fn reposition_pill_if_visible(app: &AppHandle) {
 /// `_summon_front`: bring the panel above the active window and focus it.
 /// A TOPMOST->NOTOPMOST flip raises it without leaving it always-on-top
 /// (unless pinned). Harmless if the panel was hidden again meanwhile:
+/// Panel geometry (logical px): the design's compact and expanded surfaces.
+/// Height never changes; only the width doubles for the advanced area.
+pub const PANEL_W_COMPACT: u32 = 400;
+pub const PANEL_W_EXPANDED: u32 = 800;
+pub const PANEL_H: u32 = 560;
+
+/// Resize the panel window for the advanced (expanded) surface. The window
+/// is borderless and pinned by min==max size constraints (that is what
+/// keeps a `resizable: true` frameless window fixed on every WM), so the
+/// constraints and the size move together. Expanding can push the right
+/// edge past the work area — clamp x so the whole surface stays visible
+/// (the Moved event this triggers persists the shift like any drag).
+pub fn set_panel_expanded(app: &AppHandle, on: bool) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let Some(w) = app.get_webview_window("panel") else {
+            return;
+        };
+        let width = if on {
+            PANEL_W_EXPANDED
+        } else {
+            PANEL_W_COMPACT
+        };
+        let size = tauri::LogicalSize::new(width, PANEL_H);
+        let _ = w.set_min_size(Some(size));
+        let _ = w.set_max_size(Some(size));
+        let _ = w.set_size(size);
+        if on {
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let phys_w = (f64::from(width) * scale).round() as i32;
+            if let (Ok(pos), Some((wl, _, wr, _))) = (w.outer_position(), active_work_area(&app)) {
+                // left-align when the work area is narrower than the panel
+                let x = pos.x.min(wr - phys_w).max(wl);
+                if x != pos.x {
+                    let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                }
+            }
+        }
+    });
+}
+
 /// set_focus is a no-op on a non-visible window (tao GTK checks), so this
 /// can never re-map a window a later press hid.
 pub fn summon_front(app: &AppHandle) {

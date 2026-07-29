@@ -206,16 +206,21 @@ pub fn model_status(models_dir: &Path, model: &str, compute_type: &str) -> Model
 }
 
 fn download(url: &str, dest: &Path, label: &str) -> Result<(), String> {
-    download_with(url, dest, label, &mut |_, _| {})
+    download_with(url, dest, label, &mut |_, _| true)
 }
 
+/// The error string a cancelled download surfaces as — callers treat it as
+/// a quiet outcome, not a failure.
+pub const DOWNLOAD_CANCELLED: &str = "cancelled";
+
 /// Stream `url` to `dest` (via a `.part` file), reporting every chunk to
-/// `progress` as `(bytes_done, content_length)`.
+/// `progress` as `(bytes_done, content_length)`; a `false` return aborts
+/// the pull and removes the partial file.
 fn download_with(
     url: &str,
     dest: &Path,
     label: &str,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    progress: &mut dyn FnMut(u64, Option<u64>) -> bool,
 ) -> Result<(), String> {
     eprintln!("downloading {label} from {url}");
     let response = ureq::get(url)
@@ -239,7 +244,12 @@ fn download_with(
         }
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         done += n as u64;
-        progress(done, total);
+        if !progress(done, total) {
+            drop(out);
+            let _ = fs::remove_file(&part);
+            eprintln!("  {label}: download cancelled");
+            return Err(DOWNLOAD_CANCELLED.into());
+        }
         if let Some(total) = total {
             let pct = (done * 100 / total) as u32;
             if pct >= last_pct + 10 {
@@ -257,7 +267,7 @@ fn download_with(
 
 /// Path to the GGUF for `model`, downloading it on first use.
 pub fn ensure_model(models_dir: &Path, model: &str, compute_type: &str) -> Result<PathBuf, String> {
-    download_model_with(models_dir, model, compute_type, &mut |_, _| {})
+    download_model_with(models_dir, model, compute_type, &mut |_, _| true)
 }
 
 /// `ensure_model` with a progress callback — the model manager's download
@@ -267,7 +277,7 @@ pub fn download_model_with(
     models_dir: &Path,
     model: &str,
     compute_type: &str,
-    progress: &mut dyn FnMut(u64, Option<u64>),
+    progress: &mut dyn FnMut(u64, Option<u64>) -> bool,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(models_dir).map_err(|e| e.to_string())?;
     let file = model_file_name(model, compute_type);
@@ -677,6 +687,7 @@ mod tests {
         let path = download_model_with(dir.path(), "tiny.en", "int8", &mut |done, total| {
             events += 1;
             last = (done, total);
+            true
         })
         .unwrap();
         assert!(path.ends_with("ggml-tiny.en-q8_0.bin"));
@@ -687,8 +698,11 @@ mod tests {
         assert!(events > 10, "progress fired {events} times");
         // second call: already installed -> no progress events
         events = 0;
-        let again =
-            download_model_with(dir.path(), "tiny.en", "int8", &mut |_, _| events += 1).unwrap();
+        let again = download_model_with(dir.path(), "tiny.en", "int8", &mut |_, _| {
+            events += 1;
+            true
+        })
+        .unwrap();
         assert_eq!(again, path);
         assert_eq!(events, 0);
     }

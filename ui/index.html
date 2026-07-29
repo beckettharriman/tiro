@@ -1,24 +1,345 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tiro</title>
-  <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="settings.css" />
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tiro</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="settings.css">
 </head>
 <body>
-  <!-- The .panel fills the frameless, transparent OS window. Both the panel
-       page and the slide-over Settings page live inside .slidebox. app.js
-       builds their inner DOM. -->
-  <div class="panel" id="panel" role="dialog" aria-label="Tiro">
-    <div class="slidebox" id="slidebox">
-      <div class="page panel-page" id="panelPage" aria-hidden="false" style="left:0"></div>
-      <div class="page settings-page" id="settingsPage" aria-hidden="true" style="left:100%"></div>
+
+<div class="panel" id="panel" role="dialog" aria-label="Tiro">
+  <header class="hdr" id="hdr">
+    <div class="wordmark">Tiro</div>
+    <div class="hdr-btns">
+      <button class="ghost" id="pinBtn" aria-pressed="false" title="Pin">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16h14v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/></svg>
+      </button>
+      <button class="ghost" id="expandBtn" title="Expand">
+        <svg class="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        <svg class="i-collapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+      </button>
+      <button class="ghost" id="closeBtn" title="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
+  </header>
+
+  <div class="compact-body">
+    <div class="microw">
+      <button class="mic-cap" id="micCap" title="Choose microphone" aria-expanded="false">
+        <span class="mic-name" id="micName"></span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="mic-menu" id="micMenu" role="listbox"></div>
+      <button class="recbtn" id="recBtn" title="Record">
+        <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+      </button>
+    </div>
+
+    <div class="list" id="list"></div>
+
+    <div class="empty">
+      <div class="keys" id="emptyKeys"></div>
+      <p>Press the hotkey anywhere to start dictating. Your words land here, ready to copy.</p>
+    </div>
+
+    <footer class="ftr">
+      <span class="engine">&nbsp;</span>
+      <button class="ghost" id="gearBtn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </footer>
   </div>
 
-  <script src="bridge.js"></script>
-  <script src="app.js"></script>
+  <!-- ============ ADVANCED ============ -->
+  <div class="adv-body">
+    <nav class="side">
+      <button class="navitem" data-view="history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        Transcribe
+      </button>
+      <button class="navitem on" data-view="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        Settings
+      </button>
+      <button class="navitem" data-view="vocab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        Vocabulary
+      </button>
+      <button class="navitem" data-view="models">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+        Models
+      </button>
+      <span class="engine">&nbsp;</span>
+    </nav>
+
+    <div class="main" id="main">
+
+      <!-- TRANSCRIBE VIEW -->
+      <div class="view" id="view-history">
+        <div class="toolbar">
+          <span class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="searchInput" placeholder="Search transcripts" autocomplete="off" spellcheck="false">
+            <button class="ghost clr" id="searchClr" title="Clear">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </span>
+          <span class="selwrap"><select class="sel" id="selMicT"></select></span>
+          <button class="recbtn" id="recBtn2" title="Record">
+            <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+            <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          </button>
+        </div>
+        <div id="advList"></div>
+        <div class="nores" id="noRes">No transcripts match “<span id="noResQ"></span>”.</div>
+        <div class="pager" id="pager">
+          <button class="ghost" id="pagerOlder" title="Older">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <span class="pagerday" id="pagerDay">Today</span>
+          <button class="ghost" id="pagerNewer" title="Newer" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- SETTINGS VIEW -->
+      <div class="view on" id="view-settings">
+
+        <!-- ENGINE -->
+        <section class="grp">
+          <h2 class="grp-title">Engine</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Now running</div></div>
+              <span class="nowrun" id="nowRun">&nbsp;</span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Compute device</div></div>
+              <div class="seg" data-seg="power">
+                <button data-value="auto" class="on">Auto Switch</button><button data-value="cpu">Always CPU</button><button data-value="gpu">Always GPU</button>
+              </div>
+            </div>
+            <div class="row" id="rowModel" style="display:none;">
+              <div class="lbl"><div class="name">Model</div></div>
+              <span class="selwrap"><select class="sel" id="selModel"></select></span>
+            </div>
+            <div class="row" id="rowBattery">
+              <div class="lbl"><div class="name">Model on battery</div></div>
+              <span class="selwrap"><select class="sel" id="selBattery"></select></span>
+            </div>
+            <div class="row" id="rowPlugged">
+              <div class="lbl"><div class="name">Model when plugged in</div></div>
+              <span class="selwrap"><select class="sel" id="selPlugged"></select></span>
+            </div>
+          </div>
+          <p class="grp-help">Auto Switch uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power.</p>
+        </section>
+
+        <!-- AUDIO -->
+        <section class="grp">
+          <h2 class="grp-title">Audio</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Sound cues</div><div class="sub">A soft tick when recording starts and stops.</div></div>
+              <button class="sw" id="swCues" role="switch" aria-checked="true" aria-label="Sound cues"></button>
+            </div>
+            <div class="row" id="rowVolume">
+              <div class="lbl"><div class="name">Volume</div></div>
+              <span class="rngwrap">
+                <input class="rng" type="range" min="0" max="100" value="60" id="rngVol">
+                <span class="rngval" id="volVal">60%</span>
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- CAPTURE -->
+        <section class="grp">
+          <h2 class="grp-title">Capture</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Recording pill</div><div class="sub">A small floating indicator while you dictate.</div></div>
+              <button class="sw" id="swPill" role="switch" aria-checked="true" aria-label="Recording pill"></button>
+            </div>
+            <div class="row" id="rowPillPos">
+              <div class="lbl"><div class="name">Pill position</div></div>
+              <div class="seg" data-seg="pillpos">
+                <button data-value="top">Top</button><button data-value="bottom" class="on">Bottom</button>
+              </div>
+            </div>
+            <div class="row" id="rowPillDist">
+              <div class="lbl"><div class="name">Distance from edge</div></div>
+              <span class="rngwrap">
+                <input class="rng" type="range" min="0" max="400" value="110" id="rngDist">
+                <span class="rngval" id="distVal">110 px</span>
+              </span>
+            </div>
+            <div class="row">
+              <div class="lbl">
+                <div class="name">Clipboard cleanup</div>
+                <div class="sub" id="cleanupSub">Light cleanup fixes spacing and capitalization on copy.</div>
+              </div>
+              <div class="seg" data-seg="cleanup">
+                <button data-value="off">Off</button><button data-value="light" class="on">Light</button><button data-value="fillers">+ Fillers</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Smart vocabulary</div><div class="sub">Learns the names and jargon you correct most.</div></div>
+              <button class="sw" id="swVocab" role="switch" aria-checked="true" aria-label="Smart vocabulary"></button>
+            </div>
+          </div>
+        </section>
+
+        <!-- INPUT -->
+        <section class="grp">
+          <h2 class="grp-title">Input</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Microphone</div></div>
+              <span class="selwrap"><select class="sel" id="selMic"></select></span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Input volume</div></div>
+              <span class="rngwrap">
+                <input class="rng" type="range" min="0" max="100" value="75" id="rngGain" style="width:160px;">
+                <span class="rngval" id="gainVal">75%</span>
+              </span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Input level</div><div class="sub" id="levelSub">Live from the selected microphone.</div></div>
+              <span class="rngwrap">
+                <canvas class="wave" id="waveCanvas" width="320" height="56"></canvas>
+                <span class="rngval" id="levelVal">0%</span>
+              </span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Test microphone</div><div class="sub" id="testSub">Echoes your mic back through your active output while on.</div></div>
+              <button class="mini" id="testBtn">Test</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- SHORTCUTS -->
+        <section class="grp">
+          <h2 class="grp-title">Shortcuts</h2>
+          <div class="card" id="shortcutsCard"></div>
+          <p class="grp-help">Click Edit, then press the new combination.</p>
+        </section>
+
+        <!-- STORAGE -->
+        <section class="grp">
+          <h2 class="grp-title">Storage</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Save transcripts</div><div class="sub">Keep a plain-text copy of everything you dictate.</div></div>
+              <button class="sw" id="swSave" role="switch" aria-checked="true" aria-label="Save transcripts"></button>
+            </div>
+            <div class="banner" id="fallbackBanner">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <span><b>Saving to fallback folder</b> — chosen folder unavailable. Transcripts are landing in <span style="font-family:var(--mono); font-size:11px;" id="fallbackPath"></span> until it returns.</span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Save transcripts to</div></div>
+              <span class="mono" id="savePath"></span>
+              <button class="mini" id="changePathBtn">Change…</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- APPEARANCE -->
+        <section class="grp">
+          <h2 class="grp-title">Appearance</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Theme</div></div>
+              <div class="seg" data-seg="theme" id="themeSeg">
+                <button data-value="light">Light</button><button data-value="dark" class="on">Dark</button><button data-value="system">Follow system</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Transparency</div></div>
+              <span class="rngwrap">
+                <input class="rng" type="range" min="0.30" max="0.95" step="0.01" value="0.72" id="rngGlass">
+                <span class="rngval" id="glassVal">0.72</span>
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <!-- SYSTEM -->
+        <section class="grp">
+          <h2 class="grp-title">System</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Launch at login</div></div>
+              <button class="sw" id="swLogin" role="switch" aria-checked="true" aria-label="Launch at login"></button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- VOCABULARY VIEW -->
+      <div class="view" id="view-vocab">
+
+        <section class="grp">
+          <h2 class="grp-title">Hot words</h2>
+          <p class="grp-lede">Hot words help Tiro spell your words right.</p>
+          <div class="card">
+            <div class="vadd" id="hwAdd">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              <input type="text" id="hwInput" placeholder="Add a word or name…" autocomplete="off" spellcheck="false">
+              <span class="kbd sm enterhint">↵</span>
+            </div>
+            <div class="chips hair" id="hwChips"></div>
+            <div class="vempty hair" id="hwEmpty">No hot words yet. Add the names and jargon Tiro keeps missing.</div>
+          </div>
+        </section>
+
+        <section class="grp">
+          <h2 class="grp-title">Corrections</h2>
+          <p class="grp-lede">Corrections fix what it still gets wrong.</p>
+          <div class="card">
+            <div id="corrList"></div>
+            <div class="vempty" id="corrEmpty">No corrections yet. Teach a fix once and it applies to every transcript.</div>
+            <div class="cadd hair">
+              <input class="vinput" id="cHeard" placeholder="When Tiro hears…" autocomplete="off" spellcheck="false">
+              <svg class="arr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+              <input class="vinput" id="cWritten" placeholder="write…" autocomplete="off" spellcheck="false">
+              <button class="ghost" id="cAddBtn" title="Add correction" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- MODELS VIEW -->
+      <div class="view" id="view-models">
+
+        <section class="grp">
+          <h2 class="grp-title">Installed</h2>
+          <div class="card" id="installedCard"></div>
+          <p class="grp-help">Installed models are ready offline. The Engine settings choose which one runs.</p>
+        </section>
+
+        <section class="grp">
+          <h2 class="grp-title">Available</h2>
+          <div class="card" id="modelsCard"></div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="bridge.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

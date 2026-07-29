@@ -1,239 +1,412 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tiro — Pill</title>
-  <link rel="stylesheet" href="styles.css" />
-  <style>
-  /* ── pill_position=top: mirror the VERTICAL direction of the enter/exit
-     animations. Only `animation-name` is overridden — duration, easing,
-     fill and opacity stay exactly what the `.pill.in` / `.pill.out`
-     shorthands in styles.css declare, so bottom placement is untouched and
-     top placement differs only in the sign of translateY (and the matching
-     transform-origin for the scale flourish). The reduced-motion rule in
-     styles.css uses `animation: none !important` and still wins here. */
-  .pill-dock.top .pill { transform-origin: top center; }
-  @keyframes pillInTop {
-    from { opacity: 0; transform: translateY(-16px) scale(.86); }
-    to   { opacity: 1; transform: translateY(0)     scale(1); }
-  }
-  @keyframes pillOutTop {
-    from { opacity: 1; transform: translateY(0)    scale(1); }
-    to   { opacity: 0; transform: translateY(-12px) scale(.9); }
-  }
-  .pill-dock.top .pill.in  { animation-name: pillInTop; }
-  .pill-dock.top .pill.out { animation-name: pillOutTop; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tiro — Recording Pill</title>
+<style>
+:root{
+  --ink: 255,255,255;
+  --ink-inv: 16,16,19;
+  --glass-rgb: 30,30,33;
+  --glass-a: 0.72;
+  --hairline: rgba(255,255,255,.14);
+  --highlight: rgba(255,255,255,.10);
+  --r-surface: 14px;
+  --r-btn: 9px;
+  --r-pill: 980px;
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px; --s-8: 32px;
+  --ease: cubic-bezier(.32,.72,0,1);
+  --t-fast: 160ms;
+  --t-med: 280ms;
+  --t-enter: 340ms;
+  --t-exit: 260ms;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, "Segoe UI", sans-serif;
+}
+[data-theme="light"]{
+  --ink: 20,20,24;
+  --ink-inv: 252,252,254;
+  --glass-rgb: 252,252,254;
+  --hairline: rgba(20,20,24,.16);
+  --highlight: rgba(255,255,255,.55);
+}
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ height:100%; }
+body{
+  font-family:var(--font);
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+  display:grid; place-items:center;
+  background:transparent; /* frameless transparent OS window */
+}
+a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
+
+.stage{ height:76px; width:100%; display:grid; place-items:center; }
+
+/* ============ PILL ============ */
+.pill{
+  position:relative;
+  height:44px;
+  display:inline-flex; align-items:center;
+  padding:0 var(--s-4);
+  border-radius:var(--r-pill);
+  background:rgba(var(--glass-rgb), var(--glass-a));
+  backdrop-filter: blur(34px) saturate(180%);
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  border:0.5px solid var(--hairline);
+  box-shadow: inset 0 1px 0 var(--highlight); /* no drop shadow */
+  color:rgba(var(--ink),.92);
+  overflow:hidden;
+  white-space:nowrap;
+  transition: width 380ms var(--ease);
+}
+.pill::before{ /* grain */
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+  opacity:.025;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.pill .inner{
+  position:relative; display:inline-flex; align-items:center; gap:var(--s-2);
+}
+/* error: urgency via weight and brighter ink, ring stays consistent */
+.pill.error .lbl{ font-weight:600; color:rgba(var(--ink),.95); }
+
+/* entrance / exit — bottom placement rises in; top placement (data-pos)
+   mirrors the vertical direction only, per the design's motion */
+@keyframes pill-enter{
+  0%{ opacity:0; transform:translateY(14px) scale(.96); }
+  100%{ opacity:1; transform:none; }
+}
+@keyframes pill-exit{
+  0%{ opacity:1; transform:none; }
+  100%{ opacity:0; transform:translateY(10px) scale(.97); }
+}
+@keyframes pill-enter-top{
+  0%{ opacity:0; transform:translateY(-14px) scale(.96); }
+  100%{ opacity:1; transform:none; }
+}
+@keyframes pill-exit-top{
+  0%{ opacity:1; transform:none; }
+  100%{ opacity:0; transform:translateY(-10px) scale(.97); }
+}
+.pill.enter{ animation: pill-enter var(--t-enter) var(--ease) both; }
+.pill.exit{ animation: pill-exit var(--t-exit) var(--ease) both; }
+body[data-pos="top"] .pill.enter{ animation-name: pill-enter-top; }
+body[data-pos="top"] .pill.exit{ animation-name: pill-exit-top; }
+/* content swap: leaving pieces sink softly; arriving pieces settle with weight */
+@keyframes inner-out{
+  to{ opacity:0; transform:scale(.9); filter:blur(2px); }
+}
+.pill .inner.stale{ animation: inner-out 130ms var(--ease) both; }
+@keyframes inner-in{
+  0%{ opacity:0; transform:scale(.92); }
+  100%{ opacity:1; transform:none; }
+}
+.pill .inner.fresh{ animation: inner-in 340ms var(--ease) both; }
+/* label reveals from behind its glyph */
+@keyframes lbl-in{
+  0%{ opacity:0; transform:translateX(-7px); clip-path:inset(0 100% 0 0); }
+  100%{ opacity:1; transform:none; clip-path:inset(0 -2px 0 0); }
+}
+.pill .inner.fresh .lbl{ animation: lbl-in 400ms var(--ease) 60ms both; }
+/* glyph pops with settle */
+@keyframes glyph-in{
+  0%{ opacity:0; transform:scale(.55); }
+  100%{ opacity:1; transform:none; }
+}
+.pill .inner.fresh .glyph{ animation: glyph-in 340ms var(--ease) both; }
+
+/* pieces */
+.lbl{ font-size:13px; font-weight:500; letter-spacing:-0.006em; color:rgba(var(--ink),.88); }
+.glyph{ width:14px; height:14px; flex:none; color:rgba(var(--ink),.9); }
+.glyph.check path{ stroke-dasharray:22; stroke-dashoffset:22; }
+.pill .inner.fresh .glyph.check path{ animation: draw .35s var(--ease) .1s forwards; }
+@keyframes draw{ to{ stroke-dashoffset:0; } }
+.barecheck{
+  width:76px; display:inline-flex; justify-content:center; flex:none;
+}
+.barecheck .glyph{ width:19px; height:19px; }
+canvas.viz{ display:block; flex:none; }
+
+@media (prefers-reduced-motion: reduce){
+  .pill.enter, .pill.exit{ animation-duration:1ms; }
+  .pill .inner.fresh, .pill .inner.stale,
+  .pill .inner.fresh .lbl, .pill .inner.fresh .glyph{ animation-duration:1ms; animation-delay:0ms; }
+  .pill{ transition-duration:1ms; }
+  /* functional motion kept: waveform, transcribing pulse */
+}
+</style>
 </head>
-<body>
-  <!-- The pill is its OWN frameless, transparent OS window. The dock just
-       centers the floating island; .pill carries the live state. -->
-  <div class="pill-dock" id="pillDock"></div>
+<body data-theme="dark">
 
-  <script src="bridge.js"></script>
-  <script>
-  (function () {
-    "use strict";
+<div class="stage" id="pillDock"><div class="pill" id="pill"><div class="inner"></div></div></div>
 
-    /* ── Icons used by the pill (ported verbatim from components.jsx) ──── */
-    const SVG_CHECKCIRCLE =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round" class="done-check">' +
-      '<circle cx="12" cy="12" r="9"></circle>' +
-      '<path d="M8 12.4l2.6 2.6L16 9.4"></path></svg>';
+<script src="bridge.js"></script>
+<script>
+(function () {
+"use strict";
 
-    /* calm warning glyph for the "error" state — circled "!", uses gray accent
-       (styled via .err-mark in styles.css), deliberately NOT the green check. */
-    const SVG_WARN =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"' +
-      ' stroke-linecap="round" stroke-linejoin="round" class="err-mark">' +
-      '<circle cx="12" cy="12" r="9"></circle>' +
-      '<path d="M12 7.5v5.2"></path>' +
-      '<circle cx="12" cy="16.4" r=".4" fill="currentColor" stroke="none"></circle></svg>';
-
-    const dock = document.getElementById("pillDock");
-    const BARS = 14;
-
-    let waveRAF = null;          // requestAnimationFrame handle for the waveform
-    let curState = "off";        // recording | transcribing | done | error | off
-
-    /* ── pill placement (top|bottom) — flips animation direction only ────
-       The backend moves the OS window; in here the only thing that changes
-       is the vertical direction of the enter/exit keyframes (the `top`
-       class on the dock, see the <style> block above). The pill window
-       receives no settings push, so the cached value is refreshed from
-       get_state at startup and on every pillSet call (the only pushes this
-       window gets). applyPillPos is a no-op when the value is unchanged so
-       an in-flight animation is never restarted in the steady state; when
-       the setting really did change, the class flips within the invoke
-       round-trip (~ms into the .34s entrance), so the very next animation
-       runs in the new direction. */
-    let pillPosTop = false;
-    function applyPillPos(pos) {
-      const top = pos === "top";
-      if (top === pillPosTop) return;
-      pillPosTop = top;
-      dock.classList.toggle("top", top);
-    }
-    function refreshPillPos() {
-      if (window.pywebview && window.pywebview.api) {
-        Promise.resolve(window.pywebview.api.get_state()).then(function (s) {
-          if (s && s.settings) applyPillPos(s.settings.pillPosition);
-        }).catch(function () {});
+/* ---------- level bus: the backend calls window.pillLevel(x), 0..1, ~15/sec ---------- */
+(function(){
+  const subs = [];
+  window.pillLevel = function(x){
+    if (typeof x !== "number" || !isFinite(x)) return;
+    subs.forEach(f => f(Math.max(0, Math.min(1, x))));
+  };
+  window.pillLevel.subscribe = f => subs.push(f);
+})();
+/* mock driver (standalone file:// preview only): plausible speech —
+   bursts, pauses, breaths. The real app pushes live mic levels instead. */
+if (!(window.pywebview && window.pywebview.api)) (function(){
+  let mode = 'speech', modeEnd = 0;
+  setInterval(() => {
+    if (window.pywebview && window.pywebview.api) return; // bridge arrived
+    const now = performance.now();
+    if (now > modeEnd){
+      if (mode === 'speech'){
+        mode = Math.random() < 0.35 ? 'breath' : 'pause';
+        modeEnd = now + (mode === 'pause' ? 300 + Math.random()*1200 : 150 + Math.random()*300);
       } else {
-        /* standalone file:// preview (no backend): default bottom; honor a
-           mock position from the harness (global) or the URL, e.g.
-           pill.html?pillPosition=top. Synchronous, so a pillSet right after
-           flipping the mock animates in the new direction. */
-        let q = null;
-        try { q = new URLSearchParams(location.search).get("pillPosition"); } catch (e) { /* ignore */ }
-        applyPillPos(window.__mockPillPosition || q || "bottom");
+        mode = 'speech';
+        modeEnd = now + 450 + Math.random()*1700;
       }
     }
+    let v;
+    if (mode === 'speech') v = 0.30 + 0.65 * Math.random() * Math.abs(Math.sin(now/170));
+    else if (mode === 'breath') v = 0.07 + Math.random()*0.10;
+    else v = 0.02 + Math.random()*0.04;
+    window.pillLevel(v);
+  }, 66);
+})();
 
-    /* ── live mic level (fed by the backend via window.pillLevel) ─────────
-       levelSeen flips true on the first push of a take; until then the
-       waveform keeps its original self-driven animation, so an older
-       backend (no pillLevel evals) renders exactly as before. */
-    let levelSeen = false;
-    let levelTarget = 0;         // latest pushed level, 0..1
-    let levelSmooth = 0;         // eased value the bars render
+/* ---------- svg bits ---------- */
+const SVG = {
+  check: '<svg class="glyph check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  warn:  '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+};
 
-    /* ── live waveform (ported from the Waveform RAF logic in components.jsx) */
-    function startWave(waveEl) {
-      stopWave();
-      const els = waveEl ? Array.from(waveEl.children) : [];
-      const phase = els.map((_, i) => i * 0.7);
-      let t = 0;
-      const tick = () => {
-        t += 0.16;
-        let env, jitter;
-        if (levelSeen) {
-          /* live level drives the envelope: fast attack, slower release,
-             and a small floor so the bars look idle-but-alive at level 0 */
-          levelSmooth += (levelTarget - levelSmooth) *
-                         (levelTarget > levelSmooth ? 0.55 : 0.18);
-          env = 0.06 + 0.94 * levelSmooth;
-          jitter = 0.04;
-        } else {
-          env = 0.5 + 0.5 * Math.sin(t * 0.6);
-          jitter = 0.12;
+/* ---------- visualizers ---------- */
+function makeCanvas(w, h){
+  const c = document.createElement('canvas');
+  c.className = 'viz';
+  const dpr = window.devicePixelRatio || 1;
+  c.width = w*dpr; c.height = h*dpr;
+  c.style.width = w+'px'; c.style.height = h+'px';
+  c.getContext('2d').scale(dpr, dpr);
+  return c;
+}
+function ink(a){
+  const dark = document.body.dataset.theme !== 'light';
+  return (dark ? 'rgba(255,255,255,' : 'rgba(20,20,24,') + a + ')';
+}
+/* unified waveform — one canvas lives across recording ↔ transcribing;
+   bars grow in staggered from center, collapse out staggered from edges */
+function Viz(mode){
+  const W = 76, H = 26, N = 15, bw = 2.5, gap = (W - N*bw) / (N-1);
+  const c = makeCanvas(W, H), ctx = c.getContext('2d');
+  const cur = new Array(N).fill(0), jit = new Array(N).fill(0.6);
+  const mid = (N-1)/2;
+  const prof = [];
+  for (let i = 0; i < N; i++){
+    const d = Math.abs(i - mid) / mid;
+    prof.push(0.35 + 0.65 * Math.cos(d * Math.PI/2));
+  }
+  let think = mode === 'think' ? 1 : 0, t = 0, intro = 0, fold = -1, onFolded = null;
+  const easeOut = p => 1 - Math.pow(1 - p, 3);
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  return { el: c,
+    setMode(m){ mode = m; },
+    collapse(cb){ if (fold < 0){ fold = 0; onFolded = cb; } },
+    onPush(){ for (let i = 0; i < N; i++) jit[i] = 0.35 + 0.65*Math.random(); },
+    frame(env){
+      t += 0.045;
+      think += ((mode === 'think' ? 1 : 0) - think) * 0.07;
+      intro = Math.min(1, intro + 0.045);
+      if (fold >= 0) fold = Math.min(1, fold + 0.055);
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < N; i++){
+        const dC = Math.abs(i - mid) / mid;      /* 0 center → 1 edge */
+        /* recording target */
+        const recH = Math.max(2, env * prof[i] * jit[i] * H);
+        /* transcribing target: traveling crest */
+        const w = Math.max(0, Math.sin(t - i * 0.42));
+        const thinkH = 3 + w*w * 9;
+        const target = recH + (thinkH - recH) * think;
+        cur[i] += (target - cur[i]) * (target > cur[i] ? 0.55 : 0.10);
+        let h = cur[i];
+        let a = 0.85 + ((0.25 + w*w * 0.65) - 0.85) * think;
+        /* entrance: staggered from center */
+        const pin = easeOut(clamp01((intro * 2.2 - dC * 0.9) / 0.55));
+        h *= pin; a *= pin;
+        /* exit: staggered from edges */
+        if (fold >= 0){
+          const pout = easeOut(clamp01((fold * 2.0 - (1 - dC) * 0.8) / 0.55));
+          h *= (1 - pout); a *= (1 - pout);
         }
-        els.forEach((el, i) => {
-          const v = Math.abs(Math.sin(t * 1.9 + phase[i])) *
-                    Math.abs(Math.cos(t * 1.1 + phase[i] * 0.6));
-          const h = 16 + (v * env + Math.random() * jitter) * 84;
-          el.style.height = Math.min(100, h) + "%";
-        });
-        waveRAF = requestAnimationFrame(tick);
-      };
-      waveRAF = requestAnimationFrame(tick);
-    }
-    function stopWave() {
-      if (waveRAF) { cancelAnimationFrame(waveRAF); waveRAF = null; }
-    }
-
-    function el(tag, cls, html) {
-      const n = document.createElement(tag);
-      if (cls) n.className = cls;
-      if (html != null) n.innerHTML = html;
-      return n;
-    }
-
-    /* build the .pill contents for a given state, returns the .pill node.
-       payload is an optional string used by the "error" state for its message. */
-    function buildPill(state, payload) {
-      const pill = el("div", "pill in");
-      pill.setAttribute("role", "status");
-      pill.setAttribute("aria-live", "polite");
-
-      if (state === "recording") {
-        pill.appendChild(el("span", "rec-dot"));
-        pill.appendChild(el("span", "pill-label", "Recording"));
-        const wave = el("div", "wave");
-        for (let i = 0; i < BARS; i++) wave.appendChild(el("i"));
-        pill.appendChild(wave);
-        pill._wave = wave;
-      } else if (state === "transcribing") {
-        pill.appendChild(el("span", "spinner"));
-        pill.appendChild(el("span", "pill-label shimmer", "Transcribing…"));
-      } else if (state === "done") {
-        const wrap = document.createElement("span");
-        wrap.innerHTML = SVG_CHECKCIRCLE;
-        pill.appendChild(wrap.firstChild);
-        pill.appendChild(el("span", "pill-label", "Copied to clipboard"));
-      } else if (state === "error") {
-        // calm, distinct error pill: warning glyph + message text.
-        // Unknown/missing payload falls back to a generic line.
-        pill.classList.add("pill-error");
-        pill.setAttribute("aria-live", "assertive");
-        const wrap = document.createElement("span");
-        wrap.innerHTML = SVG_WARN;
-        pill.appendChild(wrap.firstChild);
-        const msg = (typeof payload === "string" && payload.trim())
-          ? payload.trim() : "Something went wrong";
-        // textContent (via el's html arg is innerHTML) would risk markup, so set
-        // the message as text explicitly to stay safe with arbitrary payloads.
-        const label = el("span", "pill-label pill-msg");
-        label.textContent = msg;
-        pill.appendChild(label);
+        if (h < 0.5 || a <= 0.01) continue;
+        const x = i * (bw + gap);
+        ctx.fillStyle = ink(a.toFixed(3));
+        ctx.beginPath();
+        ctx.roundRect(x, (H - h)/2, bw, Math.max(h, 1), bw/2);
+        ctx.fill();
       }
-      return pill;
+      if (fold >= 1 && onFolded){ const f = onFolded; onFolded = null; f(); }
+    } };
+}
+
+/* ---------- pill controller ---------- */
+class Pill{
+  constructor(el){
+    this.el = el; this.inner = el.querySelector('.inner');
+    this.env = 0; this.raw = 0; this.viz = null;
+    window.pillLevel.subscribe(l => {
+      this.raw = l;
+      if (this.viz && this.viz.onPush) this.viz.onPush(this.env);
+    });
+  }
+  content(state){
+    const frag = document.createDocumentFragment();
+    const add = html => { const t = document.createElement('template'); t.innerHTML = html; frag.appendChild(t.content); };
+    this.viz = null;
+    if (state === 'rec' || state === 'transcribing'){
+      this.viz = Viz(state === 'rec' ? 'rec' : 'think');
+      frag.appendChild(this.viz.el);
+    } else if (state === 'done-copy'){
+      add('<span class="barecheck">' + SVG.check + '</span>');
+    } else if (state === 'error'){
+      add(SVG.warn);
+      const lbl = document.createElement('span');
+      lbl.className = 'lbl';
+      lbl.textContent = this.errorText || 'Error transcribing';
+      frag.appendChild(lbl);
     }
-
-    /* ── window.pillSet(state, payload) — the contract the Python backend calls ─ */
-    //  "recording"    : pulsing rec-dot + live waveform + "Recording"
-    //  "transcribing" : spinner + shimmer "Transcribing…"
-    //  "done"         : green check + "Copied to clipboard"
-    //  "error"        : warning glyph + payload text ("Something went wrong" default)
-    //  "off"          : play .pill.out exit animation, then leave blank
-    //  payload is optional; only the "error" state reads it. Single-arg callers
-    //  (e.g. pillSet("done")) keep working unchanged.
-    function pillSet(state, payload) {
-      stopWave();
-      refreshPillPos();
-
-      if (state === "off") {
-        const existing = dock.querySelector(".pill");
-        if (!existing) { dock.innerHTML = ""; curState = "off"; return; }
-        existing.classList.remove("in");
-        existing.classList.add("out");
-        const done = () => { dock.innerHTML = ""; };
-        existing.addEventListener("animationend", done, { once: true });
-        // safety fallback if animationend doesn't fire
-        setTimeout(done, 320);
-        curState = "off";
-        return;
-      }
-
-      dock.innerHTML = "";
-      const pill = buildPill(state, payload);
-      dock.appendChild(pill);
-      if (state === "recording" && pill._wave) {
-        // fresh take: forget the previous take's level until pushes arrive
-        levelSeen = false;
-        levelTarget = 0;
-        levelSmooth = 0;
-        startWave(pill._wave);
-      }
-      curState = state;
+    return frag;
+  }
+  setState(state, animate){
+    const token = this._swap = (this._swap || 0) + 1;
+    const prev = this.state;
+    this.state = state;
+    this.el.classList.toggle('error', state === 'error');
+    const isCanvas = s => s === 'rec' || s === 'transcribing';
+    /* rec ↔ transcribing: same canvas, bars morph in place — no swap at all */
+    if (animate && isCanvas(prev) && isCanvas(state) && this.viz){
+      this.viz.setMode(state === 'rec' ? 'rec' : 'think');
+      return;
     }
+    /* leaving the waveform: bars fold away edges-first, then the new content lands */
+    if (animate && isCanvas(prev) && this.viz){
+      this.viz.collapse(() => { if (token === this._swap) this.swap(state, true); });
+      return;
+    }
+    /* leaving check/error: brief sink, then swap */
+    if (animate && this.inner.childNodes.length){
+      this.inner.classList.remove('fresh');
+      void this.inner.offsetWidth;
+      this.inner.classList.add('stale');
+      setTimeout(() => { if (token === this._swap) this.swap(state, true); }, 120);
+      return;
+    }
+    this.swap(state, false);
+  }
+  swap(state, animateWidth){
+    const oldW = this.el.offsetWidth;
+    this.inner.classList.remove('fresh', 'stale');
+    this.inner.innerHTML = '';
+    this.inner.appendChild(this.content(state));
+    this.el.style.width = 'auto';
+    const newW = this.el.offsetWidth;
+    if (animateWidth && Math.abs(newW - oldW) > 1){
+      this.el.style.width = oldW + 'px';
+      void this.el.offsetWidth;
+      this.el.style.width = newW + 'px';
+      clearTimeout(this._wt);
+      this._wt = setTimeout(() => { this.el.style.width = 'auto'; }, 400);
+    }
+    void this.inner.offsetWidth;
+    this.inner.classList.add('fresh');
+  }
+  enter(state){
+    this.el.classList.remove('exit');
+    this.setState(state, false);
+    this.el.classList.remove('enter');
+    void this.el.offsetWidth;
+    this.el.classList.add('enter');
+  }
+  exit(){
+    this.el.classList.remove('enter');
+    this.el.classList.add('exit');
+  }
+  frame(){
+    this.env += (this.raw - this.env) * (this.raw > this.env ? 0.5 : 0.07);
+    if (this.viz) this.viz.frame(Math.max(0.05, this.env)); /* idle floor */
+  }
+}
+const pill = new Pill(document.getElementById('pill'));
+(function loop(){ pill.frame(); requestAnimationFrame(loop); })();
 
-    window.pillSet = pillSet;
+/* ---------- backend contract ---------- */
+/* The pill window receives no settings pushes, so placement direction,
+   theme and glass alpha are refreshed from get_state at startup and on
+   every pillSet (the only pushes this window gets). All three no-op when
+   unchanged, so an in-flight animation is never restarted. */
+function applyLook(s){
+  if (!s) return;
+  if (s.settings){
+    const top = s.settings.pillPosition === 'top';
+    const cur = document.body.dataset.pos === 'top';
+    if (top !== cur) document.body.dataset.pos = top ? 'top' : 'bottom';
+    if (typeof s.settings.transparency === 'number'){
+      const a = (0.95 - 0.65 * Math.max(0, Math.min(100, s.settings.transparency)) / 100);
+      document.documentElement.style.setProperty('--glass-a', a.toFixed(2));
+    }
+  }
+  const eff = s.effectiveTheme === 'light' ? 'light' : 'dark';
+  if (document.body.dataset.theme !== eff) document.body.dataset.theme = eff;
+}
+function refreshLook(){
+  if (window.pywebview && window.pywebview.api){
+    Promise.resolve(window.pywebview.api.get_state()).then(applyLook).catch(function(){});
+  } else {
+    /* standalone file:// preview: honor a harness/mock position or query,
+       e.g. pill.html?pillPosition=top */
+    let q = null;
+    try { q = new URLSearchParams(location.search).get('pillPosition'); } catch (e) { /* ignore */ }
+    const top = (window.__mockPillPosition || q) === 'top';
+    document.body.dataset.pos = top ? 'top' : 'bottom';
+  }
+}
 
-    /* ── window.pillLevel(x) — live input level from the backend, 0..1 ────
-       Pushed ~15x/s while recording. Optional: if it never fires, the
-       waveform above keeps the original self-driven look. */
-    window.pillLevel = function (x) {
-      if (typeof x !== "number" || !isFinite(x)) return;
-      levelTarget = Math.max(0, Math.min(1, x));
-      levelSeen = true;
-    };
+let curState = 'off';
 
-    // start blank (pillSet also primes the placement cache via refreshPillPos)
-    pillSet("off");
-  })();
-  </script>
+/* window.pillSet(state, payload) — the contract the backend calls:
+   "recording" | "transcribing" | "done" | "error" (payload = message) |
+   "off" (exit animation, then blank). */
+window.pillSet = function (state, payload) {
+  refreshLook();
+  if (state === 'off'){
+    if (curState !== 'off') pill.exit();
+    curState = 'off';
+    return;
+  }
+  const mapped = state === 'recording' ? 'rec'
+    : state === 'transcribing' ? 'transcribing'
+    : state === 'done' ? 'done-copy'
+    : 'error';
+  pill.errorText = (mapped === 'error' && typeof payload === 'string' && payload.trim())
+    ? payload.trim() : null;
+  if (curState === 'off'){
+    pill.enter(mapped);
+  } else {
+    pill.el.classList.remove('exit');
+    pill.setState(mapped, true);
+  }
+  curState = state;
+};
+
+/* start blank (also primes placement/theme via refreshLook) */
+refreshLook();
+pill.exit();
+})();
+</script>
 </body>
 </html>
