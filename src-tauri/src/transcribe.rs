@@ -311,6 +311,91 @@ pub fn get_vocab_prompt(app_dir: &Path, cfg: &ConfigStore) -> Option<String> {
     }
 }
 
+/// Annotations whisper.cpp emits for audio that contains no speech, matched
+/// case-insensitively against the inside of a `[...]`/`(...)`/`*...*` group
+/// after normalizing `_`/`-` to spaces: `[BLANK_AUDIO]`, `[ Silence ]`,
+/// `(noise)`, `*music*`, …
+const NON_SPEECH_PHRASES: &[&str] = &[
+    "blank audio",
+    "silence",
+    "silent",
+    "inaudible",
+    "music",
+    "music playing",
+    "background music",
+    "background noise",
+    "noise",
+    "static",
+    "applause",
+    "laughter",
+    "laughing",
+    "laughs",
+    "no speech",
+    "no audio",
+    "breathing",
+    "coughing",
+    "cough",
+    "sigh",
+    "sighs",
+    "sighing",
+    "chatter",
+    "indistinct chatter",
+    "wind",
+    "typing",
+    "clicking",
+    "humming",
+    "beep",
+    "beeping",
+    "pause",
+];
+
+fn is_non_speech_phrase(inner: &str) -> bool {
+    let normalized = inner
+        .to_ascii_lowercase()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    NON_SPEECH_PHRASES.contains(&normalized.as_str())
+}
+
+/// Collapse a transcription that consists ONLY of whisper.cpp non-speech
+/// markers (and whitespace) to the empty string. The original's
+/// faster-whisper returned `""` for silent takes, which routed them through
+/// the empty-result path (cancel cue, nothing copied, nothing logged — see
+/// `flow::Outcome::Empty`); whisper.cpp instead emits literal markers like
+/// `[BLANK_AUDIO]`, `(silence)` or `♪`. This restores parity at the point
+/// where both engines' results converge (the in-process CPU path and the
+/// `--gpu-worker` child both run [`Transcriber::transcribe`]).
+///
+/// Conservative by design (never lose a take): any character outside a
+/// recognized marker — including bare words like "silence" without brackets,
+/// unclosed brackets, or stray punctuation — keeps the take verbatim.
+/// Markers mixed with real speech are NOT stripped.
+pub fn collapse_non_speech(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('♪') {
+            rest = r.trim_start();
+            continue;
+        }
+        let close = match rest.as_bytes()[0] {
+            b'[' => ']',
+            b'(' => ')',
+            b'*' => '*',
+            _ => return text,
+        };
+        let Some(end) = rest[1..].find(close) else {
+            return text;
+        };
+        if !is_non_speech_phrase(&rest[1..1 + end]) {
+            return text;
+        }
+        rest = rest[1 + end + 1..].trim_start();
+    }
+    ""
+}
+
 /// A loaded CPU whisper model.
 pub struct Transcriber {
     ctx: WhisperContext,
@@ -392,7 +477,10 @@ impl Transcriber {
                 }
             }
         }
-        Ok(parts.join(" ").trim().to_string())
+        let joined = parts.join(" ");
+        // A take that is nothing but non-speech markers ([BLANK_AUDIO], …)
+        // becomes "" so silence follows the original's empty-result path.
+        Ok(collapse_non_speech(joined.trim()).to_string())
     }
 
     /// The original's warm-up: transcribe 1 s of silence to page the model in
@@ -603,6 +691,52 @@ mod tests {
             download_model_with(dir.path(), "tiny.en", "int8", &mut |_, _| events += 1).unwrap();
         assert_eq!(again, path);
         assert_eq!(events, 0);
+    }
+
+    #[test]
+    fn non_speech_only_takes_collapse_to_empty() {
+        for t in [
+            "[BLANK_AUDIO]",
+            " [BLANK_AUDIO] ",
+            "[BLANK_AUDIO] [BLANK_AUDIO]",
+            "[blank_audio]",
+            "[Blank_Audio]",
+            "[BLANK-AUDIO]",
+            "(silence)",
+            "(Silence)",
+            "[SILENCE]",
+            "[ Silence ]",
+            "[ Inaudible ]",
+            "[MUSIC]",
+            "*music*",
+            "(noise)",
+            "♪",
+            "♪ ♪ ♪",
+            "[MUSIC] (silence) ♪",
+            "",
+            "   ",
+        ] {
+            assert_eq!(collapse_non_speech(t), "", "{t:?}");
+        }
+    }
+
+    #[test]
+    fn real_speech_passes_through_untouched() {
+        for t in [
+            "hello world",
+            "he said [BLANK_AUDIO] appears on screen",
+            "[BLANK_AUDIO] then he spoke",
+            "turn the music down",
+            "silence",        // bare word, no marker delimiters
+            "(well, maybe)",  // parenthesized real words
+            "[BLANK_AUDIO",   // unclosed bracket -> doubt -> keep
+            "[BLANK_AUDIO].", // stray punctuation -> doubt -> keep
+            "(no)",           // ambiguous single word -> keep
+            "♪ happy birthday ♪",
+            "...",
+        ] {
+            assert_eq!(collapse_non_speech(t), t, "{t:?}");
+        }
     }
 
     #[test]
