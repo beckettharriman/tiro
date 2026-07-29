@@ -13,6 +13,9 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadParams,
@@ -213,9 +216,51 @@ fn download(url: &str, dest: &Path, label: &str) -> Result<(), String> {
 /// a quiet outcome, not a failure.
 pub const DOWNLOAD_CANCELLED: &str = "cancelled";
 
-/// Stream `url` to `dest` (via a `.part` file), reporting every chunk to
-/// `progress` as `(bytes_done, content_length)`; a `false` return aborts
-/// the pull and removes the partial file.
+/// Timeout for every network phase of a download (connect, headers) and
+/// the stall watchdog on the body: no data for this long errors the pull
+/// out instead of pinning the download thread forever.
+const DOWNLOAD_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Sequence for unique temp-file names: two threads in one process (the
+/// panel's download and an engine load) must never share a temp file.
+static PART_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A per-writer temp path next to `dest`, unique across processes (pid —
+/// the `--gpu-worker` child downloads too) and across threads (sequence).
+fn part_path(dest: &Path) -> PathBuf {
+    let seq = PART_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = dest
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".part.{}.{seq}", std::process::id()));
+    dest.with_file_name(name)
+}
+
+/// Removes the temp file on drop unless it was renamed into place — every
+/// early return (error, cancel, stall) cleans up its own partial file, and
+/// only its own: concurrent writers each hold a differently-named temp.
+struct PartGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Stream `url` to `dest` (via a uniquely-named `.part.<pid>.<n>` sibling,
+/// renamed into place on completion), reporting every chunk to `progress`
+/// as `(bytes_done, content_length)`; a `false` return aborts the pull and
+/// removes the partial file. Concurrent downloaders of the same file — the
+/// panel, an engine load, the gpu-worker child process — each write their
+/// own temp; whoever renames last wins with an identical complete file, and
+/// a rename loser treats an already-present `dest` as success. `dest` only
+/// ever appears via this rename, so its existence implies a complete file.
 fn download_with(
     url: &str,
     dest: &Path,
@@ -224,6 +269,12 @@ fn download_with(
 ) -> Result<(), String> {
     eprintln!("downloading {label} from {url}");
     let response = ureq::get(url)
+        .config()
+        .timeout_resolve(Some(DOWNLOAD_IO_TIMEOUT))
+        .timeout_connect(Some(DOWNLOAD_IO_TIMEOUT))
+        .timeout_send_request(Some(DOWNLOAD_IO_TIMEOUT))
+        .timeout_recv_response(Some(DOWNLOAD_IO_TIMEOUT))
+        .build()
         .call()
         .map_err(|e| format!("download of {label} failed: {e}"))?;
     let total = response
@@ -232,21 +283,60 @@ fn download_with(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
     let mut reader = response.into_body().into_reader();
-    let part = dest.with_extension("part");
+    let part = part_path(dest);
+    let mut guard = PartGuard {
+        path: part.clone(),
+        keep: false,
+    };
     let mut out = fs::File::create(&part).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; 1 << 20];
+    // Socket reads happen on a helper thread feeding a bounded channel:
+    // ureq has no per-read timeout, so a stalled connection (no bytes, no
+    // EOF, no error) would otherwise block this thread — and its DOWNLOADS
+    // entry — forever. The helper exits on EOF, error, or when this side
+    // hangs up (its send fails after we bail out).
+    let (tx, rx) = mpsc::sync_channel::<std::io::Result<Vec<u8>>>(4);
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let res = reader.read(&mut buf);
+            let end = matches!(&res, Ok(0) | Err(_));
+            if tx.send(res.map(|n| buf[..n].to_vec())).is_err() || end {
+                return;
+            }
+        }
+    });
     let mut done: u64 = 0;
     let mut last_pct = 0;
+    let mut last_data = Instant::now();
     loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+        let chunk = match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(chunk)) => chunk,
+            Ok(Err(e)) => return Err(format!("download of {label} failed: {e}")),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // no data this tick: still honor cancel, then the watchdog
+                if !progress(done, total) {
+                    eprintln!("  {label}: download cancelled");
+                    return Err(DOWNLOAD_CANCELLED.into());
+                }
+                if last_data.elapsed() >= DOWNLOAD_IO_TIMEOUT {
+                    return Err(format!(
+                        "download of {label} stalled (no data for {}s)",
+                        DOWNLOAD_IO_TIMEOUT.as_secs()
+                    ));
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!("download of {label} ended unexpectedly"));
+            }
+        };
+        if chunk.is_empty() {
+            break; // EOF
         }
-        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
+        last_data = Instant::now();
+        out.write_all(&chunk).map_err(|e| e.to_string())?;
+        done += chunk.len() as u64;
         if !progress(done, total) {
-            drop(out);
-            let _ = fs::remove_file(&part);
             eprintln!("  {label}: download cancelled");
             return Err(DOWNLOAD_CANCELLED.into());
         }
@@ -258,9 +348,27 @@ fn download_with(
             }
         }
     }
+    if let Some(total) = total {
+        if done != total {
+            // a truncated body must never be renamed into place — dest's
+            // existence is the "complete" signal for everyone else
+            return Err(format!(
+                "download of {label} incomplete ({done}/{total} bytes)"
+            ));
+        }
+    }
     out.flush().map_err(|e| e.to_string())?;
     drop(out);
-    fs::rename(&part, dest).map_err(|e| e.to_string())?;
+    if let Err(e) = fs::rename(&part, dest) {
+        // Lost a rename race (Windows refuses to replace): the winner's
+        // file is complete, so the model is installed either way.
+        if !dest.is_file() {
+            return Err(format!("finalize of {label} failed: {e}"));
+        }
+        eprintln!("  {label}: another download completed first");
+    } else {
+        guard.keep = true; // renamed away — nothing to clean
+    }
     eprintln!("  {label}: download complete ({done} bytes)");
     Ok(())
 }
