@@ -87,6 +87,12 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Clone = a point-in-time snapshot: readers that need config values while
+/// doing filesystem work clone under the cfg lock, drop the lock, then read
+/// from the snapshot — a stale mount probed by store::log_dir must never
+/// wedge every other cfg-lock user (see the engine LOCK LAW). Snapshots are
+/// for reading; `set` on a clone would persist a fork of the config.
+#[derive(Clone)]
 pub struct ConfigStore {
     path: PathBuf,
     defaults: Vec<(&'static str, String)>,

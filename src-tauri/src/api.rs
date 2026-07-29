@@ -362,8 +362,12 @@ fn as_cfg_str(v: &Value) -> String {
 /// `get_state`: the full snapshot the panel renders from.
 pub fn get_state(app: &AppHandle) -> Value {
     let ctx = app.state::<AppCtx>();
+    // Snapshot the config, then drop the lock BEFORE any filesystem or
+    // process work below (transcript reads, the log_dir write probe, mic
+    // enumeration, the theme portal query): a stale network mount must
+    // never wedge sync main-thread commands blocking on the same lock.
+    let cfg = lock(&ctx.cfg).clone();
     let (entries, settings, shortcuts, theme, effective) = {
-        let cfg = lock(&ctx.cfg);
         let entries: Vec<Value> = store::read_today_entries(&cfg, 200)
             .iter()
             .map(|r| store::entry_from_rec(r, &cfg))
@@ -425,14 +429,14 @@ pub fn get_state(app: &AppHandle) -> Value {
 /// advanced view's day pager and all-days search walk this list.
 pub fn history_days(app: &AppHandle) -> Value {
     let ctx = app.state::<AppCtx>();
-    let cfg = lock(&ctx.cfg);
+    let cfg = lock(&ctx.cfg).clone(); // snapshot: no lock across disk IO
     json!(store::list_days(&cfg))
 }
 
 /// `history_entries`: one day's records in the panel's entry shape.
 pub fn history_entries(app: &AppHandle, day: &str) -> Value {
     let ctx = app.state::<AppCtx>();
-    let cfg = lock(&ctx.cfg);
+    let cfg = lock(&ctx.cfg).clone(); // snapshot: no lock across disk IO
     let entries: Vec<Value> = store::read_day_entries(&cfg, day, 500)
         .iter()
         .map(|r| store::entry_from_rec(r, &cfg))
@@ -442,10 +446,10 @@ pub fn history_entries(app: &AppHandle, day: &str) -> Value {
 
 /// The `_ack` payload every `set_setting` returns.
 fn ack(app: &AppHandle, ctx: &AppCtx) -> Value {
-    let (theme, effective) = {
-        let cfg = lock(&ctx.cfg);
-        (theme_or_system(&cfg), effective_theme(app, &cfg))
-    };
+    // snapshot: effective_theme can shell out to the portal (dbus-send) —
+    // never hold the cfg lock across that
+    let cfg = lock(&ctx.cfg).clone();
+    let (theme, effective) = (theme_or_system(&cfg), effective_theme(app, &cfg));
     json!({
         "ok": true,
         "engine": flow::engine_dict(ctx),
@@ -588,7 +592,7 @@ fn hot_apply_model_change(app: &AppHandle) {
 /// `set_setting`: change one setting, apply live.
 pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
     let ctx = app.state::<AppCtx>();
-    let mut theme_push: Option<String> = None;
+    let mut theme_changed = false;
     let mut pill_moved = false;
     {
         let mut cfg = lock(&ctx.cfg);
@@ -678,13 +682,16 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
                     t = "system".into();
                 }
                 cfg.set("theme", &t);
-                theme_push = Some(effective_theme(app, &cfg));
+                theme_changed = true;
             }
             _ => {}
         }
     }
-    if let Some(effective) = theme_push {
-        flow::push_panel(app, "tiroSetTheme", json!(effective));
+    if theme_changed {
+        // resolved AFTER the cfg lock is released — effective_theme may
+        // shell out to the settings portal (dbus-send)
+        let cfg = lock(&ctx.cfg).clone();
+        flow::push_panel(app, "tiroSetTheme", json!(effective_theme(app, &cfg)));
     }
     if pill_moved {
         // apply live: a currently-visible pill snaps to the new spot at once

@@ -371,6 +371,28 @@ body.fallback .banner{ display:flex; animation: land var(--t-med) var(--ease) bo
 /* mic waveform preview */
 .wave{ width:160px; height:28px; flex:none; }
 
+/* day sections — Today renders alone by default; older days append below
+   as you scroll back, each under its own sticky header */
+.dayseg + .dayseg{ margin-top: var(--s-4); }
+.dayhdr{
+  position:sticky; top:0; z-index:2;
+  font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  color:rgba(var(--ink),.40);
+  padding: var(--s-2) var(--s-1);
+  /* tracks the transparency slider: panel alpha + a fixed boost so the
+     header always reads over entries scrolling under it (CSS clamps the
+     alpha at 1 when the slider is near solid) */
+  background:rgba(var(--glass-rgb), calc(var(--glass-a) + 0.16));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.dayempty{
+  font-size:12.5px; letter-spacing:-0.003em;
+  color:rgba(var(--ink),.45);
+  padding: var(--s-3) var(--s-1) var(--s-2);
+  text-wrap:pretty;
+}
+
 /* day pager */
 .pager{
   display:flex; align-items:center; justify-content:center; gap:var(--s-3);

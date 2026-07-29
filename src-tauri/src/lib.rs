@@ -187,7 +187,9 @@ fn power_watcher(app: tauri::AppHandle) {
                 flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
             }
             let eff = {
-                let cfg = flow::lock(&ctx.cfg);
+                // snapshot then drop the lock: effective_theme can shell
+                // out to the portal (dbus-send)
+                let cfg = flow::lock(&ctx.cfg).clone();
                 api::effective_theme(&app, &cfg)
             };
             if last_theme.as_deref() != Some(eff.as_str()) {
