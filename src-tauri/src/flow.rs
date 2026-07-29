@@ -29,6 +29,7 @@ use crate::clipboard;
 use crate::config::ConfigStore;
 use crate::cues;
 use crate::gpu::{GpuWorker, READY_TIMEOUT_CACHED, READY_TIMEOUT_DOWNLOAD};
+use crate::hw;
 use crate::power;
 use crate::store;
 use crate::transcribe::{self, Transcriber};
@@ -339,30 +340,121 @@ fn maybe_reprobe_gpu(ctx: &AppCtx) {
     }
 }
 
-/// `resolve_target`: which device we SHOULD be on right now, honoring
-/// config + power + GPU availability. Config keeps the original's "cuda"
-/// value name; internally the GPU target is "gpu".
+/// Desktop machine = no battery hardware, or the user's `treat_as_desktop`
+/// override. Desktops have no AC/battery split anywhere in the policy.
+/// Short cfg lock, then the cached hardware snapshot — never the engine
+/// lock (safe from any thread).
+pub fn machine_is_desktop(ctx: &AppCtx) -> bool {
+    let treat = lock(&ctx.cfg).get_bool("treat_as_desktop");
+    treat || !hw::snapshot().battery_present
+}
+
+/// `resolve_target`: which device we SHOULD be on right now — the policy
+/// table's cell for this machine class, gated by GPU health. Config keeps
+/// the original's "cuda" value name; internally the GPU target is "gpu".
 pub fn resolve_target(ctx: &AppCtx) -> &'static str {
     maybe_reprobe_gpu(ctx);
-    let dev = lock(&ctx.cfg).get("device").to_lowercase();
-    let gpu_ok = ctx.gpu_ok.load(Ordering::SeqCst);
-    match dev.as_str() {
-        "cpu" => "cpu",
-        "cuda" => {
-            if gpu_ok {
-                "gpu"
-            } else {
-                "cpu"
-            }
+    let (pref, treat) = {
+        let cfg = lock(&ctx.cfg);
+        (
+            hw::PowerPref::from_cfg(&cfg.get("device")),
+            cfg.get_bool("treat_as_desktop"),
+        )
+    };
+    let hardware = hw::snapshot();
+    let desktop = treat || !hardware.battery_present;
+    let (device, _slot) = hw::policy(hardware.class, desktop, power::on_ac_power(), pref);
+    if device == "gpu" && !ctx.gpu_ok.load(Ordering::SeqCst) {
+        "cpu"
+    } else {
+        device
+    }
+}
+
+/// The models the two engine paths should serve RIGHT NOW. Pure core of
+/// `desired_models`, split out so every laptop/desktop cell is testable
+/// without live hardware:
+/// - forced modes and desktops run the single `model` key in BOTH slots
+///   (a forced-GPU engine that falls back to CPU still serves the chosen
+///   model); a battery laptop keeps the AC/battery split
+/// - laptop cells where the DEVICE stays put but the MODEL follows the
+///   power source: an integrated GPU serves the lighter battery model on
+///   battery (no D3cold prize on an iGPU, so the worker survives the
+///   flip), and a no-GPU laptop serves the AC model while plugged in
+fn select_models(
+    class: hw::GpuClass,
+    desktop: bool,
+    on_ac: bool,
+    pref: hw::PowerPref,
+    single: &str,
+    ac_raw: &str,
+    bat_raw: &str,
+) -> (String, String) {
+    let single_mode = !matches!(pref, hw::PowerPref::Auto) || desktop;
+    if single_mode && !single.is_empty() {
+        return (single.to_string(), single.to_string());
+    }
+    let pick = |raw: &str| {
+        if raw.is_empty() {
+            single.to_string()
+        } else {
+            raw.to_string()
         }
-        _ => {
-            // auto: GPU only when it works AND we're plugged in
-            if gpu_ok && power::on_ac_power() {
-                "gpu"
-            } else {
-                "cpu"
-            }
-        }
+    };
+    let (ac, bat) = (pick(ac_raw), pick(bat_raw));
+    // GPU slot: follows the power source, EXCEPT on discrete hardware —
+    // a discrete GPU never serves on battery (the D3cold cell kills the
+    // worker instead), so its slot is always the AC model.
+    let gpu = if class == hw::GpuClass::Discrete || on_ac {
+        ac.clone()
+    } else {
+        bat.clone()
+    };
+    let cpu = if class == hw::GpuClass::None && on_ac {
+        ac
+    } else {
+        bat
+    };
+    (gpu, cpu)
+}
+
+/// The desired GPU-path model, CPU-path model and compute type, resolved
+/// from config + machine class + live power source. Takes only the cfg
+/// lock (short); callers must not hold the engine lock's cfg-ordering
+/// inverse (none exists — lock order is engine -> cfg, never reversed).
+struct DesiredModels {
+    gpu: String,
+    cpu: String,
+    compute_type: String,
+}
+
+fn desired_models(ctx: &AppCtx) -> DesiredModels {
+    let (pref, treat, single, ac_raw, bat_raw, compute_type) = {
+        let cfg = lock(&ctx.cfg);
+        (
+            hw::PowerPref::from_cfg(&cfg.get("device")),
+            cfg.get_bool("treat_as_desktop"),
+            cfg.get("model"),
+            cfg.get("model_ac"),
+            cfg.get("model_battery"),
+            cfg.get("compute_type"),
+        )
+    };
+    let hardware = hw::snapshot();
+    let desktop = treat || !hardware.battery_present;
+    let (gpu, cpu) = select_models(
+        hardware.class,
+        desktop,
+        power::on_ac_power(),
+        pref,
+        &single,
+        &ac_raw,
+        &bat_raw,
+    );
+    DesiredModels {
+        gpu,
+        cpu,
+        compute_type,
     }
 }
 
@@ -409,46 +501,30 @@ pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
 /// falls back to CPU, exactly like the original's in-process CUDA failure.
 fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
     let models_dir = app_dir().join("models");
-    let (model_ac, model_battery, compute_type) = {
-        let cfg = lock(&ctx.cfg);
-        let single = cfg.get("model");
-        // FORCED power modes (device = cpu | cuda) run ONE user-chosen
-        // model — the panel's single "Model" row, stored in the legacy
-        // `model` key. It fills BOTH slots so a forced-GPU engine that has
-        // to fall back to CPU still serves the chosen model. Auto keeps
-        // the battery/AC split.
-        let forced = matches!(cfg.get("device").to_lowercase().as_str(), "cpu" | "cuda");
-        let (ac, bat) = if forced && !single.is_empty() {
-            (single.clone(), single.clone())
-        } else {
-            let pick = |key: &str| {
-                let m = cfg.get(key);
-                if m.is_empty() {
-                    single.clone()
-                } else {
-                    m
-                }
-            };
-            (pick("model_ac"), pick("model_battery"))
-        };
-        (ac, bat, cfg.get("compute_type"))
-    };
+    // Which model each path serves comes from the policy table via
+    // `desired_models` (forced modes and desktops: the single `model` key;
+    // battery laptops: the AC/battery pair, power-source-resolved).
+    let DesiredModels {
+        gpu: model_gpu,
+        cpu: model_cpu,
+        compute_type,
+    } = desired_models(ctx);
     if target == "gpu" {
-        eprintln!("Starting GPU worker for '{model_ac}' ...");
+        eprintln!("Starting GPU worker for '{model_gpu}' ...");
         let cached = models_dir
-            .join(transcribe::model_file_name(&model_ac, &compute_type))
+            .join(transcribe::model_file_name(&model_gpu, &compute_type))
             .exists();
         let timeout = if cached {
             READY_TIMEOUT_CACHED
         } else {
             READY_TIMEOUT_DOWNLOAD
         };
-        match GpuWorker::spawn(&model_ac, &models_dir, &compute_type, "gpu", timeout) {
+        match GpuWorker::spawn(&model_gpu, &models_dir, &compute_type, "gpu", timeout) {
             Ok(w) => {
                 eprintln!("Ready on GPU (worker).");
                 engine.transcriber = None;
                 engine.worker = Some(Arc::new(w));
-                engine.model_name = model_ac;
+                engine.model_name = model_gpu;
                 engine.device = "gpu".into();
                 refresh_status(ctx, engine);
                 return;
@@ -459,8 +535,8 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
             }
         }
     }
-    eprintln!("Loading '{model_battery}' on CPU ...");
-    let loaded = transcribe::ensure_model(&models_dir, &model_battery, &compute_type)
+    eprintln!("Loading '{model_cpu}' on CPU ...");
+    let loaded = transcribe::ensure_model(&models_dir, &model_cpu, &compute_type)
         .and_then(|model_path| {
             let vad = transcribe::ensure_vad_model(&models_dir)
                 .map_err(|e| {
@@ -474,7 +550,7 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
     match loaded {
         Ok(t) => {
             engine.transcriber = Some(Arc::new(t));
-            engine.model_name = model_battery;
+            engine.model_name = model_cpu;
             engine.device = "cpu".into();
             eprintln!("Ready on CPU.");
         }
@@ -490,16 +566,27 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
 }
 
 /// `ensure_device`: swap the serving engine to `target` if needed. Healthy
-/// means: for cpu the model is loaded; for gpu the worker child is ALIVE
-/// (a silently-crashed worker must not count as "already on gpu" or
+/// means: the device matches, the MODEL matches the policy's current pick
+/// (an integrated laptop swaps models on a power flip without changing
+/// device), and for cpu the model is loaded / for gpu the worker child is
+/// ALIVE (a silently-crashed worker must not count as "already on gpu" or
 /// dictation would dead-end). The outgoing (or dead) worker is killed
 /// BEFORE the replacement load — on the AC->battery flip the dGPU should
 /// be asleep during the seconds the CPU model spends loading, not after.
 pub fn ensure_device(app: &AppHandle, target: &str) {
     let ctx = app.state::<AppCtx>();
+    // Resolve the desired model BEFORE taking the engine lock (cfg lock
+    // only; keeps the documented engine -> cfg lock order one-way).
+    let desired = desired_models(&ctx);
+    let want_model = if target == "gpu" {
+        &desired.gpu
+    } else {
+        &desired.cpu
+    };
     {
         let mut engine = lock(&ctx.engine);
         let healthy = engine.device == target
+            && engine.model_name == *want_model
             && match target {
                 "gpu" => engine.worker.as_ref().is_some_and(|w| w.alive()),
                 _ => engine.transcriber.is_some(),
@@ -529,6 +616,33 @@ pub fn ensure_device(app: &AppHandle, target: &str) {
 /// periodic re-probe in `resolve_target` can lift it later.
 pub fn latch_gpu_off(ctx: &AppCtx) {
     ctx.gpu_ok.store(false, Ordering::SeqCst);
+}
+
+/// Watcher-tick check: does the live engine already serve the policy's
+/// target device AND model? Device alone is not enough — an integrated
+/// laptop swaps models on a power flip without changing device. An EMPTY
+/// engine (failed load -> "Model not ready" per take) is deliberately
+/// in-policy while its device matches, exactly like the old device-only
+/// check: the watcher must not become a 20-second retry loop hammering
+/// model downloads after a failed load. Blocking-locks the engine —
+/// background threads only (LOCK LAW above).
+pub fn engine_in_policy(ctx: &AppCtx, target: &str) -> bool {
+    let desired = desired_models(ctx);
+    let want = if target == "gpu" {
+        desired.gpu
+    } else {
+        desired.cpu
+    };
+    let engine = lock(&ctx.engine);
+    if engine.worker.is_none() && engine.transcriber.is_none() {
+        return engine.device == target;
+    }
+    engine.device == target
+        && engine.model_name == want
+        && match target {
+            "gpu" => engine.worker.as_ref().is_some_and(|w| w.alive()),
+            _ => engine.transcriber.is_some(),
+        }
 }
 
 /// Tear down whatever serves right now — worker stopped (immediately if a
@@ -1555,6 +1669,111 @@ mod lock_tests {
         assert_eq!(dict["model"], "base.en");
         assert_eq!(dict["device"], "CPU", "no live worker -> CPU");
         assert_eq!(lock(&ctx.status).model, "base.en", "snapshot refreshed");
+    }
+
+    /// `select_models` — the policy-table model slots against the real
+    /// config keys, for every laptop/desktop cell. The discrete-laptop
+    /// rows are the Blade 14 cell and must be byte-identical to the old
+    /// forced/auto split (model_ac on the GPU path, model_battery on CPU,
+    /// empty keys falling back to the single `model` key).
+    #[test]
+    fn select_models_covers_the_policy_cells() {
+        use crate::hw::{GpuClass, PowerPref};
+        let sel = |class, desktop, on_ac, pref| {
+            select_models(class, desktop, on_ac, pref, "single", "ac", "bat")
+        };
+        // discrete + laptop (Blade 14): TODAY'S BEHAVIOR EXACTLY
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            sel(GpuClass::Discrete, false, true, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        assert_eq!(
+            sel(GpuClass::Discrete, false, false, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        // forced modes: the single `model` key fills BOTH slots
+        for pref in [PowerPref::ForceCpu, PowerPref::ForceGpu] {
+            assert_eq!(
+                sel(GpuClass::Discrete, false, true, pref),
+                s("single", "single")
+            );
+        }
+        // desktops: single key everywhere, Auto included
+        for class in [GpuClass::None, GpuClass::Integrated, GpuClass::Discrete] {
+            assert_eq!(
+                sel(class, true, true, PowerPref::Auto),
+                s("single", "single"),
+                "{class:?} desktop"
+            );
+        }
+        // integrated laptop: the GPU path swaps to the battery model on
+        // battery (the worker survives the flip; only the model changes)
+        assert_eq!(
+            sel(GpuClass::Integrated, false, true, PowerPref::Auto),
+            s("ac", "bat")
+        );
+        assert_eq!(
+            sel(GpuClass::Integrated, false, false, PowerPref::Auto),
+            s("bat", "bat")
+        );
+        // no-GPU laptop: the CPU path follows the power source
+        assert_eq!(
+            sel(GpuClass::None, false, true, PowerPref::Auto),
+            s("ac", "ac")
+        );
+        assert_eq!(
+            sel(GpuClass::None, false, false, PowerPref::Auto),
+            s("bat", "bat")
+        );
+        // empty pair keys fall back to the single key (legacy configs)
+        assert_eq!(
+            select_models(
+                GpuClass::Discrete,
+                false,
+                true,
+                PowerPref::Auto,
+                "m",
+                "",
+                ""
+            ),
+            s("m", "m")
+        );
+        // forced mode with an EMPTY single key keeps the old pick fallback
+        assert_eq!(
+            select_models(
+                GpuClass::Discrete,
+                false,
+                true,
+                PowerPref::ForceCpu,
+                "",
+                "ac",
+                "bat"
+            ),
+            s("ac", "bat")
+        );
+    }
+
+    /// The watcher's in-policy check: an EMPTY engine with a matching
+    /// device is left alone (the old device-only semantics — no 20 s
+    /// download-retry loop), while a loaded engine serving the wrong model
+    /// reads out-of-policy so a power flip can swap models in place.
+    #[test]
+    fn engine_in_policy_keeps_the_empty_engine_semantics() {
+        let ctx = AppCtx::new();
+        // empty engine, device matches target -> in policy (left alone)
+        assert!(engine_in_policy(&ctx, "cpu"));
+        // empty engine, target flipped -> out of policy (watcher acts)
+        assert!(!engine_in_policy(&ctx, "gpu"));
+        // loaded engine serving some model: policy compares the model too
+        {
+            let mut engine = lock(&ctx.engine);
+            engine.transcriber = None; // (a real Transcriber needs a model file)
+            engine.model_name = "definitely-not-configured".into();
+            engine.device = "cpu".into();
+        }
+        // still "empty" (no transcriber), so device-only rule applies
+        assert!(engine_in_policy(&ctx, "cpu"));
     }
 
     /// The exit path (`stop_worker`, main thread via tray Restart/Quit)

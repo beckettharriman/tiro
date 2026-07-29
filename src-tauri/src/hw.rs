@@ -191,7 +191,17 @@ fn enum_devices_in_process() -> Vec<GpuDevice> {
 /// and parse its JSON line. Any failure — spawn error, timeout, bad JSON —
 /// degrades to an empty list (gpu_class none): the battery-safe reading,
 /// and the CPU engine always works.
+///
+/// `TIRO_GPU_ENUM_JSON` overrides the child entirely (tests and headless
+/// class previews); unit tests never spawn — re-execing the test binary
+/// would run the whole suite as the "child".
 fn enumerate_gpus() -> Vec<GpuDevice> {
+    if let Some(raw) = std::env::var_os("TIRO_GPU_ENUM_JSON") {
+        return parse_enum_output(&raw.to_string_lossy());
+    }
+    if cfg!(test) {
+        return Vec::new();
+    }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
