@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use serde_json::json;
@@ -40,12 +40,45 @@ const GPU_REPROBE_SECS: u64 = 600;
 
 /// The serving engine: an in-process CPU transcriber, or the GPU worker
 /// child (never both live at once).
+///
+/// LOCK LAW (the tray-Restart freeze of record): `AppCtx::engine` may be
+/// held across engine-length work (model load, warm-up, GPU spawn, the
+/// GPU-crash CPU reload) by BACKGROUND threads only — and a transcription
+/// itself never holds it at all (`transcribe_worker` clones the Arcs under
+/// a short lock and runs unlocked). Everything reachable from the main
+/// thread (`engine_dict` via the get_state/set_setting IPC, `stop_worker`
+/// via the tray) uses `try_lock` + the `EngineStatus` snapshot and returns
+/// promptly no matter what the engine is doing.
 pub struct Engine {
-    pub transcriber: Option<Transcriber>,
-    pub worker: Option<GpuWorker>,
+    pub transcriber: Option<Arc<Transcriber>>,
+    pub worker: Option<Arc<GpuWorker>>,
     pub model_name: String,
     /// "cpu" | "gpu" — which engine actually serves requests right now.
     pub device: String,
+}
+
+/// Last-known engine-chip state: refreshed under the engine lock at every
+/// engine transition and at every take start, served lock-free (well,
+/// short-lock) to main-thread readers while the engine lock is busy.
+#[derive(Clone, Default)]
+pub struct EngineStatus {
+    pub model: String,
+    /// "cpu" | "gpu" — the ACTUAL device (worker-alive-checked when the
+    /// snapshot was taken; design rule 8). For an in-flight take this is
+    /// the take-start truth.
+    pub device: String,
+}
+
+/// Recompute the chip truth from the live engine (caller holds the engine
+/// lock) and store it as the last-known snapshot.
+fn refresh_status(ctx: &AppCtx, engine: &Engine) -> EngineStatus {
+    let gpu = engine.device == "gpu" && engine.worker.as_ref().is_some_and(|w| w.alive());
+    let status = EngineStatus {
+        model: engine.model_name.clone(),
+        device: if gpu { "gpu" } else { "cpu" }.into(),
+    };
+    *lock(&ctx.status) = status.clone();
+    status
 }
 
 /// Successful `RecCmd::Start` reply: (device name, rate, live level meter
@@ -66,6 +99,13 @@ enum RecCmd {
 pub struct AppCtx {
     pub cfg: Mutex<ConfigStore>,
     pub engine: Mutex<Engine>,
+    /// Last-known chip state for `engine_dict` (see `EngineStatus`).
+    /// Always short-held; lock order is engine -> status, never reversed.
+    status: Mutex<EngineStatus>,
+    /// Serializes transcriptions like the original's `_xscribe_lock`.
+    /// Taken ONLY by `transcribe_worker` threads — nothing main-thread-
+    /// reachable can ever queue behind a take on this lock.
+    xscribe: Mutex<()>,
     rec_tx: Mutex<Sender<RecCmd>>,
     recording: AtomicBool,
     busy: AtomicBool,
@@ -152,6 +192,11 @@ impl AppCtx {
                 model_name: String::new(),
                 device: "cpu".into(),
             }),
+            status: Mutex::new(EngineStatus {
+                model: String::new(),
+                device: "cpu".into(),
+            }),
+            xscribe: Mutex::new(()),
             rec_tx: Mutex::new(tx),
             recording: AtomicBool::new(false),
             busy: AtomicBool::new(false),
@@ -218,17 +263,28 @@ impl Default for AppCtx {
 }
 
 /// `engine_dict`: the chip payload. Reports the ACTUAL device — "GPU"
-/// requires the worker child to be alive right now; a silently-dead worker
-/// must not show a green GPU chip — and the live power source.
+/// requires the worker child to be alive; a silently-dead worker must not
+/// show a green GPU chip — and the live power source.
+///
+/// NEVER BLOCKS: this is reached from the main thread (get_state /
+/// set_setting IPC — the freeze of record wedged the whole GTK loop here,
+/// queued behind an in-flight transcription; a minutes-long CPU model
+/// load at boot wedged first paint the same way). When the engine lock is
+/// free this refreshes and returns the live truth, alive-check included;
+/// when a load or take holds it, this returns the last-known snapshot —
+/// which for an in-flight take is the take-start truth (design rule 8).
 pub fn engine_dict(ctx: &AppCtx) -> serde_json::Value {
-    let mut engine = lock(&ctx.engine);
-    let model = if engine.model_name.is_empty() {
+    let status = match ctx.engine.try_lock() {
+        Ok(engine) => refresh_status(ctx, &engine),
+        Err(TryLockError::Poisoned(p)) => refresh_status(ctx, &p.into_inner()),
+        Err(TryLockError::WouldBlock) => lock(&ctx.status).clone(),
+    };
+    let model = if status.model.is_empty() {
         lock(&ctx.cfg).get("model")
     } else {
-        engine.model_name.clone()
+        status.model
     };
-    let gpu = engine.device == "gpu" && engine.worker.as_mut().is_some_and(GpuWorker::alive);
-    let device = if gpu { "GPU" } else { "CPU" };
+    let device = if status.device == "gpu" { "GPU" } else { "CPU" };
     let power = if power::on_ac_power() {
         "plugged"
     } else {
@@ -278,9 +334,10 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
             Ok(w) => {
                 eprintln!("Ready on GPU (worker).");
                 engine.transcriber = None;
-                engine.worker = Some(w);
+                engine.worker = Some(Arc::new(w));
                 engine.model_name = model_ac;
                 engine.device = "gpu".into();
+                refresh_status(ctx, engine);
                 return;
             }
             Err(e) => {
@@ -303,7 +360,7 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
         .and_then(|t| t.warm_up().map(|()| t));
     match loaded {
         Ok(t) => {
-            engine.transcriber = Some(t);
+            engine.transcriber = Some(Arc::new(t));
             engine.model_name = model_battery;
             engine.device = "cpu".into();
             eprintln!("Ready on CPU.");
@@ -316,6 +373,7 @@ fn load_engine(ctx: &AppCtx, engine: &mut Engine, target: &str) {
             engine.device = "cpu".into();
         }
     }
+    refresh_status(ctx, engine);
 }
 
 /// `ensure_device`: swap the serving engine to `target` if needed. Healthy
@@ -330,17 +388,22 @@ pub fn ensure_device(app: &AppHandle, target: &str) {
         let mut engine = lock(&ctx.engine);
         let healthy = engine.device == target
             && match target {
-                "gpu" => engine.worker.as_mut().is_some_and(GpuWorker::alive),
+                "gpu" => engine.worker.as_ref().is_some_and(|w| w.alive()),
                 _ => engine.transcriber.is_some(),
             };
         if healthy {
+            refresh_status(&ctx, &engine);
             return;
         }
-        if let Some(mut w) = engine.worker.take() {
+        if let Some(w) = engine.worker.take() {
+            // With a request in flight this kills immediately; the take
+            // retries on CPU (never-lose-a-take) — and on the AC->battery
+            // flip the dGPU no longer has to wait out the take to sleep.
             w.stop();
         }
         load_engine(&ctx, &mut engine, target);
-        // the in-process CPU model (if any) drops here, freeing its RAM
+        // The outgoing in-process CPU model (if any) drops here — or, when
+        // an in-flight take still holds its Arc, when that take finishes.
     }
     push_panel(app, "tiroSetEngine", engine_dict(&ctx));
 }
@@ -353,10 +416,23 @@ pub fn latch_gpu_off(ctx: &AppCtx) {
 
 /// Kill the GPU worker synchronously (quit/restart path): its exit is what
 /// releases the GPU context, so it must die BEFORE this process goes away.
+///
+/// Runs on the MAIN THREAD (tray menu), so it must never wait: `try_lock`
+/// — if the engine lock is busy (a model load / GPU spawn / crash-fallback
+/// reload) there is no serving worker to take anyway (loads kill the
+/// outgoing worker first), and a child mid-spawn is covered by the
+/// stdin-EOF orphan backstop when this process exits. `GpuWorker::stop`
+/// itself kills immediately when a request is in flight; the mid-transcribe
+/// take is abandoned, matching the original's shutdown contract
+/// (PORTING_NOTES §8: "never block exit on cleanup").
 pub fn stop_worker(app: &AppHandle) {
     let ctx = app.state::<AppCtx>();
-    let worker = lock(&ctx.engine).worker.take();
-    if let Some(mut w) = worker {
+    let worker = match ctx.engine.try_lock() {
+        Ok(mut engine) => engine.worker.take(),
+        Err(TryLockError::Poisoned(p)) => p.into_inner().worker.take(),
+        Err(TryLockError::WouldBlock) => None,
+    };
+    if let Some(w) = worker {
         w.stop();
     }
 }
@@ -644,6 +720,12 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
     let mut rec: Option<store::Rec> = None;
     let mut is_vault = true;
     let worker = std::panic::AssertUnwindSafe(|| {
+        // Serialize takes like the original's `_xscribe_lock`. Only sibling
+        // transcribe workers ever contend here — the engine lock is NOT held
+        // across the whisper call (the freeze of record: a main-thread
+        // get_state IPC queued behind it and wedged the whole GTK loop,
+        // pill, tray and exit path included).
+        let _serial = lock(&ctx.xscribe);
         let audio16 = audio::resample_to_16k(&take.samples, take.rate);
         let (cleanup_mode, vocab) = {
             let cfg = lock(&ctx.cfg);
@@ -652,59 +734,90 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
                 transcribe::get_vocab_prompt(&app_dir(), &cfg),
             )
         };
-        // The engine lock serializes transcription like the original's
-        // _xscribe_lock (and blocks device swaps mid-take). GPU can afford
-        // accuracy (beam 5); CPU stays fast (beam 1).
+        /// What serves this take, cloned out of the engine under a short
+        /// lock; the transcription runs on the Arcs with the lock released.
+        enum Serving {
+            Gpu(Option<Arc<GpuWorker>>),
+            Cpu(Option<Arc<Transcriber>>),
+        }
+        let (serving, mut model_name) = {
+            let engine = lock(&ctx.engine);
+            // The chip snapshot becomes this take's start-time truth
+            // (design rule 8) for any get_state that lands mid-take.
+            refresh_status(&ctx, &engine);
+            let serving = if engine.device == "gpu" {
+                Serving::Gpu(engine.worker.clone())
+            } else {
+                Serving::Cpu(engine.transcriber.clone())
+            };
+            (serving, engine.model_name.clone())
+        };
+        // GPU can afford accuracy (beam 5); CPU stays fast (beam 1).
         let mut engine_flipped = false;
-        let (verbatim, model_name, device) = {
-            let mut engine = lock(&ctx.engine);
-            if engine.device == "gpu" {
-                let result = engine
-                    .worker
-                    .as_mut()
+        let (verbatim, device) = match serving {
+            Serving::Cpu(None) => {
+                eprintln!("transcribe skipped: model not ready");
+                return Outcome::Model;
+            }
+            Serving::Cpu(Some(t)) => match t.transcribe(&audio16, 1, vocab.as_deref()) {
+                Ok(text) => (text, "cpu".to_string()),
+                Err(e) => {
+                    eprintln!("transcribe failed: {e}");
+                    return Outcome::Error;
+                }
+            },
+            Serving::Gpu(gpu) => {
+                let result = gpu
+                    .as_deref()
                     .ok_or_else(|| "GPU worker already gone".to_string())
                     .and_then(|w| w.transcribe(&audio16, 5, vocab.as_deref()));
                 match result {
-                    Ok(text) => (text, engine.model_name.clone(), "gpu".to_string()),
+                    Ok(text) => (text, "gpu".to_string()),
                     Err(e) => {
                         // The worker crashed / timed out MID-TAKE. The take
-                        // must not be lost: kill the worker, latch the GPU
-                        // off (the periodic re-probe allows a respawn
-                        // later), load the battery model in-process, and
+                        // must not be lost: latch the GPU off (the periodic
+                        // re-probe allows a respawn later), swap the engine
+                        // to the battery model — holding the engine lock
+                        // across this load is safe now that nothing
+                        // main-thread-reachable ever waits on it — and
                         // transcribe the SAME audio on CPU right here.
                         eprintln!(
                             "gpu-worker: request failed ({e}); \
                              falling back to in-process CPU for this take"
                         );
                         ctx.gpu_ok.store(false, Ordering::SeqCst);
-                        if let Some(mut w) = engine.worker.take() {
-                            w.stop();
-                        }
-                        load_engine(&ctx, &mut engine, "cpu");
-                        engine_flipped = true;
-                        let Some(t) = engine.transcriber.as_ref() else {
+                        let transcriber = {
+                            let mut engine = lock(&ctx.engine);
+                            // Only tear down OUR worker — a concurrent
+                            // device swap may already serve a replacement
+                            // engine, which must not be killed for a crash
+                            // it didn't have.
+                            let ours = match (&engine.worker, &gpu) {
+                                (Some(cur), Some(failed)) => Arc::ptr_eq(cur, failed),
+                                (None, _) => engine.device == "gpu",
+                                _ => false,
+                            };
+                            if ours {
+                                if let Some(w) = engine.worker.take() {
+                                    w.stop();
+                                }
+                                load_engine(&ctx, &mut engine, "cpu");
+                                engine_flipped = true;
+                            }
+                            model_name = engine.model_name.clone();
+                            engine.transcriber.clone()
+                        };
+                        let Some(t) = transcriber else {
                             eprintln!("CPU fallback load failed too");
                             return Outcome::Error;
                         };
                         match t.transcribe(&audio16, 1, vocab.as_deref()) {
-                            Ok(text) => (text, engine.model_name.clone(), "cpu".to_string()),
+                            Ok(text) => (text, "cpu".to_string()),
                             Err(e) => {
                                 eprintln!("transcribe failed: {e}");
                                 return Outcome::Error;
                             }
                         }
-                    }
-                }
-            } else {
-                let Some(transcriber) = engine.transcriber.as_ref() else {
-                    eprintln!("transcribe skipped: model not ready");
-                    return Outcome::Model;
-                };
-                match transcriber.transcribe(&audio16, 1, vocab.as_deref()) {
-                    Ok(text) => (text, engine.model_name.clone(), "cpu".to_string()),
-                    Err(e) => {
-                        eprintln!("transcribe failed: {e}");
-                        return Outcome::Error;
                     }
                 }
             }
@@ -873,4 +986,90 @@ pub fn cancel_record(app: &AppHandle) {
     hide_pill(app, &ctx);
     play(&ctx, "cancel");
     eprintln!("recording cancelled");
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    /// Regression guard for the tray-Restart freeze: `engine_dict` is
+    /// reached from the main thread (get_state IPC) and must return
+    /// promptly — with the last-known snapshot — while the engine lock is
+    /// held by engine-length work (a transcription-era hold, a CPU model
+    /// load, a GPU spawn). On the old shape `engine_dict` blocked on
+    /// `lock(&ctx.engine)` and this test fails on the elapsed-time assert.
+    #[test]
+    fn engine_dict_returns_snapshot_while_engine_lock_is_held() {
+        let ctx = AppCtx::new();
+        {
+            let mut engine = lock(&ctx.engine);
+            engine.model_name = "large-v3-turbo".into();
+            engine.device = "cpu".into();
+            refresh_status(&ctx, &engine);
+        }
+        let ctx = &ctx;
+        std::thread::scope(|s| {
+            let (locked_tx, locked_rx) = channel();
+            s.spawn(move || {
+                // Simulate a load/take holding the engine lock for 3 s.
+                let _engine = lock(&ctx.engine);
+                locked_tx.send(()).expect("test channel");
+                std::thread::sleep(Duration::from_secs(3));
+            });
+            locked_rx.recv().expect("holder thread locked");
+            let t0 = Instant::now();
+            let dict = engine_dict(ctx);
+            assert!(
+                t0.elapsed() < Duration::from_secs(2),
+                "engine_dict blocked on the busy engine lock ({}s)",
+                t0.elapsed().as_secs_f64()
+            );
+            assert_eq!(dict["model"], "large-v3-turbo", "snapshot model served");
+            assert_eq!(dict["device"], "CPU", "snapshot device served");
+        });
+    }
+
+    /// When the engine lock is free, `engine_dict` must serve (and cache)
+    /// the LIVE truth, not a stale snapshot — a silently-changed engine
+    /// shows through on the next idle read.
+    #[test]
+    fn engine_dict_refreshes_snapshot_when_engine_is_free() {
+        let ctx = AppCtx::new();
+        lock(&ctx.engine).model_name = "base.en".into();
+        let dict = engine_dict(&ctx);
+        assert_eq!(dict["model"], "base.en");
+        assert_eq!(dict["device"], "CPU", "no live worker -> CPU");
+        assert_eq!(lock(&ctx.status).model, "base.en", "snapshot refreshed");
+    }
+
+    /// The exit path (`stop_worker`, main thread via tray Restart/Quit)
+    /// must never wait on a busy engine lock either.
+    #[test]
+    fn stop_worker_shape_never_waits_on_a_busy_engine() {
+        // stop_worker needs an AppHandle, so exercise the same primitive it
+        // uses: try_lock on a lock held elsewhere must yield WouldBlock
+        // immediately rather than queueing. This pins the contract that the
+        // exit path is built on.
+        let ctx = AppCtx::new();
+        let ctx = &ctx;
+        std::thread::scope(|s| {
+            let (locked_tx, locked_rx) = channel();
+            let (done_tx, done_rx) = channel::<()>();
+            s.spawn(move || {
+                let _engine = lock(&ctx.engine);
+                locked_tx.send(()).expect("test channel");
+                done_rx.recv().expect("release signal");
+            });
+            locked_rx.recv().expect("holder thread locked");
+            let t0 = Instant::now();
+            assert!(
+                matches!(ctx.engine.try_lock(), Err(TryLockError::WouldBlock)),
+                "expected WouldBlock from a busy engine lock"
+            );
+            assert!(t0.elapsed() < Duration::from_millis(500));
+            done_tx.send(()).expect("test channel");
+        });
+    }
 }

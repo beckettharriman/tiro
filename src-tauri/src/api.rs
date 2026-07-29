@@ -529,7 +529,7 @@ fn hot_apply_model_change(app: &AppHandle) {
         let ctx = app.state::<AppCtx>();
         {
             let mut engine = lock(&ctx.engine);
-            if let Some(mut w) = engine.worker.take() {
+            if let Some(w) = engine.worker.take() {
                 w.stop();
             }
             engine.transcriber = None;

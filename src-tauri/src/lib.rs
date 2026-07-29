@@ -24,8 +24,13 @@ pub mod transcribe;
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
+// Async on purpose: sync commands run inline in the webview IPC handler ON
+// THE MAIN THREAD (Linux/WebKitGTK), and get_state is the heavy snapshot
+// (mic enumeration, transcript read — easily a second). An async command
+// runs on the runtime's worker pool, keeping the GTK loop free; the panel
+// already treats it as a promise either way.
 #[tauri::command]
-fn get_state(app: tauri::AppHandle) -> Value {
+async fn get_state(app: tauri::AppHandle) -> Value {
     api::get_state(&app)
 }
 
@@ -121,10 +126,8 @@ fn power_watcher(app: tauri::AppHandle) {
             // keep claiming GPU: latch it off so resolve_target steers to CPU
             // below; the periodic re-probe allows a respawn later.
             {
-                let mut engine = flow::lock(&ctx.engine);
-                if engine.device == "gpu"
-                    && !engine.worker.as_mut().is_some_and(gpu::GpuWorker::alive)
-                {
+                let engine = flow::lock(&ctx.engine);
+                if engine.device == "gpu" && !engine.worker.as_ref().is_some_and(|w| w.alive()) {
                     eprintln!("power: GPU worker died unexpectedly; latching GPU off");
                     flow::latch_gpu_off(&ctx);
                 }
