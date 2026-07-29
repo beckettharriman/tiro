@@ -24,9 +24,18 @@ pub mod transcribe;
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
+// Async on purpose: sync commands run inline in the webview IPC handler ON
+// THE MAIN THREAD (Linux/WebKitGTK), and get_state is the heavy snapshot
+// (mic enumeration, transcript read — easily a second). The body itself is
+// synchronous, so it goes through spawn_blocking: the shared async pool
+// (portal listeners live there) must not stall on it either. The panel
+// treats the result as a promise either way; a join failure surfaces as an
+// invoke rejection, same as a panic did when the command was sync.
 #[tauri::command]
-fn get_state(app: tauri::AppHandle) -> Value {
-    api::get_state(&app)
+async fn get_state(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::get_state(&app))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -121,10 +130,8 @@ fn power_watcher(app: tauri::AppHandle) {
             // keep claiming GPU: latch it off so resolve_target steers to CPU
             // below; the periodic re-probe allows a respawn later.
             {
-                let mut engine = flow::lock(&ctx.engine);
-                if engine.device == "gpu"
-                    && !engine.worker.as_mut().is_some_and(gpu::GpuWorker::alive)
-                {
+                let engine = flow::lock(&ctx.engine);
+                if engine.device == "gpu" && !engine.worker.as_ref().is_some_and(|w| w.alive()) {
                     eprintln!("power: GPU worker died unexpectedly; latching GPU off");
                     flow::latch_gpu_off(&ctx);
                 }

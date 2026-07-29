@@ -13,12 +13,15 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::audio;
+use crate::flow::lock;
 
 pub const READY_TIMEOUT_CACHED: Duration = Duration::from_secs(30);
 pub const READY_TIMEOUT_DOWNLOAD: Duration = Duration::from_secs(120);
@@ -30,10 +33,27 @@ enum Frame {
     Dead(String),
 }
 
-pub struct GpuWorker {
-    child: Child,
+/// The request pipe state: held for the WHOLE framed request/response, so
+/// it lives under its own lock — a transcription-length hold that nothing
+/// short-lived (alive checks, exit-path kills) may ever queue behind.
+struct WorkerIo {
     stdin: Option<ChildStdin>,
     frames: Receiver<Frame>,
+}
+
+pub struct GpuWorker {
+    /// Long-held per request (`transcribe`).
+    io: Mutex<WorkerIo>,
+    /// Always short-held: `try_wait` / `kill`. Kept separate from `io` so
+    /// the exit path can kill a worker mid-request without waiting out the
+    /// transcription (the tray Restart/Quit handlers run on the main
+    /// thread, which must never block on take-length work).
+    child: Mutex<Child>,
+    /// Set by `stop()` before the pipes die: this worker was stopped ON
+    /// PURPOSE (device swap, model change, shutdown). The crash-fallback
+    /// reads it to tell a deliberate mid-take kill from a real crash —
+    /// only the latter may latch the GPU off.
+    stopped: AtomicBool,
     pub model: String,
 }
 
@@ -124,13 +144,16 @@ impl GpuWorker {
             }
         });
 
-        let mut worker = Self {
-            child,
-            stdin,
-            frames: rx,
+        let worker = Self {
+            io: Mutex::new(WorkerIo { stdin, frames: rx }),
+            child: Mutex::new(child),
+            stopped: AtomicBool::new(false),
             model: model.to_string(),
         };
-        match worker.frames.recv_timeout(ready_timeout) {
+        // The io guard is a temporary: it drops at the end of this statement,
+        // so the failure arms below can run `stop()`'s graceful path.
+        let ready = lock(&worker.io).frames.recv_timeout(ready_timeout);
+        match ready {
             Ok(Frame::Ready(v)) if v["ready"].as_bool() == Some(true) => Ok(worker),
             Ok(Frame::Ready(v)) => {
                 let err = v["error"].as_str().unwrap_or("unknown load failure").into();
@@ -160,15 +183,18 @@ impl GpuWorker {
     }
 
     /// Still running? (A dead child must never show a green GPU chip.)
-    pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    /// Short-held `child` lock only — safe from any thread at any time,
+    /// including while a request holds `io`.
+    pub fn alive(&self) -> bool {
+        matches!(lock(&self.child).try_wait(), Ok(None))
     }
 
     /// One framed request/response. On error or timeout the caller must
     /// treat this worker as lost (kill it and retry the SAME audio on CPU
-    /// — a take can never be lost to the GPU path).
+    /// — a take can never be lost to the GPU path). Holds `io` for the
+    /// whole request; concurrent callers serialize here.
     pub fn transcribe(
-        &mut self,
+        &self,
         audio16: &[f32],
         beam: usize,
         vocab: Option<&str>,
@@ -180,7 +206,8 @@ impl GpuWorker {
             "language": "en",
         }))
         .map_err(|e| e.to_string())?;
-        let stdin = self.stdin.as_mut().ok_or("worker stdin already closed")?;
+        let mut io = lock(&self.io);
+        let stdin = io.stdin.as_mut().ok_or("worker stdin already closed")?;
         stdin
             .write_all(&(header.len() as u32).to_le_bytes())
             .and_then(|()| stdin.write_all(&header))
@@ -197,7 +224,7 @@ impl GpuWorker {
         // 2x realtime + 30 s, like the original's per-request timeout.
         let secs = audio16.len() as f64 / audio::SAMPLE_RATE as f64;
         let timeout = Duration::from_secs_f64(secs * 2.0 + 30.0);
-        match self.frames.recv_timeout(timeout) {
+        match io.frames.recv_timeout(timeout) {
             Ok(Frame::Response(v)) => {
                 if v["ok"].as_bool() == Some(true) {
                     let joined = v["segments"]
@@ -226,24 +253,46 @@ impl GpuWorker {
         }
     }
 
-    /// Close stdin (EOF -> clean child exit), then escalate to kill after
-    /// 3 s. Consumes the worker.
-    pub fn stop(&mut self) {
-        drop(self.stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    return;
+    /// Stop the worker. Idle: close stdin (EOF -> clean child exit), then
+    /// escalate to kill after 3 s. With a request in flight (`io` busy) the
+    /// graceful path would mean waiting out a transcription — and the exit
+    /// path runs on the main thread — so kill immediately instead: the
+    /// dying pipes surface as an io error to the in-flight `transcribe`,
+    /// whose caller retries the take on CPU (never-lose-a-take).
+    /// Whether `stop()` ran (or started) on this worker — i.e. its death
+    /// was deliberate, not a crash. Set BEFORE the pipes die, so by the
+    /// time an in-flight request surfaces the resulting error this flag is
+    /// already visible.
+    pub fn was_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let graceful = match self.io.try_lock() {
+            Ok(mut io) => {
+                drop(io.stdin.take());
+                true
+            }
+            Err(TryLockError::Poisoned(p)) => {
+                drop(p.into_inner().stdin.take());
+                true
+            }
+            Err(TryLockError::WouldBlock) => false,
+        };
+        let mut child = lock(&self.child);
+        if graceful {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                    Err(_) => break,
                 }
             }
         }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -272,7 +321,7 @@ pub fn gpu_test(wav: &str, device: &str) {
         audio16.len()
     );
     let t0 = Instant::now();
-    let mut worker = match GpuWorker::spawn(
+    let worker = match GpuWorker::spawn(
         "base.en",
         Path::new("models"),
         "int8",
