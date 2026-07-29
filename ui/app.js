@@ -62,6 +62,10 @@
   function tToAlpha(t) { return 0.95 - 0.65 * (Math.max(0, Math.min(100, t)) / 100); }
   function alphaToT(a) { return Math.round((0.95 - Math.max(0.30, Math.min(0.95, a))) / 0.65 * 100); }
 
+  /* ── reduced motion: skip settle waits and smooth scrolling ──────────── */
+  const _rmq = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  function motionReduced() { return !!(_rmq && _rmq.matches); }
+
   /* ════════════════════════════════════════════════════════════════════
      API — real pywebview bridge, or a MOCK for standalone file:// preview
      ════════════════════════════════════════════════════════════════════ */
@@ -479,28 +483,61 @@
     Promise.resolve(api.begin_drag && api.begin_drag()).catch(() => {});
   });
 
-  /* ── expand / collapse: the OS window resizes 400<->800 around the
-     panel's own width transition (grow: window first so nothing clips;
-     shrink: window after the 520 ms settle) ─────────────────────────────── */
+  /* ── expand / collapse: two surfaces move here — the OS window (instant,
+     transparent, top-right corner fixed by the backend) and the glass
+     panel (CSS width, 520 ms). The window must never be the thing the eye
+     sees move:
+       grow:   window jumps to 800 FIRST, then the glass animates 400->800
+               inside the already-big window once the viewport is actually
+               wide (resize event — the invoke ack races the real resize,
+               so starting on the ack alone clips the animation);
+       shrink: the glass animates down first, the window snaps to 400 only
+               after the 520 ms settle (instantly under reduced motion).
+     While the window is wider than the glass (~520 ms per direction) the
+     transparent margin still belongs to the panel window and eats clicks —
+     accepted: no cross-platform per-pixel input shaping, and at rest the
+     window always matches the glass exactly. ──────────────────────────── */
   const expandBtn = $("expandBtn");
   let advTimer = null;
+  let advGen = 0;
+  /* run fn once the viewport is at least px wide — immediately if it
+     already is, else on the resize event the native window change fires,
+     with a deadline fallback so a missed resize can never wedge expand */
+  function whenWide(px, deadlineMs, fn) {
+    if (window.innerWidth >= px) { fn(); return; }
+    let fired = false;
+    const finish = () => {
+      if (fired) return;
+      fired = true;
+      window.removeEventListener("resize", check);
+      clearTimeout(tm);
+      fn();
+    };
+    const check = () => { if (window.innerWidth >= px) finish(); };
+    const tm = setTimeout(finish, deadlineMs);
+    window.addEventListener("resize", check);
+  }
   function setAdv(on) {
     if (App.adv === on) return;
     App.adv = on;
     clearTimeout(advTimer);
+    const gen = ++advGen;
     if (on) {
-      Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {}).then(() => {
-        panel.classList.add("adv");
-      });
       expandBtn.title = "Collapse";
       renderAdv();
       ensureMic();
+      Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {}).then(() => {
+        whenWide(780, 350, () => {
+          if (gen !== advGen) return; /* collapsed again before the window grew */
+          panel.classList.add("adv");
+        });
+      });
     } else {
       panel.classList.remove("adv");
       expandBtn.title = "Expand";
       advTimer = setTimeout(() => {
         Promise.resolve(api.set_expanded && api.set_expanded(false)).catch(() => {});
-      }, 560);
+      }, motionReduced() ? 0 : 560);
     }
   }
   expandBtn.addEventListener("click", () => {

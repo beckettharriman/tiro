@@ -42,12 +42,18 @@ body{
   -webkit-font-smoothing:antialiased;
   overflow:hidden;
   background:transparent;              /* frameless transparent OS window */
+  /* right-anchor the glass: the OS window jumps to its final width around
+     the 520 ms surface transition (expand: window first, collapse: window
+     after the settle) with its top-right corner fixed — so the surface
+     must hug the right edge of the transparent window throughout */
+  display:flex; justify-content:flex-end;
 }
 a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 
 /* ============ PANEL ============ */
 .panel{
   position:relative;
+  flex:none;                           /* never squeezed by the body flexbox */
   width:400px; height:560px;
   border-radius:var(--r-surface);
   background:rgba(var(--glass-rgb), var(--glass-a));
