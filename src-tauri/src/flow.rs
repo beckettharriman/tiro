@@ -652,6 +652,16 @@ pub fn start_mic_monitor(app: &AppHandle) -> serde_json::Value {
     std::thread::spawn(move || match Recording::start(&mic) {
         Ok(rec) => {
             let _ = tx.send(Ok(rec.mic_name().to_string()));
+            // LATE-OPEN GUARD: if this open outlived its start request —
+            // the caller timed out (it invalidated the gen below) or a
+            // stop/re-start/recording superseded it while the mic was
+            // opening — close the stream NOW, before the loop: a monitor
+            // the UI believes failed must never run as a hot mic.
+            if app.state::<AppCtx>().monitor_gen.load(Ordering::SeqCst) != gen {
+                drop(rec.stop());
+                notify_monitor_ended(&app);
+                return;
+            }
             let meter = rec.level_meter();
             let started = std::time::Instant::now();
             loop {
@@ -668,11 +678,7 @@ pub fn start_mic_monitor(app: &AppHandle) -> serde_json::Value {
                 push_input_level(&app, audio::perceptual_level(meter.take_peak()));
             }
             drop(rec.stop()); // close the stream; monitored audio is discarded
-                              // Tell the panel monitoring ended — covers recording-wins, the
-                              // hot-mic backstop and shutdown, so the Test button resets.
-            if let Some(w) = app.get_webview_window("panel") {
-                let _ = w.eval("window.tiroInputMonitor&&window.tiroInputMonitor(false)");
-            }
+            notify_monitor_ended(&app);
         }
         Err(e) => {
             let _ = tx.send(Err(e.to_string()));
@@ -681,7 +687,21 @@ pub fn start_mic_monitor(app: &AppHandle) -> serde_json::Value {
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(mic_name)) => json!({ "ok": true, "mic": mic_name }),
         Ok(Err(e)) => json!({ "ok": false, "error": e }),
-        Err(_) => json!({ "ok": false, "error": "microphone open timed out" }),
+        Err(_) => {
+            // Invalidate this monitor's generation so a late-landing open
+            // hits the guard above and closes its stream instead of
+            // running a monitor the UI just reported as failed.
+            ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
+            json!({ "ok": false, "error": "microphone open timed out" })
+        }
+    }
+}
+
+/// Tell the panel the monitor ended — covers recording-wins, the hot-mic
+/// backstop, shutdown and the late-open guard, so the Test button resets.
+fn notify_monitor_ended(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.eval("window.tiroInputMonitor&&window.tiroInputMonitor(false)");
     }
 }
 
