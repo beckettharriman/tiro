@@ -63,6 +63,22 @@ the portal is absent or denied (some compositors ship no GlobalShortcuts
 backend), Tiro keeps the grabs — which only fire while an XWayland
 window has focus — and logs the failure.
 
+The portal only talks to callers it can identify: it reads the app id
+from the process's systemd user unit (an `app-…` scope or service) and
+requires a matching `<app id>.desktop` in the XDG applications dirs —
+otherwise every request is refused with `NotAllowed: An app id is
+required`. Tiro handles the first half itself by moving into an
+`app-dev.tiro.app-<pid>.scope` at startup when the launcher didn't
+provide one (terminal/script launches; menu launches are already scoped).
+The second half is a one-time install for non-packaged builds:
+
+```sh
+cp src-tauri/linux/dev.tiro.app.desktop ~/.local/share/applications/
+```
+
+tiro.log shows the resolved scope/app id (`app scope: …` lines) and
+names the missing piece if the portal still refuses.
+
 The everywhere-working Wayland fallback is a **desktop-level shortcut
 bound to Tiro's CLI**. A second `tiro` launch is forwarded to the
 running instance (single-instance IPC), so these commands act as a
