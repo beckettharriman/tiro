@@ -45,31 +45,42 @@ const SETTLE_MS: u64 = 120;
 
 /// Inject a Ctrl+V paste chord at the current cursor/focus position.
 ///
-/// `restore_token` is the persisted RemoteDesktop-portal token ("" = none).
-/// On success the portal backend may return a NEW token that the caller must
-/// persist for the next session; the other backends return `None`.
+/// `load_token`/`save_token` read and persist the RemoteDesktop-portal
+/// restore token ("" = none). Only the Wayland portal backend uses them, and
+/// it calls both under its own paste lock — restore tokens are single-use,
+/// so concurrent pastes must never interleave a read with a persist. The
+/// other backends ignore them.
 #[cfg(windows)]
-pub fn paste_at_cursor(_restore_token: &str) -> Result<Option<String>, String> {
-    windows_impl::paste().map(|()| None)
+pub fn paste_at_cursor(
+    _load_token: impl FnOnce() -> String,
+    _save_token: impl FnOnce(&str),
+) -> Result<(), String> {
+    windows_impl::paste()
 }
 
 /// See the Windows variant for the contract.
 #[cfg(target_os = "linux")]
-pub fn paste_at_cursor(restore_token: &str) -> Result<Option<String>, String> {
+pub fn paste_at_cursor(
+    load_token: impl FnOnce() -> String,
+    save_token: impl FnOnce(&str),
+) -> Result<(), String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         // A Wayland session, even though Tiro itself runs as an XWayland
         // client: only the portal reaches native Wayland apps.
-        portal_impl::paste(restore_token)
+        portal_impl::paste(load_token, save_token)
     } else {
-        x11_impl::paste().map(|()| None)
+        x11_impl::paste()
     }
 }
 
 /// Close the long-lived RemoteDesktop portal session, if one was ever
-/// created. Must be called on every app exit path (all of them funnel
-/// through `RunEvent::Exit`) — ashpd sessions have no Drop hook, so only an
-/// explicit Close ends the desktop's "remote control" indicator before the
-/// process is fully gone.
+/// created. Called from the `RunEvent::Exit` hook, which the graceful exits
+/// raise (tray Quit via `app.exit`, tray Restart via `request_restart`).
+/// Killed processes (SIGTERM/SIGKILL) never reach it — for those the
+/// backstop is process death itself: the D-Bus disconnect ends the session
+/// on the portal side. An explicit Close is still worth it here because
+/// ashpd sessions have no Drop hook, and on restart the old process's D-Bus
+/// teardown may lag the new instance.
 #[cfg(target_os = "linux")]
 pub fn close_portal_session() {
     portal_impl::close_session();
@@ -345,14 +356,50 @@ mod portal_impl {
         PORTAL.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Paste via the RemoteDesktop portal. Returns the refreshed restore
-    /// token to persist whenever a session was (re)created — portal restore
-    /// tokens are single-use, so every successful Start hands back a
-    /// replacement. A reused session returns `None`: nothing new to persist.
-    pub fn paste(restore_token: &str) -> Result<Option<String>, String> {
+    /// Serializes whole pastes, NOT just slot access. Pastes are NOT
+    /// serialized upstream: `inject_paste` runs on the transcription worker
+    /// in `finish`, after flow's busy flag is released, so paste N can still
+    /// be blocked on the portal permission dialog when take N+1 finishes and
+    /// pastes concurrently. Unserialized, the second thread would find the
+    /// slot empty and Start a SECOND session (a second KDE notification plus
+    /// a stacked permission dialog), and the two Starts would interleave
+    /// their single-use restore-token reads/writes — last write wins, and if
+    /// the loser's token is the live one, the next app launch re-prompts.
+    static PASTE_GATE: Mutex<()> = Mutex::new(());
+
+    fn paste_gate() -> MutexGuard<'static, ()> {
+        // Poisoning: a previous paste panicked; the gate itself is stateless.
+        PASTE_GATE.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Paste via the RemoteDesktop portal.
+    ///
+    /// The entire critical section — token load, session lookup/Start,
+    /// injection, token persist — runs under `PASTE_GATE` (held across the
+    /// sync `block_on`, so no lock is held across an await). The refreshed
+    /// restore token is persisted in here, under the gate, for the reason on
+    /// `PASTE_GATE`; a reused session refreshes nothing.
+    pub fn paste(
+        load_token: impl FnOnce() -> String,
+        save_token: impl FnOnce(&str),
+    ) -> Result<(), String> {
+        let _gate = paste_gate();
+        let loaded = load_token();
         // ashpd is async; ride tauri's tokio runtime from this worker thread.
-        tauri::async_runtime::block_on(paste_async(restore_token))
-            .map_err(|e| format!("RemoteDesktop portal: {e}"))
+        let refreshed = tauri::async_runtime::block_on(paste_async(&loaded))
+            .map_err(|e| format!("RemoteDesktop portal: {e}"))?;
+        persist_token(&loaded, refreshed, save_token);
+        Ok(())
+    }
+
+    /// Persist the replacement token when the portal handed one back and it
+    /// actually changed (no pointless config writes).
+    fn persist_token(loaded: &str, refreshed: Option<String>, save: impl FnOnce(&str)) {
+        if let Some(t) = refreshed {
+            if t != loaded {
+                save(&t);
+            }
+        }
     }
 
     /// Close the long-lived session (app exit).
@@ -365,12 +412,54 @@ mod portal_impl {
     /// holding the slot's session — is a quiet no-op; in the latter case
     /// process exit drops the D-Bus connection moments later and the portal
     /// ends the session with it.
+    ///
+    /// This runs on the main thread during `RunEvent::Exit`, so the Close is
+    /// done on a helper thread with a deadline — a wedged portal must delay
+    /// Quit by at most ~2 s, and past that the D-Bus disconnect at process
+    /// death ends the session anyway.
     pub fn close_session() {
-        let taken = portal_slot().take();
-        if let Some(p) = taken {
-            match tauri::async_runtime::block_on(p.session.close()) {
-                Ok(()) => eprintln!("inject: portal session closed on exit"),
-                Err(e) => eprintln!("inject: portal session close on exit failed: {e}"),
+        let Some(p) = portal_slot().take() else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        // The handle is deliberately dropped (detached): on timeout the
+        // thread may be stuck inside the portal call, and the process is
+        // about to exit either way.
+        std::thread::spawn(move || {
+            let _ = tx.send(tauri::async_runtime::block_on(p.session.close()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Ok(())) => eprintln!("inject: portal session closed on exit"),
+            Ok(Err(e)) => eprintln!("inject: portal session close on exit failed: {e}"),
+            Err(_) => eprintln!("inject: portal session close timed out; exiting anyway"),
+        }
+    }
+
+    /// Holds a session that is out of the slot. If a panic unwinds past it,
+    /// `Drop` puts the session back in the slot so `close_session` at exit
+    /// can still end it — a bare drop would leak the session until process
+    /// death (no Drop hook in ashpd). Normal paths consume it first: `drop`
+    /// after re-stowing is the success path, `close_quietly` the stale path.
+    struct Held(Option<Portal>);
+
+    impl Held {
+        /// Explicit-name alias for the Drop behavior: session goes back in
+        /// the slot.
+        fn stow_back(self) {}
+
+        /// Close the held session, best effort — used when it is stale (the
+        /// usual close failure is the session already being gone portal-side).
+        async fn close_quietly(mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = p.session.close().await;
+            }
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                *portal_slot() = Some(p);
             }
         }
     }
@@ -380,29 +469,23 @@ mod portal_impl {
     /// compositor hiccup, permission revoked) — the recreate happens within
     /// the same paste, so a stale session still lands this take.
     ///
-    /// The session is taken OUT of the slot for the duration of the paste —
-    /// the mutex is never held across an await. Pastes are serialized
-    /// upstream (flow's busy flag / session ids), so the slot cannot race
-    /// another paste in practice; `stow` still closes any displaced session
-    /// rather than leaking it.
+    /// The session is taken OUT of the slot (inside `Held`) for the duration
+    /// of the paste — the slot mutex is never held across an await, and
+    /// `PASTE_GATE` guarantees no other paste touches the slot meanwhile.
     async fn paste_async(restore_token: &str) -> Result<Option<String>, ashpd::Error> {
         use ashpd::desktop::CreateSessionOptions;
 
-        // Bound OUTSIDE the `if let`: as a scrutinee, the guard temporary
-        // from `portal_slot()` would live (locked) through the whole body.
-        let live = portal_slot().take();
-        if let Some(p) = live {
+        let held = Held(portal_slot().take());
+        if let Some(p) = held.0.as_ref() {
             match inject_chord(&p.proxy, &p.session).await {
                 Ok(()) => {
                     eprintln!("inject: portal session reused");
-                    stow(p).await;
+                    held.stow_back();
                     return Ok(None);
                 }
                 Err(e) => {
                     eprintln!("inject: portal session stale ({e}); recreating");
-                    // Best effort — the usual cause is the session already
-                    // being gone on the portal side.
-                    let _ = p.session.close().await;
+                    held.close_quietly().await;
                 }
             }
         }
@@ -412,9 +495,12 @@ mod portal_impl {
             .create_session(CreateSessionOptions::default())
             .await?;
         // From here on a live portal session exists on the bus: it must
-        // either end up stowed in PORTAL (closed later by `close_session`)
-        // or be explicitly closed before returning an error — never merely
-        // dropped (see `close_session` on why Drop is not enough).
+        // either end up in PORTAL (closed later by `close_session`) or be
+        // explicitly closed before returning an error — never merely
+        // dropped (see `close_session` on why Drop is not enough). A panic
+        // in this stretch WOULD drop it unclosed; that leak lasts until
+        // process death ends the D-Bus connection — an accepted panic-path
+        // tradeoff (`Held` covers the common taken-from-slot case above).
         let result = match start_session(&proxy, &session, restore_token).await {
             Ok(new_token) => inject_chord(&proxy, &session).await.map(|()| new_token),
             Err(e) => Err(e),
@@ -422,7 +508,7 @@ mod portal_impl {
         match result {
             Ok(new_token) => {
                 eprintln!("inject: portal session created");
-                stow(Portal { proxy, session }).await;
+                *portal_slot() = Some(Portal { proxy, session });
                 Ok(new_token)
             }
             Err(e) => {
@@ -431,15 +517,6 @@ mod portal_impl {
                 }
                 Err(e)
             }
-        }
-    }
-
-    /// Put the live session back in the slot; close whatever it displaces
-    /// (only ever occupied if pastes overlapped, which upstream prevents).
-    async fn stow(p: Portal) {
-        let displaced = portal_slot().replace(p);
-        if let Some(d) = displaced {
-            let _ = d.session.close().await;
         }
     }
 
@@ -523,6 +600,50 @@ mod portal_impl {
             assert!(portal_slot().is_none());
             close_session();
             assert!(portal_slot().is_none());
+        }
+
+        /// The gate that serializes whole pastes: no two threads may ever be
+        /// inside the critical section at once (the D1 race — a paste stuck
+        /// on the permission dialog while the next take's finish pastes).
+        #[test]
+        fn paste_gate_admits_one_paste_at_a_time() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static INSIDE: AtomicBool = AtomicBool::new(false);
+
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    std::thread::spawn(|| {
+                        for _ in 0..25 {
+                            let _gate = paste_gate();
+                            assert!(
+                                !INSIDE.swap(true, Ordering::SeqCst),
+                                "two pastes inside the gate at once"
+                            );
+                            std::thread::sleep(std::time::Duration::from_micros(50));
+                            INSIDE.store(false, Ordering::SeqCst);
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().expect("gate thread panicked");
+            }
+        }
+
+        /// Token persistence: only a real replacement is written back.
+        #[test]
+        fn persist_token_saves_only_changed_replacements() {
+            let mut saved: Option<String> = None;
+            persist_token("old", Some("new".into()), |t| saved = Some(t.into()));
+            assert_eq!(saved.as_deref(), Some("new"));
+
+            let mut saved: Option<String> = None;
+            persist_token("same", Some("same".into()), |t| saved = Some(t.into()));
+            assert_eq!(saved, None, "unchanged token must not be rewritten");
+
+            let mut saved: Option<String> = None;
+            persist_token("old", None, |t| saved = Some(t.into()));
+            assert_eq!(saved, None, "a reused session refreshes nothing");
         }
     }
 }
