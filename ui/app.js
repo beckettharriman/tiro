@@ -1088,13 +1088,22 @@
   $("recBtn2").addEventListener("click", onRecord);
 
   /* ════════════════════════════════════════════════════════════════════
-     INPUT LEVEL PREVIEW + TEST (design-native webview audio; inside the
-     real app getUserMedia is not attempted — the meter breathes idle)
+     INPUT LEVEL + TEST
+     Real app (bridge live): Test starts a backend monitor on the selected
+     mic that pushes real levels (~15/s, the pill's envelope math) into
+     window.tiroInputLevel; the meter draws only those — no webview mic,
+     and no hot mic outside an explicit Test.
+     Browser preview (mock): getUserMedia feeds the meter and Test echoes
+     the mic, as before.
      ════════════════════════════════════════════════════════════════════ */
   let audioCtx = null, analyser = null, micStream = null, micTried = false;
   let gainVal = 0.75, testing = false, monitorGain = null;
+  let realLevel = 0, realStamp = 0;
   const waveCanvas = $("waveCanvas");
   const wctx = waveCanvas.getContext("2d");
+  const levelSub = $("levelSub");
+  const LEVEL_IDLE_COPY = "Press Test to preview the selected microphone.";
+  const LEVEL_LIVE_COPY = "Live from the selected microphone.";
   async function ensureMic() {
     if (micTried) return;
     micTried = true;
@@ -1119,6 +1128,11 @@
   const NBARS = 26, bars = new Array(NBARS).fill(0.08);
   let simPhase = 0;
   function sampleLevel() {
+    if (bridgeReady()) {
+      /* real pushes only; a stale feed (>0.5 s) reads as silence */
+      if (testing && performance.now() - realStamp < 500) return realLevel;
+      return 0;
+    }
     if (analyser) {
       const d = new Uint8Array(analyser.fftSize);
       analyser.getByteTimeDomainData(d);
@@ -1158,14 +1172,41 @@
     $("gainVal").textContent = rngGain.value + "%";
     if (monitorGain) monitorGain.gain.value = gainVal;
   });
-  /* test: toggle live echo of the mic through the active output */
+  /* test: real app = start/stop the backend level monitor; preview = echo */
   const testBtn = $("testBtn");
+  function setMonitorUI(on) {
+    testing = on;
+    testBtn.textContent = on ? "Stop" : "Test";
+    if (bridgeReady()) {
+      levelSub.textContent = on ? LEVEL_LIVE_COPY : LEVEL_IDLE_COPY;
+      if (!on) realLevel = 0;
+    }
+  }
+  function monitorError(msg) {
+    setMonitorUI(false);
+    levelSub.textContent = msg || "Microphone unavailable.";
+  }
+  function startBackendMonitor() {
+    Promise.resolve(api.start_mic_monitor && api.start_mic_monitor()).then((res) => {
+      if (res && res.ok) setMonitorUI(true);
+      else monitorError(res && res.error);
+    }).catch(() => monitorError());
+  }
+  function stopBackendMonitor() {
+    Promise.resolve(api.stop_mic_monitor && api.stop_mic_monitor()).catch(() => {});
+    setMonitorUI(false);
+  }
   function stopMonitor() {
     if (monitorGain) { try { monitorGain.disconnect(); } catch (_) { /* noop */ } monitorGain = null; }
     testing = false;
     testBtn.textContent = "Test";
   }
   testBtn.addEventListener("click", async () => {
+    if (bridgeReady()) {
+      if (testing) stopBackendMonitor();
+      else startBackendMonitor();
+      return;
+    }
     if (testing) { stopMonitor(); return; }
     await ensureMic();
     if (!micStream) await restartMic();
@@ -1179,6 +1220,29 @@
     testing = true;
     testBtn.textContent = "Stop";
   });
+
+  /* no hot mic: the monitor stops when the Input section is left, the
+     advanced area collapses, the panel closes, or the window is hidden */
+  function stopMonitorIfLive() {
+    if (bridgeReady() && testing) stopBackendMonitor();
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopMonitorIfLive(); });
+  $("closeBtn").addEventListener("click", stopMonitorIfLive);
+  expandBtn.addEventListener("click", () => {
+    if (!panel.classList.contains("adv")) stopMonitorIfLive();
+  });
+  document.querySelectorAll(".navitem").forEach((n) => n.addEventListener("click", () => {
+    if (n.dataset.view !== "settings") stopMonitorIfLive();
+  }));
+  /* a mic change mid-test re-taps the newly selected device */
+  function retapMonitor() {
+    if (!bridgeReady() || !testing) return;
+    Promise.resolve(api.stop_mic_monitor && api.stop_mic_monitor()).catch(() => {});
+    setTimeout(startBackendMonitor, 150);
+  }
+  selMic.addEventListener("change", retapMonitor);
+  selMicT.addEventListener("change", retapMonitor);
+  if (bridgeReady()) levelSub.textContent = LEVEL_IDLE_COPY;
 
   /* ════════════════════════════════════════════════════════════════════
      STORAGE
@@ -1298,6 +1362,17 @@
     App.settings.storageFallback = !!obj.fallback;
     if (typeof obj.path === "string") App.settings.storagePath = obj.path;
     syncStorage();
+  };
+
+  /* live input level (0..1) from the backend mic monitor, ~15/s */
+  window.tiroInputLevel = function (v) {
+    realLevel = Math.max(0, Math.min(1, Number(v) || 0));
+    realStamp = performance.now();
+  };
+
+  /* backend ended the monitor (recording won the mic, backstop, shutdown) */
+  window.tiroInputMonitor = function (on) {
+    if (!on) setMonitorUI(false);
   };
 
   window.tiroModelProgress = function (p) {

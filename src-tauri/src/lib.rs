@@ -134,6 +134,20 @@ fn set_vocab(hotwords: Value, corrections: Value) -> Value {
     vocab::set(&flow::app_dir(), &hotwords, &corrections)
 }
 
+// Opening the mic can take a moment and sync commands run inline on the
+// main thread (Linux/WebKitGTK) — same reasoning as get_state.
+#[tauri::command]
+async fn start_mic_monitor(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || flow::start_mic_monitor(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn stop_mic_monitor(app: tauri::AppHandle) {
+    flow::stop_mic_monitor(&app);
+}
+
 #[tauri::command]
 fn list_models(app: tauri::AppHandle) -> Value {
     api::list_models(&app)
@@ -500,6 +514,8 @@ pub fn run() {
             history_entries,
             list_vocab,
             set_vocab,
+            start_mic_monitor,
+            stop_mic_monitor,
             list_models,
             download_model,
             cancel_download

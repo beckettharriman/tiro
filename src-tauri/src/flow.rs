@@ -124,6 +124,9 @@ pub struct AppCtx {
     /// Bumping this stops the previous take's level-pusher thread, so a
     /// stale pusher can never drive a newer take's pill.
     level_gen: AtomicU64,
+    /// Bumping this stops the settings-meter mic monitor (its thread owns
+    /// the cpal stream and exits within one poll tick of a bump).
+    monitor_gen: AtomicU64,
     /// Session id whose completed take should also be pasted at the cursor
     /// (0 = none). Consumed by `finish` ONLY while that session is current —
     /// a superseded take must never paste.
@@ -313,6 +316,7 @@ impl AppCtx {
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
             level_gen: AtomicU64::new(0),
+            monitor_gen: AtomicU64::new(0),
             paste_session: AtomicU64::new(0),
             gpu_ok: AtomicBool::new(true),
             gpu_probe: Mutex::new(None),
@@ -613,6 +617,80 @@ fn start_level_pusher(app: &AppHandle, ctx: &AppCtx, meter: Arc<audio::LevelMete
     });
 }
 
+/// Hot-mic backstop: a monitor nobody remembered to stop closes itself.
+const MONITOR_MAX_SECS: u64 = 300;
+
+/// Push a live input level (0..1) to the PANEL's settings meter, guarded
+/// like the pill push so a panel without the hook is harmless.
+fn push_input_level(app: &AppHandle, level: f32) {
+    if let Some(w) = app.get_webview_window("panel") {
+        let _ = w.eval(format!(
+            "window.tiroInputLevel&&window.tiroInputLevel({level:.3})"
+        ));
+    }
+}
+
+/// Start the settings-meter mic monitor: a level-only tap on the SELECTED
+/// mic feeding the panel at ~15 Hz with the exact envelope the pill uses
+/// (peak-per-poll -> `perceptual_level`), so the two meters feel the same.
+/// The cpal stream is !Send, so a dedicated thread owns it (reusing the
+/// take pipeline's `Recording` device/rate/format walk, drained every poll
+/// so nothing accumulates); stopping is bumping `monitor_gen`. Recording
+/// always wins the device: starting is refused mid-take, `start_recording`
+/// preempts a live monitor, and the loop double-checks every tick. Pure
+/// cpal — the GPU is never touched.
+pub fn start_mic_monitor(app: &AppHandle) -> serde_json::Value {
+    let ctx = app.state::<AppCtx>();
+    if ctx.recording.load(Ordering::SeqCst) {
+        return json!({ "ok": false, "error": "Recording in progress" });
+    }
+    let mic = lock(&ctx.cfg).get("mic_name");
+    // Bump first: a re-start supersedes any previous monitor thread.
+    let gen = ctx.monitor_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, rx) = channel();
+    let app = app.clone();
+    std::thread::spawn(move || match Recording::start(&mic) {
+        Ok(rec) => {
+            let _ = tx.send(Ok(rec.mic_name().to_string()));
+            let meter = rec.level_meter();
+            let started = std::time::Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(66));
+                let ctx = app.state::<AppCtx>();
+                if ctx.monitor_gen.load(Ordering::SeqCst) != gen
+                    || ctx.recording.load(Ordering::SeqCst)
+                    || ctx.shutting_down.load(Ordering::SeqCst)
+                    || started.elapsed().as_secs() >= MONITOR_MAX_SECS
+                {
+                    break;
+                }
+                rec.discard_frames();
+                push_input_level(&app, audio::perceptual_level(meter.take_peak()));
+            }
+            drop(rec.stop()); // close the stream; monitored audio is discarded
+                              // Tell the panel monitoring ended — covers recording-wins, the
+                              // hot-mic backstop and shutdown, so the Test button resets.
+            if let Some(w) = app.get_webview_window("panel") {
+                let _ = w.eval("window.tiroInputMonitor&&window.tiroInputMonitor(false)");
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e.to_string()));
+        }
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(mic_name)) => json!({ "ok": true, "mic": mic_name }),
+        Ok(Err(e)) => json!({ "ok": false, "error": e }),
+        Err(_) => json!({ "ok": false, "error": "microphone open timed out" }),
+    }
+}
+
+/// Stop the settings-meter monitor (idempotent; also safe with none live).
+pub fn stop_mic_monitor(app: &AppHandle) {
+    let ctx = app.state::<AppCtx>();
+    ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
+}
+
 /// Show the pill window in the given state, cancelling any pending hide
 /// timer first (a fresh state must not be hidden by a stale timer).
 fn show_pill(app: &AppHandle, ctx: &AppCtx, state: &str, payload: Option<&str>) {
@@ -766,6 +844,10 @@ fn inject_paste(app: &AppHandle, ctx: &AppCtx) -> bool {
 }
 
 fn start_recording(app: &AppHandle, ctx: &AppCtx) {
+    // Recording wins the mic: preempt any settings-meter monitor before
+    // opening the take's stream (the monitor thread exits within one poll
+    // tick and notifies the panel; PipeWire tolerates the brief overlap).
+    ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
     let mic = lock(&ctx.cfg).get("mic_name");
     let (reply_tx, reply_rx) = channel();
     let _ = lock(&ctx.rec_tx).send(RecCmd::Start {
