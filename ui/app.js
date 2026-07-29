@@ -93,11 +93,70 @@
     { id: "m9", day: MOCK_DAYS.mar3, clock: "9:15 AM", dur: "0:07", text: "Call the dentist back about moving the Tuesday appointment." }
   ];
 
+  /* mock hardware classes — previewable headlessly via ?hw=<preset> on the
+     file:// URL (mock-level only; the real app renders from get_state's
+     hardware object). ?hw=discrete-laptop-tad previews the treat-as-desktop
+     override on battery hardware. */
+  const HW_PRESETS = {
+    "discrete-laptop": {
+      gpuClass: "discrete", batteryPresent: true,
+      gpus: [{ index: 0, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }]
+    },
+    "discrete-desktop": {
+      gpuClass: "discrete", batteryPresent: false,
+      gpus: [{ index: 0, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }]
+    },
+    "integrated-laptop": {
+      gpuClass: "integrated", batteryPresent: true,
+      gpus: [{ index: 0, name: "AMD Radeon 780M", kind: "integrated", vramBytes: 0 }]
+    },
+    "integrated-desktop": {
+      gpuClass: "integrated", batteryPresent: false,
+      gpus: [{ index: 0, name: "Intel Arc Graphics", kind: "integrated", vramBytes: 0 }]
+    },
+    "none-laptop": { gpuClass: "none", batteryPresent: true, gpus: [] },
+    "none-desktop": { gpuClass: "none", batteryPresent: false, gpus: [] },
+    "multi-gpu": {
+      gpuClass: "discrete", batteryPresent: true,
+      gpus: [
+        { index: 0, name: "AMD Radeon 780M", kind: "integrated", vramBytes: 0 },
+        { index: 1, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }
+      ]
+    }
+  };
+  function mockHardware() {
+    let key = "discrete-laptop", tad = false;
+    try {
+      const raw = new URLSearchParams(window.location.search).get("hw") || key;
+      tad = /-tad$/.test(raw);
+      const base = raw.replace(/-tad$/, "");
+      if (HW_PRESETS[base]) key = base;
+    } catch (_) { /* keep the default */ }
+    const p = HW_PRESETS[key];
+    /* default pick mirrors the backend: prefer discrete, then most VRAM */
+    const best = p.gpus.reduce((b, g) => {
+      if (!b) return g;
+      if (g.kind === "discrete" && b.kind !== "discrete") return g;
+      if (g.kind === b.kind && g.vramBytes > b.vramBytes) return g;
+      return b;
+    }, null);
+    const hw = {
+      gpuClass: p.gpuClass,
+      batteryPresent: p.batteryPresent,
+      desktop: !p.batteryPresent || tad,
+      gpus: p.gpus.slice(),
+      gpuDevice: best ? best.index : 0
+    };
+    return { hw: hw, treatAsDesktop: tad };
+  }
+  const MOCK_HW = mockHardware();
+
   const MOCK_STATE = {
     entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })),
+    hardware: MOCK_HW.hw,
     settings: {
       powerMode: "auto", modelBattery: "base.en", modelPlugged: "small.en",
-      model: "base.en",
+      model: "base.en", treatAsDesktop: MOCK_HW.treatAsDesktop,
       soundCues: true, volume: 60, recordingPill: true,
       pillPosition: "bottom", pillPadding: 110,
       clipboardCleanup: "light", smartVocab: true,
@@ -141,15 +200,28 @@
     _recording: false,
     _cancelled: {},
     _deriveEngine() {
+      /* mirrors the backend policy table (class x machine x power x mode) */
       const s = this._state.settings;
+      const hw = this._state.hardware;
       const power = this._state.engine.power;
-      const device = s.powerMode === "auto"
-        ? (power === "plugged" ? "GPU" : "CPU")
-        : (s.powerMode === "gpu" ? "GPU" : "CPU");
-      /* forced modes run the single Model row; auto keeps the pair */
-      const model = s.powerMode === "auto"
-        ? (power === "plugged" ? s.modelPlugged : s.modelBattery)
-        : (s.model || s.modelBattery);
+      const plugged = power === "plugged";
+      const desktop = !hw.batteryPresent || !!s.treatAsDesktop;
+      const cls = hw.gpuClass;
+      let device, model;
+      if (s.powerMode === "cpu" || s.powerMode === "gpu") {
+        /* forced modes: single Model row on every class; forced GPU on a
+           no-GPU machine fails over to CPU honestly */
+        device = (s.powerMode === "gpu" && cls !== "none") ? "GPU" : "CPU";
+        model = s.model || s.modelBattery;
+      } else if (desktop) {
+        device = cls === "none" ? "CPU" : "GPU";
+        model = s.model || s.modelBattery;
+      } else {
+        if (cls === "none") device = "CPU";
+        else if (cls === "integrated") device = "GPU"; /* GPU across flips */
+        else device = plugged ? "GPU" : "CPU";         /* discrete laptop */
+        model = plugged ? s.modelPlugged : s.modelBattery;
+      }
       this._state.engine = { model, device, power };
       return this._state.engine;
     },
@@ -164,8 +236,13 @@
       if (key === "theme") {
         this._state.theme = value;
         this._state.effectiveTheme = value === "system" ? "dark" : value;
+      } else if (key === "gpuDevice") {
+        this._state.hardware.gpuDevice = value;
       } else {
         this._state.settings[key] = value;
+        if (key === "treatAsDesktop") {
+          this._state.hardware.desktop = !this._state.hardware.batteryPresent || !!value;
+        }
       }
       const engine = this._deriveEngine();
       return Promise.resolve({
@@ -256,6 +333,8 @@
     entries: [],
     settings: {},
     engine: { model: "", device: "CPU", power: "battery" },
+    /* hardware class from get_state; safe default = today's full layout */
+    hardware: { gpuClass: "discrete", batteryPresent: true, desktop: false, gpus: [], gpuDevice: 0 },
     mics: [],
     shortcuts: {},
     theme: "dark",
@@ -561,6 +640,12 @@
 
   function powerWord(power) { return power === "plugged" ? "plugged in" : "battery"; }
 
+  /* desktop verdict: no battery hardware, or the user's override — derived
+     locally so a treat-as-desktop flip re-renders without a state roundtrip */
+  function isDesktop() {
+    return !App.hardware.batteryPresent || !!App.settings.treatAsDesktop;
+  }
+
   /* engine chips (compact footer + sidebar) and the Now-running row */
   function updateEngine() {
     document.querySelectorAll(".engine").forEach((ch) => {
@@ -570,7 +655,8 @@
     const nr = $("nowRun");
     nr.textContent = App.engine.model + " · ";
     nr.appendChild(h("b", { text: App.engine.device }));
-    if (App.settings.powerMode === "auto") {
+    /* the power-source word is battery talk — desktops never show it */
+    if (App.settings.powerMode === "auto" && !isDesktop()) {
       nr.appendChild(document.createTextNode(" · " + powerWord(App.engine.power)));
     }
   }
@@ -583,7 +669,14 @@
     swPill: (on) => { setSetting("recordingPill", on); syncPillRows(); },
     swVocab: (on) => setSetting("smartVocab", on),
     swSave: (on) => setSetting("saveTranscripts", on),
-    swLogin: (on) => setSetting("launchAtLogin", on)
+    swLogin: (on) => setSetting("launchAtLogin", on),
+    /* live re-render: the Engine section swaps to the new machine kind at
+       once; the backend hot-re-resolves the engine in the background */
+    swDesktop: (on) => {
+      setSetting("treatAsDesktop", on);
+      syncEngineRows();
+      updateEngine();
+    }
   };
   Object.keys(swWiring).forEach((id) => {
     const sw = $(id);
@@ -744,6 +837,12 @@
     setSetting("model", this.options[this.selectedIndex].text);
     updateEngine();
   });
+  $("selGpu").addEventListener("change", function () {
+    const g = (App.hardware.gpus || [])[this.selectedIndex];
+    if (!g) return;
+    App.hardware.gpuDevice = g.index;
+    setSetting("gpuDevice", g.index);
+  });
 
   /* model select options: installed models plus the configured values */
   function modelOptions() {
@@ -754,20 +853,53 @@
     if (!opts.length) opts.push("base.en");
     return opts;
   }
-  /* forced power modes (Always CPU / Always GPU) run ONE model — show the
-     single Model row; Auto Switch keeps the battery/plugged pair. Swaps
-     live when the Compute device segment changes. */
+  /* adaptive Engine section — the visibility matrix, rendered from the
+     hardware object (owner's rule: hidden completely, no graying):
+     - single Model row when a forced mode is active OR the machine is a
+       desktop (no battery, or Treat as desktop); battery laptops keep the
+       battery/plugged pair in Auto
+     - the Compute device segmented disappears entirely on no-GPU machines
+       (Auto and Always CPU would be the same choice twice)
+     - the Graphics device picker exists only with >1 usable GPU
+     - the Treat as desktop switch exists only when a battery is present
+     - the helper copy never mentions batteries on a desktop */
+  const engineHelpCopy = {
+    laptopDiscrete: "Auto Switch uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power.",
+    laptopIntegrated: "Auto Switch stays on the GPU and swaps to the lighter battery model to save power.",
+    laptopNone: "Transcription runs on the processor — the lighter battery model saves power.",
+    desktopGpu: "Auto Switch uses the GPU whenever it's available.",
+    desktopNone: "Transcription runs on the processor."
+  };
   function syncEngineRows() {
+    const hw = App.hardware;
+    const desktop = isDesktop();
+    const noGpu = hw.gpuClass === "none";
     const forced = App.settings.powerMode === "cpu" || App.settings.powerMode === "gpu";
-    $("rowModel").style.display = forced ? "" : "none";
-    $("rowBattery").style.display = forced ? "none" : "";
-    $("rowPlugged").style.display = forced ? "none" : "";
+    const single = forced || desktop;
+    $("rowModel").style.display = single ? "" : "none";
+    $("rowBattery").style.display = single ? "none" : "";
+    $("rowPlugged").style.display = single ? "none" : "";
+    $("rowPower").style.display = noGpu ? "none" : "";
+    $("rowGpuPick").style.display = (!noGpu && (hw.gpus || []).length > 1) ? "" : "none";
+    $("rowDesktop").style.display = hw.batteryPresent ? "" : "none";
+    $("engineHelp").textContent = desktop
+      ? (noGpu ? engineHelpCopy.desktopNone : engineHelpCopy.desktopGpu)
+      : (noGpu ? engineHelpCopy.laptopNone
+        : (hw.gpuClass === "integrated" ? engineHelpCopy.laptopIntegrated
+          : engineHelpCopy.laptopDiscrete));
+  }
+  function syncGpuSelect() {
+    const gpus = App.hardware.gpus || [];
+    if (gpus.length < 2) return;
+    const cur = gpus.find((g) => g.index === App.hardware.gpuDevice) || gpus[0];
+    fillSelect($("selGpu"), gpus.map((g) => g.name), cur.name);
   }
   function syncModelSelects() {
     const opts = modelOptions();
     fillSelect($("selBattery"), opts, App.settings.modelBattery);
     fillSelect($("selPlugged"), opts, App.settings.modelPlugged);
     fillSelect($("selModel"), opts, App.settings.model || App.settings.modelBattery || "base.en");
+    syncGpuSelect();
     syncEngineRows();
   }
 
@@ -1287,6 +1419,7 @@
     setSw($("swVocab"), s.smartVocab);
     setSw($("swSave"), s.saveTranscripts !== false);
     setSw($("swLogin"), s.launchAtLogin);
+    setSw($("swDesktop"), !!s.treatAsDesktop);
     syncThemeSeg();
     if (typeof s.transparency === "number") {
       const a = tToAlpha(s.transparency);
@@ -1302,6 +1435,7 @@
     if (Array.isArray(state.entries)) App.entries = state.entries;
     if (state.settings) App.settings = state.settings;
     if (state.engine) App.engine = state.engine;
+    if (state.hardware) App.hardware = state.hardware;
     if (Array.isArray(state.mics)) App.mics = state.mics;
     if (state.shortcuts) App.shortcuts = state.shortcuts;
     if (state.theme) App.theme = state.theme;
