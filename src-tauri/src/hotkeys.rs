@@ -27,8 +27,9 @@ use crate::api;
 use crate::flow::{self, lock, AppCtx};
 
 /// which -> config key, in the original's registration order (paste joined
-/// the scheme in the port).
-const ACTIONS: [(&str, &str); 4] = [
+/// the scheme in the port). The `which` names double as the stable shortcut
+/// ids the Wayland portal binds.
+pub(crate) const ACTIONS: [(&str, &str); 4] = [
     ("dictate", "dictation_hotkey"),
     ("paste", "paste_hotkey"),
     ("panel", "panel_hotkey"),
@@ -118,6 +119,97 @@ pub fn to_accelerator(hotkey: &str) -> Option<String> {
                 }
             }
             _ => key = Some(key_code(p)?),
+        }
+    }
+    let key = key?;
+    let mut parts = mods;
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
+/// Map one lowercase config hotkey part to the xkb keysym name that XDG
+/// "shortcuts"-spec triggers use ("space" -> "space", "v" -> "v",
+/// "pageup" -> "Page_Up"). Same key domain as `key_code`.
+fn keysym_name(part: &str) -> Option<String> {
+    let named = match part {
+        "space" => "space",
+        "enter" | "return" => "Return",
+        "tab" => "Tab",
+        "esc" | "escape" => "Escape",
+        "backspace" => "BackSpace",
+        "delete" => "Delete",
+        "insert" => "Insert",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "Page_Up",
+        "pagedown" => "Page_Down",
+        "up" => "Up",
+        "down" => "Down",
+        "left" => "Left",
+        "right" => "Right",
+        "`" => "grave",
+        "-" => "minus",
+        "=" => "equal",
+        "[" => "bracketleft",
+        "]" => "bracketright",
+        "\\" => "backslash",
+        ";" => "semicolon",
+        "'" => "apostrophe",
+        "," => "comma",
+        "." => "period",
+        "/" => "slash",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some(named.to_string());
+    }
+    if let Some(n) = part.strip_prefix('f') {
+        if !n.starts_with('0') && n.parse::<u8>().is_ok_and(|v| (1..=24).contains(&v)) {
+            return Some(format!("F{n}"));
+        }
+    }
+    let mut chars = part.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+/// A config hotkey string ("ctrl+alt+c") -> the XDG "shortcuts" spec trigger
+/// form the GlobalShortcuts portal takes as a preferred trigger
+/// ("CTRL+ALT+c"). Accepts exactly the combo strings `to_accelerator`
+/// accepts; like it, the last mappable non-modifier part wins and an
+/// unmappable one rejects the combo.
+pub fn to_portal_trigger(hotkey: &str) -> Option<String> {
+    let mut mods: Vec<&str> = Vec::new();
+    let mut key: Option<String> = None;
+    for p in hotkey.to_lowercase().split('+') {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        match p {
+            "ctrl" | "control" => {
+                if !mods.contains(&"CTRL") {
+                    mods.push("CTRL");
+                }
+            }
+            "alt" => {
+                if !mods.contains(&"ALT") {
+                    mods.push("ALT");
+                }
+            }
+            "shift" => {
+                if !mods.contains(&"SHIFT") {
+                    mods.push("SHIFT");
+                }
+            }
+            "win" | "windows" | "meta" | "cmd" => {
+                if !mods.contains(&"LOGO") {
+                    mods.push("LOGO");
+                }
+            }
+            _ => key = Some(keysym_name(p)?),
         }
     }
     let key = key?;
@@ -328,6 +420,26 @@ fn press_starts_take(ctx: &AppCtx, which: &str) -> bool {
     match which {
         "paste" => !ctx.is_recording() && !ctx.is_transcribing(),
         _ => !ctx.is_recording(),
+    }
+}
+
+/// One hotkey edge from EITHER delivery backend — the X11/Win32 grab
+/// (tauri-plugin-global-shortcut) or the Wayland GlobalShortcuts portal
+/// (Activated = pressed, Deactivated = released). The dictate and paste
+/// keys feed the tap-vs-hold core with both edges; the others fire on the
+/// press edge only (panel presses go through `dispatch` into the
+/// never-drop panel queue).
+pub(crate) fn hotkey_event(app: &AppHandle, which: &'static str, pressed: bool) {
+    if which == "dictate" || which == "paste" {
+        let state = if pressed {
+            ShortcutState::Pressed
+        } else {
+            ShortcutState::Released
+        };
+        hold_event(app, which, state);
+    } else if pressed {
+        eprintln!("hotkey fired: {which}");
+        dispatch(app, which);
     }
 }
 
@@ -620,13 +732,7 @@ pub fn register_all(app: &AppHandle) {
             continue;
         };
         let result = gs.on_shortcut(accel.as_str(), move |app, _shortcut, event| {
-            if which == "dictate" || which == "paste" {
-                // Tap = toggle, hold = push-to-talk; needs both states.
-                hold_event(app, which, event.state);
-            } else if event.state == ShortcutState::Pressed {
-                eprintln!("hotkey fired: {which}");
-                dispatch(app, which);
-            }
+            hotkey_event(app, which, event.state == ShortcutState::Pressed);
         });
         match result {
             Ok(()) => eprintln!("hotkey registered: {which} = {hk}"),
@@ -692,6 +798,54 @@ mod tests {
         assert_eq!(to_accelerator("ctrl+alt"), None, "no non-modifier key");
         assert_eq!(to_accelerator("ctrl+bogus"), None);
         assert_eq!(to_accelerator("ctrl+f25"), None);
+    }
+
+    #[test]
+    fn portal_triggers_for_the_defaults() {
+        assert_eq!(
+            to_portal_trigger("ctrl+alt+space").as_deref(),
+            Some("CTRL+ALT+space")
+        );
+        assert_eq!(to_portal_trigger("ctrl+alt+v").as_deref(), Some("CTRL+ALT+v"));
+        assert_eq!(to_portal_trigger("ctrl+alt+c").as_deref(), Some("CTRL+ALT+c"));
+        assert_eq!(to_portal_trigger("ctrl+alt+x").as_deref(), Some("CTRL+ALT+x"));
+    }
+
+    #[test]
+    fn portal_trigger_key_forms() {
+        // letters and digits keep their xkb keysym names verbatim
+        assert_eq!(to_portal_trigger("shift+a").as_deref(), Some("SHIFT+a"));
+        assert_eq!(to_portal_trigger("win+5").as_deref(), Some("LOGO+5"));
+        assert_eq!(to_portal_trigger("meta+9").as_deref(), Some("LOGO+9"));
+        assert_eq!(to_portal_trigger("shift+f12").as_deref(), Some("SHIFT+F12"));
+        assert_eq!(
+            to_portal_trigger("ctrl+pageup").as_deref(),
+            Some("CTRL+Page_Up")
+        );
+        assert_eq!(to_portal_trigger("ctrl+`").as_deref(), Some("CTRL+grave"));
+        assert_eq!(to_portal_trigger("esc").as_deref(), Some("Escape"));
+        assert_eq!(
+            to_portal_trigger("ctrl+backspace").as_deref(),
+            Some("CTRL+BackSpace")
+        );
+        // duplicate/alias modifiers collapse, mixed case accepted
+        assert_eq!(
+            to_portal_trigger("Ctrl+Control+Shift+C").as_deref(),
+            Some("CTRL+SHIFT+c")
+        );
+    }
+
+    #[test]
+    fn portal_trigger_rejects_what_the_accelerator_rejects() {
+        for combo in ["", "ctrl+alt", "ctrl+bogus", "ctrl+f25"] {
+            assert_eq!(to_portal_trigger(combo), None, "combo {combo:?}");
+            assert_eq!(to_accelerator(combo), None, "combo {combo:?}");
+        }
+        // and both accept the same valid domain
+        for combo in ["ctrl+alt+space", "win+f1", "shift+.", "ctrl+alt+enter"] {
+            assert!(to_portal_trigger(combo).is_some(), "combo {combo:?}");
+            assert!(to_accelerator(combo).is_some(), "combo {combo:?}");
+        }
     }
 
     use PanelCmd::{Summon, Toggle};
