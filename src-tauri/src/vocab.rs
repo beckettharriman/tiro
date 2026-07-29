@@ -113,11 +113,15 @@ pub fn list(app_dir: &Path) -> Value {
 fn clean_term(v: &Value) -> Option<String> {
     let s = v.as_str()?.replace("=>", " ");
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let s = s.trim_start_matches('#').trim_start().to_string();
-    if s.is_empty() {
+    // Loop: a single pass re-exposes a '#' on inputs like "# #x".
+    let mut t = s.as_str();
+    while t.starts_with('#') {
+        t = t.trim_start_matches('#').trim_start();
+    }
+    if t.is_empty() {
         None
     } else {
-        Some(s)
+        Some(t.to_string())
     }
 }
 
@@ -162,6 +166,11 @@ pub fn apply_corrections(text: &str, pairs: &[(String, String)]) -> String {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = text.to_string();
     for (heard, written) in pairs {
+        if heard.is_empty() {
+            // an empty pattern matches at every position — shred guard
+            // (read_corrections rejects empties, but never rely on it)
+            continue;
+        }
         // `\b` only where it can match: against a heard-side that starts or
         // ends with a non-word char (".NET", "C++") a boundary would demand
         // a word char on the far side and the pattern would never fire.
@@ -284,6 +293,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_heard_side_is_ignored() {
+        // An empty pattern would match at every position and shred the
+        // take; read_corrections rejects empties, but apply_corrections
+        // must not rely on its callers.
+        let pairs = vec![
+            (String::new(), "X".to_string()),
+            ("tyro".to_string(), "Tiro".to_string()),
+        ];
+        assert_eq!(apply_corrections("hello tyro", &pairs), "hello Tiro");
+    }
+
+    #[test]
     fn heard_sides_with_non_word_edges_match() {
         let pairs = vec![(".NET".to_string(), "dotnet".to_string())];
         assert_eq!(
@@ -305,11 +326,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         set(
             dir.path(),
-            &json!(["#hashtag", "##double", "#", "C#"]),
+            &json!(["#hashtag", "##double", "# #x", "# ## #", "#", "C#"]),
             &json!([["#heard", "#written"]]),
         );
-        // "#" collapses to nothing -> dropped, no blank line either
-        assert_eq!(read_hotwords(dir.path()), ["hashtag", "double", "C#"]);
+        // "#" and "# ## #" collapse to nothing -> dropped, no blank line
+        // either; "# #x" must not re-expose a '#' after one strip pass
+        assert_eq!(read_hotwords(dir.path()), ["hashtag", "double", "x", "C#"]);
         assert_eq!(
             read_corrections(dir.path()),
             [("heard".into(), "written".into())]
