@@ -387,6 +387,16 @@ impl HoldCore {
         }
         let press_at = self.press_at.take(); // the real release (or so it seems)
         if pending.held && pending.starts_take && recording {
+            // KNOWN LIMIT (X11-grab path only): a synthetic Released from
+            // an XWayland focus loss arriving AFTER the hold threshold is
+            // indistinguishable from the real release — the same focus loss
+            // stops autorepeat, so no later event ever contradicts it, and
+            // a dispatched Finish cannot be un-finished. It resolves as a
+            // false push-to-talk finish and truncates the take. The
+            // `resurrect` guard below can only cover the pre-threshold
+            // shape. In practice the portal path (no synthetic edges)
+            // replaces the grabs on Wayland, and the pill's no-focus fix
+            // removes the main mid-hold focus steal.
             self.resurrect = None;
             ReleaseAction::Finish
         } else {
@@ -719,21 +729,10 @@ pub fn register_all(app: &AppHandle) {
     // remembered position from config and start move-tracking (idempotent —
     // rebind passes are no-ops).
     crate::placement::init_panel_tracking(app);
-    let ctx = app.state::<AppCtx>();
-    let bindings: Vec<(&'static str, String)> = {
-        let cfg = lock(&ctx.cfg);
-        ACTIONS
-            .iter()
-            .map(|(which, key)| (*which, cfg.get(key)))
-            .collect()
-    };
-    register_grabs(app, &bindings);
+    register_grabs(app, &configured_bindings(app));
     #[cfg(target_os = "linux")]
     if crate::hotkeys_portal::wayland_session() {
-        let mappable: Vec<(&'static str, String)> = bindings
-            .into_iter()
-            .filter(|(_, hk)| api::parse_hotkey(hk))
-            .collect();
+        let mappable = portal_bindings(app);
         if !mappable.is_empty() {
             eprintln!(
                 "Wayland session: binding hotkeys through the GlobalShortcuts \
@@ -742,6 +741,35 @@ pub fn register_all(app: &AppHandle) {
             crate::hotkeys_portal::spawn_register(app, mappable);
         }
     }
+}
+
+/// All configured (which, combo) pairs, unmappable ones included — the
+/// registration paths do their own filtering and logging.
+fn configured_bindings(app: &AppHandle) -> Vec<(&'static str, String)> {
+    let ctx = app.state::<AppCtx>();
+    let cfg = lock(&ctx.cfg);
+    ACTIONS
+        .iter()
+        .map(|(which, key)| (*which, cfg.get(key)))
+        .collect()
+}
+
+/// The bindings the portal should bind: everything that parses. An
+/// unparsable combo is skipped exactly like the grab path skips it.
+#[cfg(target_os = "linux")]
+pub(crate) fn portal_bindings(app: &AppHandle) -> Vec<(&'static str, String)> {
+    configured_bindings(app)
+        .into_iter()
+        .filter(|(_, hk)| api::parse_hotkey(hk))
+        .collect()
+}
+
+/// Portal-recovery path: put the X11 grabs back NOW (the portal just died;
+/// the app must never be hotkey-less) without spawning another portal pass —
+/// the caller runs its own bounded retries.
+#[cfg(target_os = "linux")]
+pub(crate) fn reregister_grabs(app: &AppHandle) {
+    register_grabs(app, &configured_bindings(app));
 }
 
 /// Register `bindings` as plugin shortcuts (Win32 hooks on Windows, X11
