@@ -379,7 +379,10 @@ body.fallback .banner{ display:flex; animation: land var(--t-med) var(--ease) bo
   font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
   color:rgba(var(--ink),.40);
   padding: var(--s-2) var(--s-1);
-  background:rgba(var(--glass-rgb), .88);
+  /* tracks the transparency slider: panel alpha + a fixed boost so the
+     header always reads over entries scrolling under it (CSS clamps the
+     alpha at 1 when the slider is near solid) */
+  background:rgba(var(--glass-rgb), calc(var(--glass-a) + 0.16));
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }

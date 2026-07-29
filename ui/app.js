@@ -354,10 +354,16 @@
 
   function loadDays() {
     return Promise.resolve(api.history_days()).then((days) => {
-      App.days = Array.isArray(days) ? days.slice() : [];
+      const next = Array.isArray(days) ? days.slice() : [];
       // the backend only lists days that have transcripts on disk — today
       // leads the list even before its first take (one-day default view)
-      if (App.days[0] !== todayIso()) App.days.unshift(todayIso());
+      if (next[0] !== todayIso()) next.unshift(todayIso());
+      // day set changed (first take of a day, or midnight rolled a new
+      // today in): search must re-walk the days — the ex-today day now has
+      // a JSONL of its own and is fetched like any other day, it was never
+      // in dayCache while it was live
+      if (next.join("\n") !== App.days.join("\n")) App.allDaysLoaded = false;
+      App.days = next;
       if (App.histLoaded >= App.days.length) App.histLoaded = App.days.length - 1;
       if (App.dayIdx >= App.days.length) App.dayIdx = 0;
     }).catch(() => { App.days = [todayIso()]; App.histLoaded = 0; App.dayIdx = 0; });
@@ -585,8 +591,9 @@
      sees move:
        grow:   window jumps to 800 FIRST, then the glass animates 400->800
                inside the already-big window once the viewport is actually
-               wide (rAF poll on innerWidth — the invoke ack races the real
-               resize, so starting on the ack alone clips the animation);
+               wide (resize event with a deadline backstop — the invoke ack
+               only means the resize was scheduled, so starting on the ack
+               alone clips the animation);
        shrink: the glass animates down first, the window snaps to 400 only
                after the 520 ms settle (instantly under reduced motion).
      While the window is wider than the glass (~520 ms per direction) the
@@ -623,7 +630,7 @@
       renderAdv();
       ensureMic();
       Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {}).then(() => {
-        whenWide(780, 350, () => {
+        whenWide(780, 500, () => {
           if (gen !== advGen) return; /* collapsed again before the window grew */
           panel.classList.add("adv");
         });
