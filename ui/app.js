@@ -410,7 +410,6 @@
     el.querySelector(".time").textContent = e.clock;
     el.querySelector(".dur").textContent = e.dur;
     el.querySelector(".txt").textContent = e.text;
-    const txt = el.querySelector(".txt");
     const more = el.querySelector(".showmore");
     more.addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -421,10 +420,26 @@
       Promise.resolve(api.copy_text(e.text)).catch(() => {});
       flashCopied(el);
     });
-    requestAnimationFrame(() => {
-      if (txt.scrollHeight - txt.clientHeight > 4) el.classList.add("clampable");
-    });
+    requestAnimationFrame(() => applyClamp(el, true));
     return el;
+  }
+
+  /* Decide .clampable from a live measurement. Turning the "Show more"
+     button on grows a long entry, so every path that compensates scrollTop
+     around a DOM mutation must settle clamping synchronously BEFORE it
+     measures heights — a frame-late flip would shift the reading position.
+     The rAF in makeEntry is only the fallback for entries built while
+     detached or hidden (compact list, search results); `force` makes it
+     measure exactly once even if the element still isn't rendered. */
+  function applyClamp(el, force) {
+    if (el.dataset.clampChecked) return;
+    const txt = el.querySelector(".txt");
+    if (!txt || (!force && !txt.clientHeight)) return; /* not rendered yet */
+    el.dataset.clampChecked = "1";
+    if (txt.scrollHeight - txt.clientHeight > 4) el.classList.add("clampable");
+  }
+  function applyClampIn(root) {
+    root.querySelectorAll(".entry").forEach((el) => applyClamp(el));
   }
 
   let copyTimer;
@@ -526,6 +541,7 @@
           });
         });
         hits.forEach((e) => advList.appendChild(makeEntry(e, false, true)));
+        applyClampIn(advList);
         $("noRes").style.display = hits.length ? "none" : "block";
         $("noResQ").textContent = searchInput.value.trim();
         pager.style.display = "none";
@@ -544,6 +560,7 @@
       const keep = mainEl.scrollTop;
       advList.innerHTML = "";
       daysToShow.forEach((d, i) => advList.appendChild(daySection(d, lists[i])));
+      applyClampIn(advList); /* heights must be final before keep-restore */
       pager.style.display = "flex";
       /* a live re-render (state push while the view is open) must not move
          the list under the reader — same window, same offset */
@@ -605,7 +622,9 @@
       histLoading = false;
       if (!histScrolling() || App.histLoaded >= idx) return true;
       App.histLoaded = idx;
-      advList.appendChild(daySection(iso, list));
+      const sec = daySection(iso, list);
+      advList.appendChild(sec);
+      applyClampIn(sec); /* settle heights before trimWindowTop measures */
       trimWindowTop();
       syncPager();
       return true;
@@ -628,7 +647,9 @@
       App.histTop = idx;
       const prevTop = mainEl.scrollTop;
       const before = mainEl.scrollHeight;
-      advList.insertBefore(daySection(iso, list), advList.firstChild);
+      const sec = daySection(iso, list);
+      advList.insertBefore(sec, advList.firstChild);
+      applyClampIn(sec); /* settle heights before the delta is measured */
       setMainScrollTop(prevTop + (mainEl.scrollHeight - before));
       trimWindowBottom();
       syncPager();
@@ -652,16 +673,32 @@
     secs.forEach((s, i) => { if (s.getBoundingClientRect().top - mtop <= 40) idx = App.histTop + i; });
     if (idx !== App.dayIdx) { App.dayIdx = idx; syncPager(); }
   }
-  /* while a pager jump is smooth-scrolling, passing the window edges must
-     not slide the window under the animation */
+  /* While a pager jump is in flight, passing the window edges must not
+     slide the window under the animation. A fixed timer can expire mid-way
+     across tall day sections, so suppression instead holds until scrollTop
+     reaches the jump's target (computed at launch, after any pre-jump
+     window slide has already re-rendered), with a generous fallback
+     deadline so a cancelled scroll can't suppress forever. Instant jumps
+     (reduced motion) get a short deadline that outlives the landing scroll
+     event. */
+  let histJumpTarget = -1;
   let histJumpUntil = 0;
+  let histJumpSettle = 0; /* brief post-landing window: the smooth scroll's
+                             settling tail (a few sub-tolerance events) must
+                             not read as user movement at a window edge */
   function scrollToDay(idx) {
     const sec = daySections()[idx - App.histTop];
     if (!sec) return;
     const mtop = mainEl.getBoundingClientRect().top;
     const y = mainEl.scrollTop + (sec.getBoundingClientRect().top - mtop) - 4;
-    histJumpUntil = motionReduced() ? 0 : Date.now() + 700;
-    mainEl.scrollTo({ top: Math.max(0, y), behavior: motionReduced() ? "auto" : "smooth" });
+    const maxY = Math.max(0, mainEl.scrollHeight - mainEl.clientHeight);
+    const target = Math.max(0, Math.min(y, maxY));
+    if (Math.abs(target - mainEl.scrollTop) > 4) {
+      histJumpTarget = target;
+      histJumpUntil = Date.now() + (motionReduced() ? 150 : 3000);
+    }
+    mainEl.scrollTo({ top: target, behavior: motionReduced() ? "auto" : "smooth" });
+    lastMainTop = mainEl.scrollTop; /* instant jumps: landing reads as no move */
     App.dayIdx = idx;
     syncPager();
   }
@@ -673,7 +710,17 @@
     lastMainTop = top;
     if (!histScrolling()) return;
     syncPagerFromScroll();
-    if (Date.now() < histJumpUntil) return;
+    if (histJumpTarget >= 0) {
+      /* this event belongs to the jump; the landing one clears the latch */
+      if (Math.abs(top - histJumpTarget) <= 4) {
+        histJumpTarget = -1;
+        histJumpSettle = Date.now() + 150;
+      } else if (Date.now() > histJumpUntil) {
+        histJumpTarget = -1;
+      }
+      return;
+    }
+    if (Date.now() < histJumpSettle) return;
     if (goingDown && top + mainEl.clientHeight >= mainEl.scrollHeight - 120) loadOlderDay();
     if (goingUp && top <= 80 && App.histTop > 0) loadNewerDay();
   });
@@ -1729,7 +1776,9 @@
         if (ph) ph.remove();
         const prevTop = mainEl.scrollTop;
         const before = mainEl.scrollHeight;
-        body.prepend(makeEntry(entry, true));
+        const el = makeEntry(entry, true);
+        body.prepend(el);
+        applyClamp(el); /* settle height before the delta is measured */
         /* landing above a scrolled-away viewport must not shove the list */
         if (prevTop > 0) setMainScrollTop(prevTop + (mainEl.scrollHeight - before));
       }
