@@ -35,6 +35,18 @@ On first launch the app downloads the Whisper GGUF model(s) it needs into
   set `LIBCLANG_PATH` to the directory containing `libclang.dll`.
 - **WebView2 Runtime** — preinstalled on Windows 11; on Windows 10 install
   the [Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+- **A short target directory for `--features gpu`.** The Vulkan backend
+  builds `vulkan-shaders-gen` as a nested CMake ExternalProject, and its
+  MSBuild scratch paths (`…\vulkan-shaders-gen-prefix\src\
+  vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-xxxxxx\
+  cmTC_xxxxx.dir\Debug\cmTC_xxxxx.tlog\link-rc.read.1.tlog`) run ~240
+  characters on their own. A normal target dir pushes that past `MAX_PATH`
+  and the build dies in `FileTracker` with `error FTK1011: could not create
+  the new file tracking log file … The system cannot find the path
+  specified`. MSBuild's FileTracker does not honor the `LongPathsEnabled`
+  registry switch, so the fix is a short target dir, not a Windows setting:
+  `set CARGO_TARGET_DIR=C:\tiro-t`. CPU-only builds never nest that deep
+  and are unaffected.
 
 ## Linux
 

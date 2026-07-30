@@ -409,6 +409,85 @@ fn compact_glass_size(scale: f64) -> (i32, i32) {
     )
 }
 
+/// Windows' accessibility text scale as a factor: the registry stores a
+/// percent, so 110 means 1.10. Windows' own slider spans 100-225%; a value
+/// outside that (or a missing key, the 100% default) means "no scaling".
+/// Pure, extracted for tests.
+pub(crate) fn text_scale_from_percent(percent: u32) -> f64 {
+    if !(100..=225).contains(&percent) {
+        return 1.0;
+    }
+    f64::from(percent) / 100.0
+}
+
+/// The webview zoom that cancels an OS text scale of `scale`.
+pub(crate) fn text_scale_zoom(scale: f64) -> f64 {
+    1.0 / scale
+}
+
+/// Read `HKCU\Software\Microsoft\Accessibility\TextScaleFactor` (Settings ->
+/// Accessibility -> Text size). Absent on a default install — that is the
+/// 100% case, not an error.
+#[cfg(windows)]
+fn os_text_scale() -> f64 {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+    };
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let subkey = wide(r"Software\Microsoft\Accessibility");
+    let name = wide("TextScaleFactor");
+    let mut percent: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(percent).cast(),
+            &mut size,
+        )
+    };
+    if rc != 0 {
+        return 1.0; // ERROR_FILE_NOT_FOUND on a default install
+    }
+    text_scale_from_percent(percent)
+}
+
+/// Cancel the OS text scale on both webviews (WINDOWS-ONLY BUG FIX).
+///
+/// WebView2 applies Windows' accessibility text scale to page content *on
+/// top of* the display scale factor, and reports neither through
+/// `scale_factor()` — so at 110% the fixed-size glass renders 10% larger
+/// than the native window that was sized to frame it exactly. Because the
+/// body right-anchors the glass (`justify-content:flex-end`) and the panel
+/// is `overflow:hidden` at a hard 400/800x560, that surplus spills off the
+/// window's LEFT and BOTTOM edges: the sidebar labels and the last settings
+/// row get clipped, with the left cut scaling with panel width.
+///
+/// WebKitGTK ignores the setting entirely, so this never reproduces on
+/// Linux. Compensating with an inverse zoom keeps the user's system-wide
+/// text-size preference intact everywhere else.
+#[cfg(windows)]
+pub fn compensate_text_scale(app: &AppHandle) {
+    let scale = os_text_scale();
+    if scale == 1.0 {
+        return;
+    }
+    let zoom = text_scale_zoom(scale);
+    for label in ["panel", "pill"] {
+        if let Some(w) = app.webview_windows().get(label) {
+            if let Err(e) = w.set_zoom(zoom) {
+                eprintln!("text-scale compensation failed for {label}: {e}");
+            }
+        }
+    }
+    eprintln!("OS text scale {scale:.2}x -> webview zoom {zoom:.4}");
+}
+
 /// The panel's input region for an expand state, in GDK *window*
 /// coordinates — logical px, NOT device px: GDK multiplies shape regions
 /// by the integer window scale itself when converting them to X
@@ -953,6 +1032,48 @@ mod tests {
         // fractional scale with an odd rounding still round-trips exactly
         // because save and load use the SAME rounded offset
         assert_eq!(glass_offset_x(true, 1.33), 532);
+    }
+
+    #[test]
+    fn text_scale_defaults_to_one_outside_the_os_range() {
+        // Missing key reads back as 0; Windows' slider never goes below
+        // 100% or above 225%. All of these mean "do not compensate".
+        for percent in [0, 50, 99, 226, 1000] {
+            assert_eq!(text_scale_from_percent(percent), 1.0);
+        }
+    }
+
+    #[test]
+    fn text_scale_reads_percent_as_a_factor() {
+        assert_eq!(text_scale_from_percent(100), 1.0);
+        assert_eq!(text_scale_from_percent(110), 1.10);
+        assert_eq!(text_scale_from_percent(225), 2.25);
+    }
+
+    #[test]
+    fn text_scale_zoom_cancels_the_os_scale() {
+        // The whole point: content scaled by the OS then zoomed by us must
+        // land back at 1:1 with the natively-sized window.
+        for percent in [100, 110, 125, 150, 225] {
+            let scale = text_scale_from_percent(percent);
+            let rendered = scale * text_scale_zoom(scale);
+            assert!(
+                (rendered - 1.0).abs() < 1e-9,
+                "{percent}% -> {rendered}, expected 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn text_scale_zoom_keeps_the_glass_inside_the_window() {
+        // The observed bug: at 110% the 800x560 expanded glass rendered
+        // 880x616 and spilled 80px off the left, 56px off the bottom.
+        let scale = text_scale_from_percent(110);
+        let uncompensated = f64::from(PANEL_W_EXPANDED) * scale;
+        assert!(uncompensated > f64::from(PANEL_W_EXPANDED));
+        assert!((uncompensated - f64::from(PANEL_W_EXPANDED) - 80.0).abs() < 1e-9);
+        let compensated = uncompensated * text_scale_zoom(scale);
+        assert!((compensated - f64::from(PANEL_W_EXPANDED)).abs() < 1e-9);
     }
 
     #[test]

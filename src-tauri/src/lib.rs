@@ -494,6 +494,12 @@ pub fn run() {
             //   compact size now, before its first show.
             #[cfg(target_os = "linux")]
             placement::panel_input_fixup(app);
+            // WebView2 scales page content by the OS accessibility text
+            // size on top of the display scale, which overflows the
+            // fixed-size glass past the window it is framed by. Cancel it
+            // before the first show / first resize below.
+            #[cfg(windows)]
+            placement::compensate_text_scale(app.handle());
             placement::set_panel_expanded(app.handle(), false);
             // The panel is configured hidden (summoned by hotkey/tray, which
             // land in phase 2/3); dev builds show it at startup so there is
