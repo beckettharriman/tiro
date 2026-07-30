@@ -107,8 +107,12 @@
       gpus: [{ index: 0, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }]
     },
     "discrete-desktop": {
+      /* two GPUs so the Graphics picker branch is previewable headlessly */
       gpuClass: "discrete", batteryPresent: false,
-      gpus: [{ index: 0, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }]
+      gpus: [
+        { index: 0, name: "AMD Radeon Graphics", kind: "integrated", vramBytes: 0 },
+        { index: 1, name: "NVIDIA GeForce RTX 2070", kind: "discrete", vramBytes: 8589934592 }
+      ]
     },
     "integrated-laptop": {
       gpuClass: "integrated", batteryPresent: true,
@@ -329,6 +333,8 @@
   };
 
   let api = HAS_BRIDGE ? window.pywebview.api : MockApi;
+  /* preview only: lets a headless run inspect what the mock stored */
+  if (!HAS_BRIDGE) window.tiroMock = MockApi;
 
   /* ════════════════════════════════════════════════════════════════════
      APP STATE
@@ -847,6 +853,9 @@
       b.classList.add("on");
       const v = b.dataset.value;
       if (seg.dataset.seg === "power") { setSetting("powerMode", v); syncEngineRows(); updateEngine(); }
+      /* desktop 2-way Compute: GPU stores "auto" (not "gpu") so the same
+         config on a laptop keeps battery-aware switching instead of a force */
+      if (seg.dataset.seg === "compute") { setSetting("powerMode", v === "cpu" ? "cpu" : "auto"); syncEngineRows(); updateEngine(); }
       if (seg.dataset.seg === "pillpos") setSetting("pillPosition", v);
       if (seg.dataset.seg === "cleanup") { setSetting("clipboardCleanup", v); setCleanupCopy(v); }
       if (seg.dataset.seg === "theme") {
@@ -1003,32 +1012,46 @@
      - single Model row when a forced mode is active OR the machine is a
        desktop (no battery, or Treat as desktop); battery laptops keep the
        battery/plugged pair in Auto
-     - the Compute device segmented disappears entirely on no-GPU machines
+     - desktops with a GPU get a simple 2-way Compute row (GPU | CPU) —
+       Auto and Always GPU mean the same thing there, so the 3-way is a
+       fake choice; battery laptops keep the 3-way
+     - both segmenteds disappear entirely on no-GPU machines
        (Auto and Always CPU would be the same choice twice)
-     - the Graphics device picker exists only with >1 usable GPU
+     - the Graphics device picker exists only with >1 usable GPU AND the
+       effective compute isn't CPU (nothing to pick when nothing runs there)
      - the Treat as desktop switch exists only when a battery is present
      - the helper copy never mentions batteries on a desktop */
   const engineHelpCopy = {
     laptopDiscrete: "Auto Switch uses the GPU for accuracy when plugged in, and a lighter CPU model on battery to save power.",
     laptopIntegrated: "Auto Switch stays on the GPU and swaps to the lighter battery model to save power.",
     laptopNone: "Transcription runs on the processor — the lighter battery model saves power.",
-    desktopGpu: "Auto Switch uses the GPU whenever it's available.",
+    desktopGpu: "Transcription runs on your graphics card.",
     desktopNone: "Transcription runs on the processor."
   };
   function syncEngineRows() {
     const hw = App.hardware;
     const desktop = isDesktop();
     const noGpu = hw.gpuClass === "none";
-    const forced = App.settings.powerMode === "cpu" || App.settings.powerMode === "gpu";
+    const mode = App.settings.powerMode || "auto";
+    const forced = mode === "cpu" || mode === "gpu";
     const single = forced || desktop;
+    /* desktop + GPU shows the 2-way Compute row instead of the 3-way */
+    const desktopGpu = desktop && !noGpu;
+    /* effective compute is CPU only when forced — auto runs the GPU here */
+    const computeCpu = mode === "cpu";
     $("rowModel").style.display = single ? "" : "none";
     $("rowBattery").style.display = single ? "none" : "";
     $("rowPlugged").style.display = single ? "none" : "";
-    $("rowPower").style.display = noGpu ? "none" : "";
-    $("rowGpuPick").style.display = (!noGpu && (hw.gpus || []).length > 1) ? "" : "none";
+    $("rowPower").style.display = (noGpu || desktopGpu) ? "none" : "";
+    $("rowCompute").style.display = desktopGpu ? "" : "none";
+    if (desktopGpu) {
+      /* auto and gpu both mean "the GPU" on a desktop */
+      segSet(document.querySelector('[data-seg="compute"]'), computeCpu ? "cpu" : "gpu");
+    }
+    $("rowGpuPick").style.display = (!noGpu && (hw.gpus || []).length > 1 && !computeCpu) ? "" : "none";
     $("rowDesktop").style.display = hw.batteryPresent ? "" : "none";
     $("engineHelp").textContent = desktop
-      ? (noGpu ? engineHelpCopy.desktopNone : engineHelpCopy.desktopGpu)
+      ? ((noGpu || computeCpu) ? engineHelpCopy.desktopNone : engineHelpCopy.desktopGpu)
       : (noGpu ? engineHelpCopy.laptopNone
         : (hw.gpuClass === "integrated" ? engineHelpCopy.laptopIntegrated
           : engineHelpCopy.laptopDiscrete));
