@@ -82,6 +82,10 @@
     const y = now.getFullYear();
     return {
       today: day(0), yesterday: day(-1),
+      /* enough relative days that the history window (5 sections) always
+         has past days on both sides to slide across */
+      d2: day(-2), d3: day(-3), d4: day(-4), d6: day(-6), d7: day(-7),
+      d8: day(-8), d9: day(-9),
       jul24: y + "-07-24", jun30: y + "-06-30", mar3: y + "-03-03"
     };
   })();
@@ -92,6 +96,15 @@
     { id: "m4", day: MOCK_DAYS.today, clock: "9:12 PM", dur: "0:14", text: "Draft reply to the guy asking about the Steam Deck: it's the 512 gig model, screen has zero scratches, comes with the case and the original box." },
     { id: "m5", day: MOCK_DAYS.yesterday, clock: "4:20 PM", dur: "0:08", text: "Order thermal pads before the weekend, the 1.5 millimeter ones, not the 2s." },
     { id: "m6", day: MOCK_DAYS.yesterday, clock: "11:05 AM", dur: "0:22", text: "Meeting note: Priya wants the export flow demoed Thursday. Keep it under five minutes, lead with the clipboard story, skip the settings tour unless she asks." },
+    { id: "m10", day: MOCK_DAYS.d2, clock: "7:02 PM", dur: "0:09", text: "Ship the GameCube controller tomorrow morning, the label is already printed." },
+    { id: "m11", day: MOCK_DAYS.d2, clock: "9:41 AM", dur: "0:16", text: "Vault entry: tried the new hairline divider mockup in both themes, dark needs a touch more contrast but light is basically done." },
+    { id: "m12", day: MOCK_DAYS.d3, clock: "6:15 PM", dur: "0:06", text: "Check whether the DS Lite hinge part arrived." },
+    { id: "m13", day: MOCK_DAYS.d4, clock: "1:28 PM", dur: "0:11", text: "Note for the listing: the Vita has a stuck pixel in the top left corner, disclose it up front and knock ten bucks off." },
+    { id: "m14", day: MOCK_DAYS.d4, clock: "10:03 AM", dur: "0:07", text: "Move the dentist reminder to the shared calendar." },
+    { id: "m15", day: MOCK_DAYS.d6, clock: "8:55 PM", dur: "0:13", text: "Draft: thanks for the quick payment, the console ships tomorrow with tracking, let me know when it lands." },
+    { id: "m16", day: MOCK_DAYS.d7, clock: "3:37 PM", dur: "0:21", text: "Vault entry: long day of packaging. Sold the modded PSP and both Game Boys, which clears the shelf for the next lot pickup on Saturday." },
+    { id: "m17", day: MOCK_DAYS.d8, clock: "11:19 AM", dur: "0:08", text: "Ask about bulk pricing on the anti-static bags before reordering." },
+    { id: "m18", day: MOCK_DAYS.d9, clock: "5:44 PM", dur: "0:10", text: "Idea: a keyboard shortcut cheat sheet card to slip into each console box, printed on the cardstock left over from the labels." },
     { id: "m7", day: MOCK_DAYS.jul24, clock: "8:47 PM", dur: "0:12", text: "Idea: the pill could dim instead of hide when a video call is fullscreen, so you still know it's armed." },
     { id: "m8", day: MOCK_DAYS.jun30, clock: "2:33 PM", dur: "0:19", text: "Vault entry: switched the whole build to static linking today. Binary is 40 megs heavier but installs are one file now, which is the point." },
     { id: "m9", day: MOCK_DAYS.mar3, clock: "9:15 AM", dur: "0:07", text: "Call the dentist back about moving the Tuesday appointment." }
@@ -290,6 +303,8 @@
     },
     history_days() {
       const days = MOCK_ENTRIES.map((e) => e.day).filter((d, i, a) => a.indexOf(d) === i);
+      days.sort();
+      days.reverse(); // newest first, like the backend's directory listing
       return Promise.resolve(days);
     },
     history_entries(day) {
@@ -351,7 +366,8 @@
     vocab: { hotwords: [], corrections: [] },
     days: [],                    // iso days, newest first; [0] is always today
     dayIdx: 0,                   // day the jumper points at (scroll-spied)
-    histLoaded: 0,               // index of the oldest day section rendered
+    histTop: 0,                  // index of the newest day section in the DOM
+    histLoaded: 0,               // index of the oldest day section in the DOM
     dayCache: {},                // iso day -> entries (today reads App.entries live)
     allDaysLoaded: false
   };
@@ -448,8 +464,9 @@
       if (next.join("\n") !== App.days.join("\n")) App.allDaysLoaded = false;
       App.days = next;
       if (App.histLoaded >= App.days.length) App.histLoaded = App.days.length - 1;
+      if (App.histTop > App.histLoaded) App.histTop = App.histLoaded;
       if (App.dayIdx >= App.days.length) App.dayIdx = 0;
-    }).catch(() => { App.days = [todayIso()]; App.histLoaded = 0; App.dayIdx = 0; });
+    }).catch(() => { App.days = [todayIso()]; App.histTop = 0; App.histLoaded = 0; App.dayIdx = 0; });
   }
 
   function ensureAllDays() {
@@ -458,13 +475,16 @@
       .then(() => { App.allDaysLoaded = true; });
   }
 
-  /* One day section: sticky header + that day's entries. Only today can
-     be empty (older days come from history_days, which lists only days
-     with transcripts on disk) — its empty state points back at the older
-     days one scroll away. */
+  /* One day section: that day's entries; today carries no label of any
+     kind, each older day opens with a hairline daybreak rule that scrolls
+     with the content. Only today can be empty (older days come from
+     history_days, which lists only days with transcripts on disk) — its
+     empty state points back at the older days one scroll away. */
   function daySection(iso, list) {
-    const sec = h("section", { class: "dayseg", "data-day": iso },
-      h("div", { class: "dayhdr", text: dayLabel(iso) }));
+    const sec = h("section", { class: "dayseg", "data-day": iso });
+    if (iso !== todayIso()) {
+      sec.appendChild(h("div", { class: "daybreak", text: dayLabel(iso) }));
+    }
     const body = h("div", { class: "daybody" });
     list.forEach((e) => body.appendChild(makeEntry(e)));
     if (!list.length) {
@@ -481,7 +501,11 @@
 
   /* The advanced History view opens on TODAY only; older days append one
      at a time as you scroll back (or via the day jumper), each fetched
-     once through history_entries and cached. */
+     once through history_entries and cached. The DOM holds a window of at
+     most HIST_WINDOW day sections — scrolling past either edge slides the
+     window rather than growing the page (a long session must never
+     accumulate a lifetime of transcripts in one DOM). */
+  const HIST_WINDOW = 5;
   let advToken = 0;
   function renderAdv() {
     const token = ++advToken;
@@ -510,12 +534,20 @@
     }
     $("noRes").style.display = "none";
     if (App.histLoaded >= App.days.length) App.histLoaded = Math.max(0, App.days.length - 1);
-    const daysToShow = App.days.slice(0, App.histLoaded + 1);
+    if (App.histTop > App.histLoaded) App.histTop = App.histLoaded;
+    if (App.histLoaded - App.histTop >= HIST_WINDOW) {
+      App.histTop = App.histLoaded - HIST_WINDOW + 1;
+    }
+    const daysToShow = App.days.slice(App.histTop, App.histLoaded + 1);
     Promise.all(daysToShow.map(entriesForDay)).then((lists) => {
       if (token !== advToken) return;
+      const keep = mainEl.scrollTop;
       advList.innerHTML = "";
       daysToShow.forEach((d, i) => advList.appendChild(daySection(d, lists[i])));
       pager.style.display = "flex";
+      /* a live re-render (state push while the view is open) must not move
+         the list under the reader — same window, same offset */
+      if (keep) setMainScrollTop(keep);
       syncPager();
     });
   }
@@ -528,7 +560,39 @@
     return App.adv && App.view === "history" && !searchInput.value.trim();
   }
 
-  /* Append the next older day below the ones already shown. */
+  /* Programmatic scroll moves also update the direction tracker so the
+     scroll event they fire reads as "no movement" and can't re-trigger a
+     window slide (no ping-pong between the two edge loaders). */
+  let lastMainTop = 0;
+  function setMainScrollTop(v) {
+    mainEl.scrollTop = v;
+    lastMainTop = mainEl.scrollTop;
+  }
+
+  /* Keep at most HIST_WINDOW day sections in the DOM. Dropping a section
+     ABOVE the viewport subtracts its measured height from scrollTop in the
+     same tick, so the visible content never jumps (manual anchoring —
+     WebKitGTK has no native scroll anchoring, and Chromium's is disabled
+     on .main so it can't double-correct). Dropping below needs no
+     compensation. */
+  function trimWindowTop() {
+    while (advList.children.length > HIST_WINDOW) {
+      const first = advList.firstElementChild;
+      const prevTop = mainEl.scrollTop;
+      const before = mainEl.scrollHeight;
+      first.remove();
+      App.histTop++;
+      setMainScrollTop(Math.max(0, prevTop - (before - mainEl.scrollHeight)));
+    }
+  }
+  function trimWindowBottom() {
+    while (advList.children.length > HIST_WINDOW) {
+      advList.lastElementChild.remove();
+      App.histLoaded--;
+    }
+  }
+
+  /* Slide the window down: append the next older day, drop the newest. */
   let histLoading = false;
   function loadOlderDay() {
     if (histLoading || !histScrolling() || App.histLoaded >= App.days.length - 1) {
@@ -542,6 +606,31 @@
       if (!histScrolling() || App.histLoaded >= idx) return true;
       App.histLoaded = idx;
       advList.appendChild(daySection(iso, list));
+      trimWindowTop();
+      syncPager();
+      return true;
+    }, () => { histLoading = false; return false; });
+  }
+
+  /* Slide the window up: re-insert the next newer day above (today reads
+     App.entries live, older days come from dayCache), drop the oldest.
+     scrollTop grows by the inserted height so the view stays put. */
+  function loadNewerDay() {
+    if (histLoading || !histScrolling() || App.histTop <= 0) {
+      return Promise.resolve(false);
+    }
+    histLoading = true;
+    const idx = App.histTop - 1;
+    const iso = App.days[idx];
+    return entriesForDay(iso).then((list) => {
+      histLoading = false;
+      if (!histScrolling() || App.histTop <= idx) return true;
+      App.histTop = idx;
+      const prevTop = mainEl.scrollTop;
+      const before = mainEl.scrollHeight;
+      advList.insertBefore(daySection(iso, list), advList.firstChild);
+      setMainScrollTop(prevTop + (mainEl.scrollHeight - before));
+      trimWindowBottom();
       syncPager();
       return true;
     }, () => { histLoading = false; return false; });
@@ -559,31 +648,41 @@
     const secs = daySections();
     if (!secs.length) return;
     const mtop = mainEl.getBoundingClientRect().top;
-    let idx = 0;
-    secs.forEach((s, i) => { if (s.getBoundingClientRect().top - mtop <= 40) idx = i; });
+    let idx = App.histTop;
+    secs.forEach((s, i) => { if (s.getBoundingClientRect().top - mtop <= 40) idx = App.histTop + i; });
     if (idx !== App.dayIdx) { App.dayIdx = idx; syncPager(); }
   }
+  /* while a pager jump is smooth-scrolling, passing the window edges must
+     not slide the window under the animation */
+  let histJumpUntil = 0;
   function scrollToDay(idx) {
-    const sec = daySections()[idx];
+    const sec = daySections()[idx - App.histTop];
     if (!sec) return;
     const mtop = mainEl.getBoundingClientRect().top;
     const y = mainEl.scrollTop + (sec.getBoundingClientRect().top - mtop) - 4;
+    histJumpUntil = motionReduced() ? 0 : Date.now() + 700;
     mainEl.scrollTo({ top: Math.max(0, y), behavior: motionReduced() ? "auto" : "smooth" });
     App.dayIdx = idx;
     syncPager();
   }
 
   mainEl.addEventListener("scroll", () => {
+    const top = mainEl.scrollTop;
+    const goingDown = top > lastMainTop;
+    const goingUp = top < lastMainTop;
+    lastMainTop = top;
     if (!histScrolling()) return;
     syncPagerFromScroll();
-    if (mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 120) loadOlderDay();
+    if (Date.now() < histJumpUntil) return;
+    if (goingDown && top + mainEl.clientHeight >= mainEl.scrollHeight - 120) loadOlderDay();
+    if (goingUp && top <= 80 && App.histTop > 0) loadNewerDay();
   });
-  /* a short day never overflows, so bottom-of-scroll alone can't reach the
-     past — a downward wheel at the bottom (or with nothing to scroll) also
-     pulls in the previous day */
+  /* a short day never overflows, so scroll position alone can't cross the
+     window edges — a wheel at either end also slides the window */
   mainEl.addEventListener("wheel", (e) => {
-    if (!histScrolling() || e.deltaY <= 0) return;
-    if (mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4) loadOlderDay();
+    if (!histScrolling()) return;
+    if (e.deltaY > 0 && mainEl.scrollTop + mainEl.clientHeight >= mainEl.scrollHeight - 4) loadOlderDay();
+    else if (e.deltaY < 0 && mainEl.scrollTop <= 4 && App.histTop > 0) loadNewerDay();
   }, { passive: true });
 
   searchInput.addEventListener("input", () => {
@@ -602,7 +701,10 @@
     loadOlderDay().then((ok) => { if (ok) scrollToDay(App.histLoaded); });
   });
   $("pagerNewer").addEventListener("click", () => {
-    if (App.dayIdx > 0) scrollToDay(App.dayIdx - 1);
+    if (App.dayIdx <= 0) return;
+    const target = App.dayIdx - 1;
+    if (target >= App.histTop) { scrollToDay(target); return; }
+    loadNewerDay().then((ok) => { if (ok) scrollToDay(App.histTop); });
   });
 
   /* ════════════════════════════════════════════════════════════════════
@@ -744,6 +846,7 @@
     $("main").scrollTop = 0;
     if (v === "history") {
       /* one-day default: every visit starts at today only */
+      App.histTop = 0;
       App.histLoaded = 0;
       App.dayIdx = 0;
       loadDays().then(renderAdv);
@@ -1617,11 +1720,18 @@
     panel.classList.remove("is-empty");
     listEl.prepend(makeEntry(entry, true));
     if (App.adv && App.view === "history" && !searchInput.value.trim()) {
+      /* today's section is live while it's inside the window; when the
+         reader has scrolled past it (histTop > 0) the entry is already in
+         App.entries and renders when today slides back in */
       const body = advList.querySelector('.dayseg[data-day="' + todayIso() + '"] .daybody');
       if (body) {
         const ph = body.querySelector(".dayempty");
         if (ph) ph.remove();
+        const prevTop = mainEl.scrollTop;
+        const before = mainEl.scrollHeight;
         body.prepend(makeEntry(entry, true));
+        /* landing above a scrolled-away viewport must not shove the list */
+        if (prevTop > 0) setMainScrollTop(prevTop + (mainEl.scrollHeight - before));
       }
     }
   };

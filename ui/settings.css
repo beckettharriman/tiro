@@ -32,6 +32,10 @@
 /* main region */
 .main{
   flex:1; min-width:0; overflow-y:auto; overscroll-behavior:contain;
+  /* history windowing compensates scrollTop by hand around insert/remove
+     above the viewport; native scroll anchoring (Chromium-only — WebKitGTK
+     has none) would double-correct, so it is off for both engines */
+  overflow-anchor:none;
   padding: var(--s-1) var(--s-6) var(--s-6);
   scrollbar-width:thin; scrollbar-color:rgba(var(--ink),.2) transparent;
 }
@@ -371,20 +375,21 @@ body.fallback .banner{ display:flex; animation: land var(--t-med) var(--ease) bo
 /* mic waveform preview */
 .wave{ width:160px; height:28px; flex:none; }
 
-/* day sections — Today renders alone by default; older days append below
-   as you scroll back, each under its own sticky header */
+/* day sections — Today renders alone by default with no label of any kind;
+   each older day is introduced by a quiet centered date between hairline
+   rules that scroll with the content (no box, no background — reads as
+   part of the glass) */
 .dayseg + .dayseg{ margin-top: var(--s-4); }
-.dayhdr{
-  position:sticky; top:0; z-index:2;
-  font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-  color:rgba(var(--ink),.40);
+.daybreak{
+  display:flex; align-items:center; gap:var(--s-4);
   padding: var(--s-2) var(--s-1);
-  /* tracks the transparency slider: panel alpha + a fixed boost so the
-     header always reads over entries scrolling under it (CSS clamps the
-     alpha at 1 when the slider is near solid) */
-  background:rgba(var(--glass-rgb), calc(var(--glass-a) + 0.16));
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  font-size:11px; font-weight:600; letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;
+  color:rgba(var(--ink),.42);
+  background:transparent;
+}
+.daybreak::before, .daybreak::after{
+  content:""; flex:1; height:1px; background:var(--hairline);
 }
 .dayempty{
   font-size:12.5px; letter-spacing:-0.003em;
