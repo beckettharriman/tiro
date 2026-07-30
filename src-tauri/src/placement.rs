@@ -435,9 +435,9 @@ pub(crate) fn panel_input_rect(expanded: bool) -> (i32, i32, i32, i32) {
 /// that keeps the RIGHT edge fixed (the design's expand anchor is the
 /// top-right corner), clamped so the whole surface stays inside the work
 /// area — the left edge wins when the area is narrower than the window.
-/// Physical px. Pure, extracted for tests. Windows-only at runtime: the
-/// Linux window never resizes, so it never re-anchors either.
-#[cfg(any(windows, test))]
+/// Physical px. Pure, extracted for tests. Windows uses it with the real
+/// resize delta; Linux uses it with delta 0 as a pure work-area clamp on
+/// expand (see `clamp_expanded_into_work_area`).
 fn anchored_right_x(old_x: i32, delta: i32, new_w: i32, work: Option<(i32, i32, i32, i32)>) -> i32 {
     let x = old_x - delta;
     match work {
@@ -450,8 +450,7 @@ fn anchored_right_x(old_x: i32, delta: i32, new_w: i32, work: Option<(i32, i32, 
 /// on first — the cursor may be on another monitor by the time the
 /// deferred collapse resize fires 560 ms after the click — falling back
 /// to the cursor/primary chain only when the panel's monitor is unknown
-/// (e.g. the window is unmapped). Windows-only, like the resize path.
-#[cfg(windows)]
+/// (e.g. the window is unmapped).
 fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
     let monitor = app
         .get_webview_window("panel")
@@ -472,17 +471,20 @@ fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
 
 /// Expand/collapse notification from the UI (the `set_expanded` invoke).
 ///
-/// Linux: the window's geometry NEVER changes here — it is created at the
-/// expanded footprint (tauri.conf.json) and stays there. X11 has no
-/// atomic move+resize: tao/GTK applies `gtk_window_move` immediately but
+/// Linux: the window NEVER resizes here — it is created at the expanded
+/// footprint (tauri.conf.json) and stays there. X11 has no atomic
+/// move+resize: tao/GTK applies `gtk_window_move` immediately but
 /// `gtk_window_resize` waits for the next layout tick, so the old
 /// resize+reanchor choreography produced two separate configures and the
 /// right-hugging glass visibly teleported ~a glass-width sideways for a
 /// frame or two whenever the compositor sampled between them. With the
 /// fixed footprint the whole expand/collapse is the CSS width transition
-/// of the glass inside the transparent window; the only native work left
-/// is retargeting the input shape so the transparent left margin never
-/// eats clicks while compact (see `panel_input_fixup`).
+/// of the glass inside the transparent window; the native work left is
+/// retargeting the input shape so the transparent left margin never eats
+/// clicks while compact (see `panel_input_fixup`), plus — on expand only —
+/// a lone atomic move when the glass was parked close enough to the work
+/// area's left edge that the expanded surface would not fit (see
+/// `clamp_expanded_into_work_area`).
 ///
 /// Windows: keeps the original native resize path — instant resize with
 /// the min==max constraints moved direction-aware, re-anchored so the
@@ -500,12 +502,70 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     });
 }
 
-/// Linux body of `set_panel_expanded`: bookkeeping + input shape only.
-/// Main thread only.
+/// Linux body of `set_panel_expanded`: bookkeeping, the work-area clamp,
+/// and the input shape. Main thread only.
 #[cfg(target_os = "linux")]
 fn set_panel_expanded_linux(app: &AppHandle, on: bool) {
-    state(app).expanded.store(on, Ordering::SeqCst);
+    let was = state(app).expanded.swap(on, Ordering::SeqCst);
+    if on && !was {
+        clamp_expanded_into_work_area(app);
+    }
     apply_panel_input_shape(app);
+}
+
+/// Expanding with the compact glass parked within a glass-width of the
+/// work area's left edge would push the advanced UI (the sidebar first)
+/// off-screen: the expanded glass IS the whole fixed-footprint window,
+/// whose left edge legitimately sits outside the work area while
+/// compact. Slide the window right until it fits — the same
+/// `anchored_right_x` clamp the Windows resize path applies, with a
+/// zero delta ("left edge wins" on a too-narrow area). A lone move is a
+/// single X configure — atomic, unlike the move+resize pair this rework
+/// eliminated — so it cannot reintroduce the sideways flash.
+///
+/// The collapse deliberately does NOT slide back, matching the original
+/// native path: there the collapse re-anchored the right edge of
+/// wherever the (possibly clamped) expanded window ended up, so after
+/// an expand-clamp cycle the compact glass keeps the new right edge.
+/// Here the window simply never moves on collapse, which lands the
+/// glass in exactly that spot; `panel_pos` is updated at the slide so
+/// config and the reposition burst agree.
+#[cfg(target_os = "linux")]
+fn clamp_expanded_into_work_area(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    let Some(work) = panel_work_area(app) else {
+        return;
+    };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let phys_w = (f64::from(PANEL_W_EXPANDED) * scale).round() as i32;
+    let off = compact_glass_offset_x(scale);
+    if w.is_visible().unwrap_or(false) {
+        if let Ok(pos) = w.outer_position() {
+            let x = anchored_right_x(pos.x, 0, phys_w, Some(work));
+            if x != pos.x {
+                let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                // Update the remembered GLASS spot now, not via the async
+                // Moved event, so a racing reposition burst can't restore
+                // the stale x (same reasoning as the Windows path).
+                *lock(&state(app).panel_pos) = Some((x + off, pos.y));
+            }
+        }
+    } else {
+        // Hidden (an expand invoke racing a hotkey hide): geometry
+        // queries on an unmapped window are unreliable — reconcile from
+        // the remembered glass spot and persist, like the Windows
+        // hidden-path does.
+        let remembered = *lock(&state(app).panel_pos);
+        if let Some((gx, gy)) = remembered {
+            let wx = gx - off;
+            let x = anchored_right_x(wx, 0, phys_w, Some(work));
+            if x != wx {
+                note_panel_pos(app, x + off, gy, 0);
+            }
+        }
+    }
 }
 
 /// Windows body of `set_panel_expanded`: the original native resize.
@@ -936,6 +996,39 @@ mod tests {
         let (gx, gy) = (0, 300);
         assert!(center_on_any(&areas, gx, gy, 400, 560));
         assert_eq!(gx - glass_offset_x(true, 1.0), -400);
+    }
+
+    #[test]
+    fn fixed_footprint_expand_clamps_into_the_work_area() {
+        // Linux fixed footprint: the clamp is anchored_right_x with a zero
+        // delta on the WINDOW rect (== the expanded glass rect).
+        let work = Some((0, 0, 1920, 1080));
+        for scale in [1.0, 2.0] {
+            let off = glass_offset_x(true, scale);
+            let phys_w = (800.0 * scale).round() as i32;
+            // reviewer scenario: compact glass at the work-area left edge
+            // (gx=0) -> window spans -off..+off -> expand must slide the
+            // window right to 0 so the whole advanced UI (sidebar first)
+            // stays on screen; the remembered glass follows the slide.
+            let gx = 0;
+            let wx = gx - off;
+            let big = Some((0, 0, 4000 * scale as i32, 2000));
+            let x = anchored_right_x(wx, 0, phys_w, big);
+            assert_eq!(x, 0, "slides to the work-area left at scale {scale}");
+            assert_eq!(x + off, off, "compact glass lands at +off after the cycle");
+            // glass just inside the danger zone (gx < off) still slides
+            let wx2 = (off / 2) - off;
+            assert_eq!(anchored_right_x(wx2, 0, phys_w, big), 0);
+        }
+        // expanded surface already fully inside the area: untouched
+        assert_eq!(anchored_right_x(500, 0, 800, work), 500);
+        assert_eq!(anchored_right_x(0, 0, 800, work), 0);
+        // never past the right edge either
+        assert_eq!(anchored_right_x(1200, 0, 800, work), 1120);
+        // area narrower than the window: left edge wins
+        assert_eq!(anchored_right_x(-100, 0, 800, Some((0, 0, 600, 400))), 0);
+        // no monitor info: no clamp, no move
+        assert_eq!(anchored_right_x(-400, 0, 800, None), -400);
     }
 
     #[test]

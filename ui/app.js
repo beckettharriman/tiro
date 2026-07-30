@@ -1731,6 +1731,11 @@
     if (_booted) return;
     _booted = true;
     if (bridgeReady()) api = window.pywebview.api;
+    /* re-sync the backend's expand state (input shape on Linux, window
+       width on Windows) to the UI's actual state: a webview reload while
+       expanded would otherwise leave the backend expanded — a hot input
+       strip over the transparent margin — until the next toggle */
+    Promise.resolve(api.set_expanded && api.set_expanded(App.adv)).catch(() => {});
     Promise.resolve(api.get_state()).then((state) => {
       ingestState(state);
       renderAll();
