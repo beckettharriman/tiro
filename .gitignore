@@ -25,3 +25,4 @@ transcripts/
 *.swp
 .DS_Store
 Thumbs.db
+.vibe-wave.md
