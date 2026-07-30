@@ -482,6 +482,19 @@ pub fn run() {
             // "No Input" model. See placement::pill_no_input_fixup.
             #[cfg(target_os = "linux")]
             placement::pill_no_input_fixup(app);
+            // The panel window is created at the EXPANDED footprint
+            // (800x560, tauri.conf.json) and boots compact:
+            // - Linux: the footprint is permanent — X11's non-atomic
+            //   move+resize made the old native expand/collapse flash the
+            //   glass sideways — so booting compact only means shaping
+            //   input down to the glass rect (the transparent left margin
+            //   must not eat clicks), re-asserted on every realize/map.
+            // - Windows: the native resize path is kept (DWM applies
+            //   move+resize atomically), so this shrinks the window to the
+            //   compact size now, before its first show.
+            #[cfg(target_os = "linux")]
+            placement::panel_input_fixup(app);
+            placement::set_panel_expanded(app.handle(), false);
             // The panel is configured hidden (summoned by hotkey/tray, which
             // land in phase 2/3); dev builds show it at startup so there is
             // something to work against. The pill is driven by the recording

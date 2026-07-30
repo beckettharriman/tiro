@@ -668,40 +668,49 @@
     Promise.resolve(api.begin_drag && api.begin_drag()).catch(() => {});
   });
 
-  /* ── expand / collapse: two surfaces move here — the OS window (instant,
-     transparent, top-right corner fixed by the backend) and the glass
-     panel (CSS width, 520 ms). The window must never be the thing the eye
-     sees move:
-       grow:   window jumps to 800 FIRST, then the glass animates 400->800
-               inside the already-big window once the viewport is actually
-               wide (resize event with a deadline backstop — the invoke ack
-               only means the resize was scheduled, so starting on the ack
-               alone clips the animation);
-       shrink: the glass animates down first, the window snaps to 400 only
-               after the 520 ms settle (instantly under reduced motion).
-     While the window is wider than the glass (~520 ms per direction) the
-     transparent margin still belongs to the panel window and eats clicks —
-     accepted: no cross-platform per-pixel input shaping, and at rest the
-     window always matches the glass exactly. ──────────────────────────── */
+  /* ── expand / collapse: the OS window never moves or resizes here — on
+     Linux it is permanently at the expanded footprint (X11 cannot apply a
+     move+resize atomically, which made the old native choreography flash
+     the glass sideways), and the backend keeps the window's mouse-input
+     shape matched to the glass so the transparent margin never eats
+     clicks. Everything the eye tracks is CSS inside the fixed window:
+       t=0       .adv toggles the 520 ms width transition on the glass; on
+                 expand `.swap` holds the advanced area back while the
+                 compact body fades out (160 ms); on collapse `.advout`
+                 fades the advanced area out (160 ms) BEFORE the width
+                 comes down;
+       t=160 ms  content swap: the other body fades in (existing advIn);
+       settle    the history list may (re)render — never mid-transition
+                 (see afterSettle).
+     `set_expanded` is just the input-shape notify hook on Linux (and the
+     native resize on Windows, where the window still tracks the glass). */
   const expandBtn = $("expandBtn");
   let advTimer = null;
   let advGen = 0;
-  /* run fn once the viewport is at least px wide — immediately if it
-     already is, else on the resize event the native window change fires,
-     with a deadline fallback so a missed resize can never wedge expand */
-  function whenWide(px, deadlineMs, fn) {
-    if (window.innerWidth >= px) { fn(); return; }
-    let fired = false;
+  const SWAP_MS = 160; /* --t-fast: the content cross-fade beat */
+  /* the glass width is settling until this timestamp; entries-list
+     rebuilds wait for it so the 520 ms transition never competes with an
+     innerHTML wipe + per-entry layout reads */
+  let settleUntil = 0;
+  function markSettle() {
+    settleUntil = motionReduced() ? 0 : performance.now() + 520 + 80;
+  }
+  /* run fn now if no width transition is in flight, else after it ends
+     (transitionend, with the timestamp as a backstop so a missed event
+     can never wedge rendering) */
+  function afterSettle(fn) {
+    if (performance.now() >= settleUntil) { fn(); return; }
+    let done = false;
     const finish = () => {
-      if (fired) return;
-      fired = true;
-      window.removeEventListener("resize", check);
+      if (done) return;
+      done = true;
+      panel.removeEventListener("transitionend", onEnd);
       clearTimeout(tm);
       fn();
     };
-    const check = () => { if (window.innerWidth >= px) finish(); };
-    const tm = setTimeout(finish, deadlineMs);
-    window.addEventListener("resize", check);
+    const onEnd = (e) => { if (e.target === panel && e.propertyName === "width") finish(); };
+    panel.addEventListener("transitionend", onEnd);
+    const tm = setTimeout(finish, Math.max(0, settleUntil - performance.now()));
   }
   function setAdv(on) {
     if (App.adv === on) return;
@@ -710,24 +719,36 @@
     const gen = ++advGen;
     if (on) {
       expandBtn.title = "Collapse";
-      renderAdv();
-      ensureMic();
-      Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {}).then(() => {
-        whenWide(780, 500, () => {
-          if (gen !== advGen) return; /* collapsed again before the window grew */
-          panel.classList.add("adv");
-        });
-      });
-    } else {
-      panel.classList.remove("adv");
-      expandBtn.title = "Expand";
+      panel.classList.remove("advout");
+      /* width starts now; .swap fades the compact body out first beat */
+      panel.classList.add("adv", "swap");
+      markSettle();
       advTimer = setTimeout(() => {
-        Promise.resolve(api.set_expanded && api.set_expanded(false)).catch(() => {});
-      }, motionReduced() ? 0 : 560);
+        if (gen !== advGen) return;
+        panel.classList.remove("swap");
+      }, motionReduced() ? 0 : SWAP_MS);
+      Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {});
+      afterSettle(() => { if (gen === advGen) renderAdv(); });
+      ensureMic();
+      kickWave();
+    } else {
+      expandBtn.title = "Expand";
+      panel.classList.remove("swap");
+      /* fade the advanced content out, THEN bring the width down */
+      panel.classList.add("advout");
+      advTimer = setTimeout(() => {
+        if (gen !== advGen) return;
+        panel.classList.remove("advout", "adv");
+        markSettle();
+        advTimer = setTimeout(() => {
+          if (gen !== advGen) return;
+          Promise.resolve(api.set_expanded && api.set_expanded(false)).catch(() => {});
+        }, motionReduced() ? 0 : 560);
+      }, motionReduced() ? 0 : SWAP_MS);
     }
   }
   expandBtn.addEventListener("click", () => {
-    const opening = !panel.classList.contains("adv");
+    const opening = !App.adv;
     if (opening) setView("history");
     setAdv(opening);
   });
@@ -746,10 +767,12 @@
       /* one-day default: every visit starts at today only */
       App.histLoaded = 0;
       App.dayIdx = 0;
-      loadDays().then(renderAdv);
+      /* the render waits out any in-flight expand transition */
+      loadDays().then(() => afterSettle(renderAdv));
     }
     if (v === "vocab") loadVocab();
     if (v === "models") refreshModels();
+    kickWave();
   }
   document.querySelectorAll(".navitem").forEach((n) => n.addEventListener("click", () => setView(n.dataset.view)));
 
@@ -1403,7 +1426,11 @@
       src.connect(analyser);
     } catch (_) { analyser = null; } /* no permission — idle simulation */
   }
-  /* always-running waveform (functional status motion — kept under reduced motion) */
+  /* waveform (functional status motion — kept under reduced motion), but
+     only while it can actually be seen: expanded, Settings view, page
+     visible. The rAF loop parks itself otherwise (no canvas clears, no
+     getComputedStyle, no text writes on frames nobody sees) and is
+     re-kicked by setAdv / setView / visibilitychange. */
   const NBARS = 26, bars = new Array(NBARS).fill(0.08);
   let simPhase = 0;
   function sampleLevel() {
@@ -1422,7 +1449,17 @@
     simPhase += 0.045;
     return 0.06 + Math.abs(Math.sin(simPhase * 0.7)) * 0.05 + Math.random() * 0.03;
   }
+  let waveRunning = false;
+  function waveVisible() {
+    return !document.hidden && App.adv && App.view === "settings";
+  }
+  function kickWave() {
+    if (waveRunning || !waveVisible()) return;
+    waveRunning = true;
+    requestAnimationFrame(drawWave);
+  }
   function drawWave() {
+    if (!waveVisible()) { waveRunning = false; return; }
     const lvl = sampleLevel() * gainVal * 1.33;
     bars.pop(); bars.unshift(lvl);
     const db = 20 * Math.log10(Math.max(0.001, Math.min(1, lvl)));
@@ -1443,7 +1480,7 @@
     }
     requestAnimationFrame(drawWave);
   }
-  requestAnimationFrame(drawWave);
+  kickWave();
   /* input volume (webview preview gain only) */
   const rngGain = $("rngGain");
   rngGain.addEventListener("input", () => {
@@ -1505,10 +1542,15 @@
   function stopMonitorIfLive() {
     if (bridgeReady() && testing) stopBackendMonitor();
   }
-  document.addEventListener("visibilitychange", () => { if (document.hidden) stopMonitorIfLive(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopMonitorIfLive();
+    kickWave();
+  });
   $("closeBtn").addEventListener("click", stopMonitorIfLive);
   expandBtn.addEventListener("click", () => {
-    if (!panel.classList.contains("adv")) stopMonitorIfLive();
+    /* App.adv, not the class: a collapse keeps .adv on the panel for the
+       160 ms content fade, but the monitor must stop at the click */
+    if (!App.adv) stopMonitorIfLive();
   });
   document.querySelectorAll(".navitem").forEach((n) => n.addEventListener("click", () => {
     if (n.dataset.view !== "settings") stopMonitorIfLive();
@@ -1600,7 +1642,7 @@
     renderShortcuts();
     syncSettings();
     updateEngine();
-    if (App.adv && App.view === "history") renderAdv();
+    if (App.adv && App.view === "history") afterSettle(renderAdv);
   }
 
   /* ════════════════════════════════════════════════════════════════════

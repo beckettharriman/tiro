@@ -51,8 +51,9 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   padding:0 var(--s-4);
   border-radius:var(--r-pill);
   background:rgba(var(--glass-rgb), var(--glass-a));
-  backdrop-filter: blur(34px) saturate(180%);
-  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  /* no backdrop-filter: the OS window behind the pill is transparent, so
+     there is nothing for it to sample — it contributed zero pixels while
+     forcing a full repaint every frame of the width transition */
   border:0.5px solid var(--hairline);
   box-shadow: inset 0 1px 0 var(--highlight); /* no drop shadow */
   color:rgba(var(--ink),.92);
