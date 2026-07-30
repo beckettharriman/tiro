@@ -39,18 +39,26 @@ const SAVE_DEBOUNCE_MS: u64 = 800;
 #[derive(Default)]
 pub struct Placement {
     pinned: AtomicBool,
-    /// Last known on-screen position of the panel (physical px, outer/frame
-    /// origin). Seeded from config at startup, refreshed by every Moved
-    /// event while the panel is visible, and captured right before a hide.
+    /// Last known on-screen position of the panel GLASS — the compact
+    /// 400x560 visible surface, physical px. On Windows this equals the
+    /// window's outer origin (the window always matches the glass); on
+    /// Linux the window is permanently at the expanded footprint and the
+    /// glass hugs its right edge, so window x = glass x − the compact
+    /// offset (see `glass_offset_x`). Stored as the glass rect so configs
+    /// written by the old 400-wide-window builds keep rendering the glass
+    /// in exactly the same screen spot. Seeded from config at startup,
+    /// refreshed by every Moved event while the panel is visible, and
+    /// captured right before a hide.
     panel_pos: Mutex<Option<(i32, i32)>>,
     /// Debounce generation for persisting `panel_pos` to config.
     save_gen: AtomicU64,
     /// One-time guard for `init_panel_tracking`.
     tracking: AtomicBool,
-    /// Whether the panel window is currently at the expanded width. Owned
-    /// here (not queried from the window) so a resize on an UNMAPPED
-    /// window — where geometry queries are unreliable — still knows which
-    /// width it is coming from.
+    /// Whether the UI is currently in the expanded (advanced) state. On
+    /// Linux this drives the input shape (the window itself never
+    /// resizes); on Windows it is what the native resize is coming FROM,
+    /// owned here because geometry queries on an unmapped window are
+    /// unreliable.
     expanded: AtomicBool,
 }
 
@@ -109,7 +117,10 @@ pub fn init_panel_tracking(app: &AppHandle) {
         w.on_window_event(move |ev| {
             if let tauri::WindowEvent::Moved(p) = ev {
                 if win.is_visible().unwrap_or(false) {
-                    note_panel_pos(&app, p.x, p.y, SAVE_DEBOUNCE_MS);
+                    // window outer x -> glass x (panel_pos stores the glass
+                    // rect; on Linux the compact glass sits `off` px in)
+                    let off = compact_glass_offset_x(win.scale_factor().unwrap_or(1.0));
+                    note_panel_pos(&app, p.x + off, p.y, SAVE_DEBOUNCE_MS);
                 }
             }
         });
@@ -150,7 +161,8 @@ fn note_panel_pos(app: &AppHandle, x: i32, y: i32, delay_ms: u64) {
 pub(crate) fn remember_panel_now(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("panel") {
         if let Ok(p) = w.outer_position() {
-            note_panel_pos(app, p.x, p.y, 0);
+            let off = compact_glass_offset_x(w.scale_factor().unwrap_or(1.0));
+            note_panel_pos(app, p.x + off, p.y, 0);
         }
     }
 }
@@ -263,23 +275,45 @@ fn pos_on_screen(app: &AppHandle, x: i32, y: i32, ww: i32, wh: i32) -> bool {
 /// position when there is a valid one, else centered on the active work
 /// area (the pill instead docks to the configured edge via `pill_spot`).
 /// Must run on the main thread.
+///
+/// The panel places by its GLASS rect, never the window rect: on Linux
+/// the window is permanently at the expanded footprint with the compact
+/// glass hugging its right edge, so the window's left edge may
+/// legitimately sit outside the work area (glass near the screen's left
+/// edge) — on-screen validity and first-run centering both use the glass.
 fn place_window(app: &AppHandle, label: &str) {
     let Some(w) = app.get_webview_window(label) else {
         return;
     };
+    if label == "panel" {
+        let scale = w.scale_factor().unwrap_or(1.0);
+        let off = compact_glass_offset_x(scale);
+        let (gw, gh) = compact_glass_size(scale);
+        let remembered = *lock(&state(app).panel_pos);
+        if let Some((gx, gy)) = remembered {
+            if pos_on_screen(app, gx, gy, gw, gh) {
+                let _ = w.set_position(PhysicalPosition::new(gx - off, gy));
+                return;
+            }
+        }
+        let Some(work) = active_work_area(app) else {
+            return;
+        };
+        // First run (or the remembered spot's screen is gone): center the
+        // GLASS, then push the window left of it by the compact offset.
+        let Some((gx, gy)) = centered_spot(work, gw, gh) else {
+            return;
+        };
+        let _ = w.set_position(PhysicalPosition::new(gx - off, gy));
+        // The centered glass spot becomes the remembered one (in memory;
+        // the Moved event it triggers handles persistence).
+        *lock(&state(app).panel_pos) = Some((gx, gy));
+        return;
+    }
     let Ok(size) = w.outer_size() else {
         return;
     };
     let (ww, wh) = (size.width as i32, size.height as i32);
-    if label == "panel" {
-        let remembered = *lock(&state(app).panel_pos);
-        if let Some((x, y)) = remembered {
-            if pos_on_screen(app, x, y, ww, wh) {
-                let _ = w.set_position(PhysicalPosition::new(x, y));
-                return;
-            }
-        }
-    }
     let Some(work) = active_work_area(app) else {
         return;
     };
@@ -297,11 +331,6 @@ fn place_window(app: &AppHandle, label: &str) {
         return;
     };
     let _ = w.set_position(PhysicalPosition::new(x, y));
-    if label == "panel" {
-        // The centered spot becomes the remembered one (in memory; the Moved
-        // event it triggers handles persistence).
-        *lock(&state(app).panel_pos) = Some((x, y));
-    }
 }
 
 /// `_position_pill` / `_position_panel` as one main-thread entry.
@@ -352,11 +381,63 @@ pub const PANEL_W_COMPACT: u32 = 400;
 pub const PANEL_W_EXPANDED: u32 = 800;
 pub const PANEL_H: u32 = 560;
 
+/// Physical-px x offset from the panel WINDOW's left edge to the COMPACT
+/// glass left edge. With the fixed expanded footprint (Linux) the glass
+/// hugs the window's right edge, so the compact glass sits
+/// (expanded − compact) logical px in; where the window still resizes
+/// natively to match the glass (Windows) the offset is zero. One rounding
+/// of the whole offset, so glass↔window conversions round-trip exactly at
+/// any fractional scale. Pure, extracted for tests.
+pub(crate) fn glass_offset_x(fixed_footprint: bool, scale: f64) -> i32 {
+    if !fixed_footprint {
+        return 0;
+    }
+    ((f64::from(PANEL_W_EXPANDED) - f64::from(PANEL_W_COMPACT)) * scale).round() as i32
+}
+
+/// This build's compact-glass offset: the footprint is fixed on Linux only
+/// (X11's non-atomic move+resize is the reason — see `set_panel_expanded`).
+fn compact_glass_offset_x(scale: f64) -> i32 {
+    glass_offset_x(cfg!(target_os = "linux"), scale)
+}
+
+/// The compact glass rect's physical size at `scale`.
+fn compact_glass_size(scale: f64) -> (i32, i32) {
+    (
+        (f64::from(PANEL_W_COMPACT) * scale).round() as i32,
+        (f64::from(PANEL_H) * scale).round() as i32,
+    )
+}
+
+/// The panel's input region for an expand state, in GDK *window*
+/// coordinates — logical px, NOT device px: GDK multiplies shape regions
+/// by the integer window scale itself when converting them to X
+/// rectangles (gtk3 `gdkwindow-x11.c`, `do_shape_combine_region` passes
+/// `impl->window_scale` into `_gdk_x11_region_get_xrectangles`), so
+/// pre-multiplying here would double-scale on HiDPI. Compact = the right
+/// 400 logical px where the glass sits; expanded = the whole window.
+/// Pure, extracted for tests.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn panel_input_rect(expanded: bool) -> (i32, i32, i32, i32) {
+    if expanded {
+        (0, 0, PANEL_W_EXPANDED as i32, PANEL_H as i32)
+    } else {
+        (
+            (PANEL_W_EXPANDED - PANEL_W_COMPACT) as i32,
+            0,
+            PANEL_W_COMPACT as i32,
+            PANEL_H as i32,
+        )
+    }
+}
+
 /// New window x for a width change of `delta` physical px (new minus old)
 /// that keeps the RIGHT edge fixed (the design's expand anchor is the
 /// top-right corner), clamped so the whole surface stays inside the work
 /// area — the left edge wins when the area is narrower than the window.
-/// Physical px. Pure, extracted for tests.
+/// Physical px. Pure, extracted for tests. Windows uses it with the real
+/// resize delta; Linux uses it with delta 0 as a pure work-area clamp on
+/// expand (see `clamp_expanded_into_work_area`).
 fn anchored_right_x(old_x: i32, delta: i32, new_w: i32, work: Option<(i32, i32, i32, i32)>) -> i32 {
     let x = old_x - delta;
     match work {
@@ -388,90 +469,249 @@ fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// Resize the panel window for the advanced (expanded) surface — one shot,
-/// anchored so the TOP-RIGHT corner stays put (the design's anchor). The
-/// glass surface is right-aligned inside the window (styles.css `body`),
-/// so preserving the right edge keeps the visible panel pinned while the
-/// window changes width around it — and a later collapse lands the panel
-/// exactly where the user left it (no drift).
+/// Expand/collapse notification from the UI (the `set_expanded` invoke).
 ///
-/// The native resize is deliberately INSTANT in both directions; the
-/// 520 ms motion the eye tracks is the CSS width transition on the glass
-/// inside the transparent window. app.js orders the two so the window
-/// never moves mid-animation: expand resizes the window first and starts
-/// the CSS grow only once the viewport is wide; collapse animates the CSS
-/// down first and calls this after the settle.
+/// Linux: the window NEVER resizes here — it is created at the expanded
+/// footprint (tauri.conf.json) and stays there. X11 has no atomic
+/// move+resize: tao/GTK applies `gtk_window_move` immediately but
+/// `gtk_window_resize` waits for the next layout tick, so the old
+/// resize+reanchor choreography produced two separate configures and the
+/// right-hugging glass visibly teleported ~a glass-width sideways for a
+/// frame or two whenever the compositor sampled between them. With the
+/// fixed footprint the whole expand/collapse is the CSS width transition
+/// of the glass inside the transparent window; the native work left is
+/// retargeting the input shape so the transparent left margin never eats
+/// clicks while compact (see `panel_input_fixup`), plus — on expand only —
+/// a lone atomic move when the glass was parked close enough to the work
+/// area's left edge that the expanded surface would not fit (see
+/// `clamp_expanded_into_work_area`).
 ///
-/// The window is borderless and pinned by min==max size constraints (that
-/// is what keeps a `resizable: true` frameless window fixed on every WM);
-/// the constraints move with the size, direction-aware so min never
-/// exceeds max in between (a contradictory hint pair is WM-defined and
-/// can cost an extra configure round-trip).
+/// Windows: keeps the original native resize path — instant resize with
+/// the min==max constraints moved direction-aware, re-anchored so the
+/// TOP-RIGHT corner stays put. DWM applies position+size in one
+/// SetWindowPos, so the Linux failure mode does not exist there, and a
+/// window that always matches the glass needs no input-shape counterpart
+/// (per-pixel hit-testing on Win32 would be its own project).
 pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        let Some(w) = app.get_webview_window("panel") else {
-            return;
-        };
-        let was = state(&app).expanded.swap(on, Ordering::SeqCst);
-        let width = if on {
-            PANEL_W_EXPANDED
-        } else {
-            PANEL_W_COMPACT
-        };
-        let old_width = if was {
-            PANEL_W_EXPANDED
-        } else {
-            PANEL_W_COMPACT
-        };
-        let size = tauri::LogicalSize::new(width, PANEL_H);
-        if on {
-            let _ = w.set_max_size(Some(size));
-            let _ = w.set_min_size(Some(size));
-        } else {
-            let _ = w.set_min_size(Some(size));
-            let _ = w.set_max_size(Some(size));
-        }
-        let _ = w.set_size(size);
-        if was == on {
-            return; // idempotent re-apply: the width did not change
-        }
-        let scale = w.scale_factor().unwrap_or(1.0);
-        // One rounding of the DELTA, not of each absolute width: expand and
-        // collapse then shift by the same magnitude under fractional
-        // scaling, so a full toggle cycle cancels to zero px of creep.
-        let delta = ((f64::from(width) - f64::from(old_width)) * scale).round() as i32;
-        let phys_w = (f64::from(width) * scale).round() as i32;
-        let work = panel_work_area(&app);
-        if w.is_visible().unwrap_or(false) {
-            if let Ok(pos) = w.outer_position() {
-                let x = anchored_right_x(pos.x, delta, phys_w, work);
-                if x != pos.x {
-                    let _ = w.set_position(PhysicalPosition::new(x, pos.y));
-                    // Update the remembered spot NOW, not via the async
-                    // Moved event: a reposition burst racing this re-applies
-                    // whatever is remembered, and the stale x would hang the
-                    // resized surface at the wrong spot.
-                    *lock(&state(&app).panel_pos) = Some((x, pos.y));
-                }
-            }
-        } else {
-            // Hidden mid-transition (e.g. the panel hotkey during the
-            // 560 ms collapse settle): the window is unmapped, so
-            // outer_position() is unreliable and no Moved event will fire
-            // to persist anything. Reconcile from the REMEMBERED spot —
-            // captured right before the hide, while still mapped — and
-            // persist through note_panel_pos, so the panel reopens at the
-            // user's right edge and config agrees.
-            let remembered = *lock(&state(&app).panel_pos);
-            if let Some((rx, ry)) = remembered {
-                let x = anchored_right_x(rx, delta, phys_w, work);
-                if x != rx {
-                    note_panel_pos(&app, x, ry, 0);
-                }
-            }
-        }
+        #[cfg(target_os = "linux")]
+        set_panel_expanded_linux(&app, on);
+        #[cfg(windows)]
+        set_panel_expanded_windows(&app, on);
     });
+}
+
+/// Linux body of `set_panel_expanded`: bookkeeping, the work-area clamp,
+/// and the input shape. Main thread only.
+#[cfg(target_os = "linux")]
+fn set_panel_expanded_linux(app: &AppHandle, on: bool) {
+    let was = state(app).expanded.swap(on, Ordering::SeqCst);
+    if on && !was {
+        clamp_expanded_into_work_area(app);
+    }
+    apply_panel_input_shape(app);
+}
+
+/// Expanding with the compact glass parked within a glass-width of the
+/// work area's left edge would push the advanced UI (the sidebar first)
+/// off-screen: the expanded glass IS the whole fixed-footprint window,
+/// whose left edge legitimately sits outside the work area while
+/// compact. Slide the window right until it fits — the same
+/// `anchored_right_x` clamp the Windows resize path applies, with a
+/// zero delta ("left edge wins" on a too-narrow area). A lone move is a
+/// single X configure — atomic, unlike the move+resize pair this rework
+/// eliminated — so it cannot reintroduce the sideways flash.
+///
+/// The collapse deliberately does NOT slide back, matching the original
+/// native path: there the collapse re-anchored the right edge of
+/// wherever the (possibly clamped) expanded window ended up, so after
+/// an expand-clamp cycle the compact glass keeps the new right edge.
+/// Here the window simply never moves on collapse, which lands the
+/// glass in exactly that spot; `panel_pos` is updated at the slide so
+/// config and the reposition burst agree.
+#[cfg(target_os = "linux")]
+fn clamp_expanded_into_work_area(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    let Some(work) = panel_work_area(app) else {
+        return;
+    };
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let phys_w = (f64::from(PANEL_W_EXPANDED) * scale).round() as i32;
+    let off = compact_glass_offset_x(scale);
+    if w.is_visible().unwrap_or(false) {
+        if let Ok(pos) = w.outer_position() {
+            let x = anchored_right_x(pos.x, 0, phys_w, Some(work));
+            if x != pos.x {
+                let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                // Update the remembered GLASS spot now, not via the async
+                // Moved event, so a racing reposition burst can't restore
+                // the stale x (same reasoning as the Windows path).
+                *lock(&state(app).panel_pos) = Some((x + off, pos.y));
+            }
+        }
+    } else {
+        // Hidden (an expand invoke racing a hotkey hide): geometry
+        // queries on an unmapped window are unreliable — reconcile from
+        // the remembered glass spot and persist, like the Windows
+        // hidden-path does.
+        let remembered = *lock(&state(app).panel_pos);
+        if let Some((gx, gy)) = remembered {
+            let wx = gx - off;
+            let x = anchored_right_x(wx, 0, phys_w, Some(work));
+            if x != wx {
+                note_panel_pos(app, x + off, gy, 0);
+            }
+        }
+    }
+}
+
+/// Windows body of `set_panel_expanded`: the original native resize.
+/// The resize is deliberately INSTANT in both directions; the 520 ms
+/// motion the eye tracks is the CSS width transition on the glass, which
+/// app.js orders around this call so the window never moves mid-animation.
+/// The window is borderless and pinned by min==max size constraints (that
+/// is what keeps a `resizable: true` frameless window fixed); the
+/// constraints move with the size, direction-aware so min never exceeds
+/// max in between. Main thread only.
+#[cfg(windows)]
+fn set_panel_expanded_windows(app: &AppHandle, on: bool) {
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    let was = state(app).expanded.swap(on, Ordering::SeqCst);
+    let width = if on {
+        PANEL_W_EXPANDED
+    } else {
+        PANEL_W_COMPACT
+    };
+    let old_width = if was {
+        PANEL_W_EXPANDED
+    } else {
+        PANEL_W_COMPACT
+    };
+    let size = tauri::LogicalSize::new(width, PANEL_H);
+    if on {
+        let _ = w.set_max_size(Some(size));
+        let _ = w.set_min_size(Some(size));
+    } else {
+        let _ = w.set_min_size(Some(size));
+        let _ = w.set_max_size(Some(size));
+    }
+    let _ = w.set_size(size);
+    if was == on {
+        return; // idempotent re-apply: the width did not change
+    }
+    let scale = w.scale_factor().unwrap_or(1.0);
+    // One rounding of the DELTA, not of each absolute width: expand and
+    // collapse then shift by the same magnitude under fractional
+    // scaling, so a full toggle cycle cancels to zero px of creep.
+    let delta = ((f64::from(width) - f64::from(old_width)) * scale).round() as i32;
+    let phys_w = (f64::from(width) * scale).round() as i32;
+    let work = panel_work_area(app);
+    if w.is_visible().unwrap_or(false) {
+        if let Ok(pos) = w.outer_position() {
+            let x = anchored_right_x(pos.x, delta, phys_w, work);
+            if x != pos.x {
+                let _ = w.set_position(PhysicalPosition::new(x, pos.y));
+                // Update the remembered spot NOW, not via the async
+                // Moved event: a reposition burst racing this re-applies
+                // whatever is remembered, and the stale x would hang the
+                // resized surface at the wrong spot. (On Windows the
+                // glass rect IS the window rect.)
+                *lock(&state(app).panel_pos) = Some((x, pos.y));
+            }
+        }
+    } else {
+        // Hidden mid-transition (e.g. the panel hotkey during the
+        // 560 ms collapse settle): the window is unmapped, so
+        // outer_position() is unreliable and no Moved event will fire
+        // to persist anything. Reconcile from the REMEMBERED spot —
+        // captured right before the hide, while still mapped — and
+        // persist through note_panel_pos, so the panel reopens at the
+        // user's right edge and config agrees.
+        let remembered = *lock(&state(app).panel_pos);
+        if let Some((rx, ry)) = remembered {
+            let x = anchored_right_x(rx, delta, phys_w, work);
+            if x != rx {
+                note_panel_pos(app, x, ry, 0);
+            }
+        }
+    }
+}
+
+/// Linux/X11: with the fixed expanded footprint the left 400 logical px
+/// of the compact panel window are pure transparency, but they would
+/// still hit-test to us and eat clicks meant for whatever is behind. The
+/// X Shape extension's INPUT shape fixes that: restrict the input region
+/// to the glass rect while compact, the full window while expanded —
+/// clicks on the transparent margin fall through to the window below.
+///
+/// Same access pattern as `pill_no_input_fixup` (gtk_window → widget →
+/// gdk window), and like it the shape is re-asserted on `realize` (a
+/// realize creates a fresh GdkWindow with no shape) and `map` (every
+/// show), plus once immediately for an already-realized window.
+#[cfg(target_os = "linux")]
+pub fn panel_input_fixup(app: &tauri::App) {
+    use gtk::prelude::*;
+    let Some(panel) = app.webview_windows().get("panel").cloned() else {
+        return;
+    };
+    let Ok(gtk_win) = panel.gtk_window() else {
+        return;
+    };
+    let h1 = app.handle().clone();
+    gtk_win.connect_realize(move |w| {
+        apply_input_shape(w.upcast_ref::<gtk::Widget>(), expanded_now(&h1));
+    });
+    let h2 = app.handle().clone();
+    gtk_win.connect_map(move |w| {
+        apply_input_shape(w.upcast_ref::<gtk::Widget>(), expanded_now(&h2));
+    });
+    if gtk_win.is_realized() {
+        apply_input_shape(
+            gtk_win.upcast_ref::<gtk::Widget>(),
+            expanded_now(app.handle()),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn expanded_now(app: &AppHandle) -> bool {
+    state(app).expanded.load(Ordering::SeqCst)
+}
+
+/// Retarget the panel's input shape for the current expand state. No-op
+/// while the window is unrealized (the realize hook re-asserts). Main
+/// thread only.
+#[cfg(target_os = "linux")]
+fn apply_panel_input_shape(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    let Ok(gtk_win) = w.gtk_window() else {
+        return;
+    };
+    use gtk::prelude::*;
+    apply_input_shape(gtk_win.upcast_ref::<gtk::Widget>(), expanded_now(app));
+}
+
+/// Combine the panel's input shape down to `panel_input_rect` — the rect
+/// is in GDK window coordinates (logical px); GDK applies the integer
+/// HiDPI window scale itself when it hands X the rectangles, so no
+/// device-pixel conversion happens here (see `panel_input_rect`).
+#[cfg(target_os = "linux")]
+fn apply_input_shape(widget: &gtk::Widget, expanded: bool) {
+    use gtk::prelude::*;
+    let Some(gdk_win) = widget.window() else {
+        return;
+    };
+    let (x, y, w, h) = panel_input_rect(expanded);
+    let rect = gtk::cairo::RectangleInt::new(x, y, w, h);
+    let region = gtk::cairo::Region::create_rectangle(&rect);
+    gdk_win.input_shape_combine_region(&region, 0, 0);
 }
 
 /// set_focus is a no-op on a non-visible window (tao GTK checks), so this
@@ -693,6 +933,126 @@ mod tests {
             let expanded = anchored_right_x(2000, delta, w800, work);
             let back = anchored_right_x(expanded, -delta, w400, work);
             assert_eq!(back, 2000, "creep at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn glass_offset_is_zero_when_window_matches_glass() {
+        // Windows: the window resizes natively and always equals the glass.
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            assert_eq!(glass_offset_x(false, scale), 0);
+        }
+    }
+
+    #[test]
+    fn glass_offset_rounds_the_whole_offset_once() {
+        assert_eq!(glass_offset_x(true, 1.0), 400);
+        assert_eq!(glass_offset_x(true, 1.25), 500);
+        assert_eq!(glass_offset_x(true, 1.5), 600);
+        assert_eq!(glass_offset_x(true, 2.0), 800);
+        // fractional scale with an odd rounding still round-trips exactly
+        // because save and load use the SAME rounded offset
+        assert_eq!(glass_offset_x(true, 1.33), 532);
+    }
+
+    #[test]
+    fn old_config_positions_render_the_glass_unmoved() {
+        // panel_pos written by the old 400-wide-window builds was the
+        // compact window's outer origin — which WAS the glass rect. The
+        // fixed-footprint window is placed at glass − offset, and the
+        // glass renders offset px inside it: same screen spot, any scale,
+        // and a drag save (window + offset) reproduces the stored value.
+        for scale in [1.0, 1.25, 1.5, 2.0, 1.33] {
+            let off = glass_offset_x(true, scale);
+            let (gx, gy) = (642, -128); // an old saved panel_pos
+            let window_x = gx - off; // load: where the window is placed
+            assert_eq!(window_x + off, gx, "glass unmoved at scale {scale}");
+            assert_eq!(gy, -128, "y never shifts (only x has an offset)");
+            // Moved-event save path: stored value is bit-identical again
+            let resaved = window_x + off;
+            assert_eq!(resaved, gx, "save round-trip at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn first_run_centers_the_glass_not_the_window() {
+        let work = (0, 40, 1920, 1080);
+        assert_eq!(compact_glass_size(1.0), (400, 560));
+        assert_eq!(compact_glass_size(2.0), (800, 1120));
+        let (gw, gh) = compact_glass_size(1.0);
+        let (gx, _gy) = centered_spot(work, gw, gh).unwrap();
+        // the GLASS centers exactly like the old 400-wide window did …
+        assert_eq!(gx, (1920 - 400) / 2);
+        // … and the fixed-footprint window sits a full glass-width left
+        assert_eq!(gx - glass_offset_x(true, 1.0), gx - 400);
+    }
+
+    #[test]
+    fn compact_glass_at_screen_left_puts_window_off_area_legally() {
+        // Validity is judged by the GLASS rect: a glass hugging the work
+        // area's left edge is fine even though the window's x is then a
+        // whole glass-width outside the work area.
+        let areas = [(0, 0, 1920, 1080)];
+        let (gx, gy) = (0, 300);
+        assert!(center_on_any(&areas, gx, gy, 400, 560));
+        assert_eq!(gx - glass_offset_x(true, 1.0), -400);
+    }
+
+    #[test]
+    fn fixed_footprint_expand_clamps_into_the_work_area() {
+        // Linux fixed footprint: the clamp is anchored_right_x with a zero
+        // delta on the WINDOW rect (== the expanded glass rect).
+        let work = Some((0, 0, 1920, 1080));
+        for scale in [1.0, 2.0] {
+            let off = glass_offset_x(true, scale);
+            let phys_w = (800.0 * scale).round() as i32;
+            // reviewer scenario: compact glass at the work-area left edge
+            // (gx=0) -> window spans -off..+off -> expand must slide the
+            // window right to 0 so the whole advanced UI (sidebar first)
+            // stays on screen; the remembered glass follows the slide.
+            let gx = 0;
+            let wx = gx - off;
+            let big = Some((0, 0, 4000 * scale as i32, 2000));
+            let x = anchored_right_x(wx, 0, phys_w, big);
+            assert_eq!(x, 0, "slides to the work-area left at scale {scale}");
+            assert_eq!(x + off, off, "compact glass lands at +off after the cycle");
+            // glass just inside the danger zone (gx < off) still slides
+            let wx2 = (off / 2) - off;
+            assert_eq!(anchored_right_x(wx2, 0, phys_w, big), 0);
+        }
+        // expanded surface already fully inside the area: untouched
+        assert_eq!(anchored_right_x(500, 0, 800, work), 500);
+        assert_eq!(anchored_right_x(0, 0, 800, work), 0);
+        // never past the right edge either
+        assert_eq!(anchored_right_x(1200, 0, 800, work), 1120);
+        // area narrower than the window: left edge wins
+        assert_eq!(anchored_right_x(-100, 0, 800, Some((0, 0, 600, 400))), 0);
+        // no monitor info: no clamp, no move
+        assert_eq!(anchored_right_x(-400, 0, 800, None), -400);
+    }
+
+    #[test]
+    fn input_region_tracks_the_glass() {
+        // compact: only the right 400 logical px (the glass) take input
+        assert_eq!(panel_input_rect(false), (400, 0, 400, 560));
+        // expanded: the whole window does
+        assert_eq!(panel_input_rect(true), (0, 0, 800, 560));
+        // The rect is in GDK window coordinates at EVERY scale — GDK
+        // multiplies by the integer window scale itself; the device-px
+        // region X ends up with is scale × rect. Spelled out for scale 1
+        // and 2 so nobody "fixes" the missing multiplication into a
+        // double-scale.
+        for scale in [1, 2] {
+            let (x, y, w, h) = panel_input_rect(false);
+            assert_eq!(
+                (x * scale, y * scale, w * scale, h * scale),
+                (400 * scale, 0, 400 * scale, 560 * scale)
+            );
+            let (x, y, w, h) = panel_input_rect(true);
+            assert_eq!(
+                (x * scale, y * scale, w * scale, h * scale),
+                (0, 0, 800 * scale, 560 * scale)
+            );
         }
     }
 

@@ -6,6 +6,7 @@
 .adv-body{ display:none; flex:1; min-height:0; width:800px; }
 .panel.adv .adv-body{ display:flex; animation: advIn var(--t-med) var(--ease) both; animation-delay:60ms; }
 @keyframes advIn{ from{ opacity:0; } to{ opacity:1; } }
+@keyframes advOut{ from{ opacity:1; } to{ opacity:0; } }
 
 /* sidebar */
 .side{

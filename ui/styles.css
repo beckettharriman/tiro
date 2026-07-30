@@ -1,6 +1,6 @@
 /* ───────────────────────────────────────────────────────────────────────
    TIRO — design tokens + panel + compact surface.
-   Monochrome glass: one ink color at many intensities over a blurred
+   Monochrome glass: one ink color at many intensities over a translucent
    glass slab; no drop shadows anywhere. settings.css carries the
    advanced (expanded) area and the control kit on the same tokens.
    ─────────────────────────────────────────────────────────────────────── */
@@ -42,10 +42,12 @@ body{
   -webkit-font-smoothing:antialiased;
   overflow:hidden;
   background:transparent;              /* frameless transparent OS window */
-  /* right-anchor the glass: the OS window jumps to its final width around
-     the 520 ms surface transition (expand: window first, collapse: window
-     after the settle) with its top-right corner fixed — so the surface
-     must hug the right edge of the transparent window throughout */
+  /* right-anchor the glass: on Linux the OS window is permanently at the
+     expanded footprint and only the glass animates width inside it (the
+     backend shapes mouse input down to the glass rect while compact); on
+     Windows the window still resizes natively around the same right-fixed
+     anchor — either way the surface hugs the transparent window's right
+     edge throughout */
   display:flex; justify-content:flex-end;
 }
 a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
@@ -57,8 +59,10 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   width:400px; height:560px;
   border-radius:var(--r-surface);
   background:rgba(var(--glass-rgb), var(--glass-a));
-  backdrop-filter: blur(34px) saturate(180%);
-  -webkit-backdrop-filter: blur(34px) saturate(180%);
+  /* no backdrop-filter: the OS window behind the glass is transparent, so
+     there is nothing for it to sample — it contributed zero pixels while
+     forcing a full repaint of the surface every frame of the width
+     transition */
   border:0.5px solid var(--hairline);
   box-shadow: inset 0 1px 0 var(--highlight); /* top highlight ring only — no drop shadow */
   color:rgba(var(--ink),.92);
@@ -108,6 +112,14 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 .compact-body{ flex:1; min-height:0; display:flex; flex-direction:column; width:400px; }
 .panel:not(.adv) .compact-body{ animation: advIn var(--t-med) var(--ease) both; }
 .panel.adv .compact-body{ display:none; }
+/* content swap: `.swap` rides the first beat of an expand — the compact
+   body fades out in place while the advanced area waits its turn (so the
+   two never co-occupy the column); `.advout` fades the advanced area out
+   at the start of a collapse instead of blinking it off. The 520 ms width
+   settle and every other timing are untouched. */
+.panel.adv.swap .compact-body{ display:flex; animation: advOut var(--t-fast) var(--ease) both; }
+.panel.adv.swap .adv-body{ display:none; }
+.panel.adv.advout .adv-body{ animation: advOut var(--t-fast) var(--ease) both; }
 
 /* ============ MIC ROW ============ */
 .microw{
