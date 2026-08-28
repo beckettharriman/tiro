@@ -24,13 +24,16 @@ pub const MIN_TAKE_SECS: f64 = 0.3;
 /// The original tried the device's native rate first, then this chain.
 const FALLBACK_RATES: [u32; 3] = [48_000, 44_100, 16_000];
 
-/// Hard ceiling on a single take: 10 minutes of audio at the capture rate.
+/// Hard ceiling on a single take: 1 hour of audio at the capture rate.
 /// A misbehaving device can deliver samples far faster than realtime (ALSA's
 /// `null` PCM produced ~45 minutes of zeros in 2 s of wall time); without a
 /// cap the buffer grows without bound and transcription of the resulting
-/// take grinds for tens of minutes, which reads as a wedged UI. Real
-/// dictation never approaches 10 minutes per take.
-pub const MAX_TAKE_SECS: usize = 600;
+/// take grinds for tens of minutes, which reads as a wedged UI. The ceiling
+/// must be generous: real dictation reaches tens of minutes (a 20-minute
+/// journal entry once lost its back half to a 10-minute cap), and hitting
+/// the cap silently discards the speaker's words. 1 h @ 48 kHz f32 mono is
+/// ~690 MB of buffer — acceptable; losing a take is not.
+pub const MAX_TAKE_SECS: usize = 3600;
 
 /// ALSA's `null` PCM is a bit bucket, not a microphone: it opens happily and
 /// generates zero samples (far faster than realtime), so it must never be
@@ -893,11 +896,11 @@ mod tests {
     }
 
     #[test]
-    fn max_take_is_ten_minutes() {
-        assert_eq!(MAX_TAKE_SECS, 600);
-        // ~45 min of null-device output at 48 kHz would be capped to 10 min
+    fn max_take_is_one_hour() {
+        assert_eq!(MAX_TAKE_SECS, 3600);
+        // runaway null-device output at 48 kHz still gets capped, just at 1 h
         let cap = 48_000 * MAX_TAKE_SECS;
-        assert!(130_887_360 > cap);
+        assert_eq!(cap, 172_800_000);
     }
 
     #[test]
