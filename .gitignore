@@ -14,6 +14,7 @@ src-tauri/gen/
 config.ini
 config.ini.*
 vocab.txt
+corrections.txt
 models/
 logs/
 transcripts/
