@@ -24,16 +24,16 @@ pub const MIN_TAKE_SECS: f64 = 0.3;
 /// The original tried the device's native rate first, then this chain.
 const FALLBACK_RATES: [u32; 3] = [48_000, 44_100, 16_000];
 
-/// Hard ceiling on a single take: 1 hour of audio at the capture rate.
-/// A misbehaving device can deliver samples far faster than realtime (ALSA's
-/// `null` PCM produced ~45 minutes of zeros in 2 s of wall time); without a
-/// cap the buffer grows without bound and transcription of the resulting
-/// take grinds for tens of minutes, which reads as a wedged UI. The ceiling
-/// must be generous: real dictation reaches tens of minutes (a 20-minute
-/// journal entry once lost its back half to a 10-minute cap), and hitting
-/// the cap silently discards the speaker's words. 1 h @ 48 kHz f32 mono is
-/// ~690 MB of buffer — acceptable; losing a take is not.
-pub const MAX_TAKE_SECS: usize = 3600;
+// There is deliberately NO ceiling on take length. A 10-minute cap once
+// silently discarded the back half of a 20-minute journal entry — the
+// recording UI kept running while the mic was effectively dead, which is
+// the worst failure this app can have. Memory is the only real limit
+// (~690 MB per hour @ 48 kHz f32 mono) and real microphones deliver
+// realtime, so an unbounded buffer tracks wall-clock dictation. The
+// runaway-device hazard the old cap guarded against (ALSA's `null` PCM
+// once produced ~45 min of zeros in 2 s) is handled by never opening
+// null devices at all (see `is_null_device`). Losing words is never an
+// acceptable trade for bounding a buffer.
 
 /// ALSA's `null` PCM is a bit bucket, not a microphone: it opens happily and
 /// generates zero samples (far faster than realtime), so it must never be
@@ -410,26 +410,18 @@ fn format_label(format: SampleFormat) -> &'static str {
 }
 
 /// Downmix `data` (interleaved, `channels`-wide frames) to mono and append
-/// it to `buf`, never growing `buf` past `max_samples` (the `MAX_TAKE_SECS`
-/// cap at the capture rate). Returns true when the cap dropped any input.
-/// Called from the realtime callback: no allocation beyond the amortized
-/// `Vec` growth the uncapped path already did.
-fn append_capped(buf: &mut Vec<f32>, data: &[f32], channels: u16, max_samples: usize) -> bool {
-    let remaining = max_samples.saturating_sub(buf.len());
+/// it to `buf`. Unbounded by design — see the note where a take cap used
+/// to live, above `MIN_TAKE_SECS`. Called from the realtime callback: no
+/// allocation beyond amortized `Vec` growth.
+fn append_mono(buf: &mut Vec<f32>, data: &[f32], channels: u16) {
     if channels <= 1 {
-        let n = data.len().min(remaining);
-        buf.extend_from_slice(&data[..n]);
-        n < data.len()
+        buf.extend_from_slice(data);
     } else {
         let ch = usize::from(channels);
-        let frames = data.len() / ch;
-        let n = frames.min(remaining);
         buf.extend(
             data.chunks_exact(ch)
-                .take(n)
                 .map(|frame| frame.iter().sum::<f32>() / ch as f32),
         );
-        n < frames
     }
 }
 
@@ -606,7 +598,6 @@ impl Recording {
         let frames = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recording = Arc::new(AtomicBool::new(true));
         let level = Arc::new(LevelMeter::new());
-        let max_samples = rate as usize * MAX_TAKE_SECS;
         let mut last_err = String::new();
         for channels in channel_counts {
             for &format in &formats {
@@ -617,40 +608,16 @@ impl Recording {
                 };
                 let built = match format {
                     SampleFormat::F32 => Self::build_stream::<f32>(
-                        device,
-                        config,
-                        channels,
-                        max_samples,
-                        &frames,
-                        &recording,
-                        &level,
+                        device, config, channels, &frames, &recording, &level,
                     ),
                     SampleFormat::I16 => Self::build_stream::<i16>(
-                        device,
-                        config,
-                        channels,
-                        max_samples,
-                        &frames,
-                        &recording,
-                        &level,
+                        device, config, channels, &frames, &recording, &level,
                     ),
                     SampleFormat::I32 => Self::build_stream::<i32>(
-                        device,
-                        config,
-                        channels,
-                        max_samples,
-                        &frames,
-                        &recording,
-                        &level,
+                        device, config, channels, &frames, &recording, &level,
                     ),
                     SampleFormat::U16 => Self::build_stream::<u16>(
-                        device,
-                        config,
-                        channels,
-                        max_samples,
-                        &frames,
-                        &recording,
-                        &level,
+                        device, config, channels, &frames, &recording, &level,
                     ),
                     _ => continue,
                 };
@@ -682,7 +649,6 @@ impl Recording {
         device: &Device,
         config: StreamConfig,
         channels: u16,
-        max_samples: usize,
         frames: &Arc<Mutex<Vec<f32>>>,
         recording: &Arc<AtomicBool>,
         level: &Arc<LevelMeter>,
@@ -690,7 +656,6 @@ impl Recording {
         let frames_cb = Arc::clone(frames);
         let recording_cb = Arc::clone(recording);
         let level_cb = Arc::clone(level);
-        let mut capped = false; // log the cap once per stream
         let mut scratch: Vec<f32> = Vec::new();
         device
             .build_input_stream(
@@ -704,12 +669,7 @@ impl Recording {
                     // Peak over the raw interleaved chunk (any channel).
                     level_cb.fold(&scratch);
                     let mut buf = frames_cb.lock().unwrap_or_else(|e| e.into_inner());
-                    if append_capped(&mut buf, &scratch, channels, max_samples) && !capped {
-                        capped = true;
-                        eprintln!(
-                            "take capped at {MAX_TAKE_SECS} s of audio; dropping further samples"
-                        );
-                    }
+                    append_mono(&mut buf, &scratch, channels);
                 },
                 |err| eprintln!("audio stream error: {err}"),
                 None,
@@ -865,42 +825,21 @@ mod tests {
     }
 
     #[test]
-    fn append_capped_mono_under_cap() {
+    fn append_mono_appends_mono_unbounded() {
         let mut buf = vec![0.5f32; 3];
-        assert!(!append_capped(&mut buf, &[1.0, 2.0], 1, 10));
+        append_mono(&mut buf, &[1.0, 2.0], 1);
         assert_eq!(buf, vec![0.5, 0.5, 0.5, 1.0, 2.0]);
+        // no ceiling: a take may grow past any prior cap
+        append_mono(&mut buf, &[3.0; 20], 1);
+        assert_eq!(buf.len(), 25);
     }
 
     #[test]
-    fn append_capped_mono_stops_at_cap() {
-        let mut buf = vec![0.0f32; 8];
-        assert!(append_capped(&mut buf, &[1.0, 2.0, 3.0], 1, 10));
-        assert_eq!(buf.len(), 10);
-        assert_eq!(&buf[8..], &[1.0, 2.0]);
-        // once full, further data is dropped entirely and still reported
-        assert!(append_capped(&mut buf, &[4.0], 1, 10));
-        assert_eq!(buf.len(), 10);
-    }
-
-    #[test]
-    fn append_capped_downmixes_and_caps() {
+    fn append_mono_downmixes() {
         let mut buf = Vec::new();
-        // stereo frames [1,3] [5,7] [9,11] -> mono 2, 6, 10; cap at 2 frames
-        assert!(append_capped(
-            &mut buf,
-            &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
-            2,
-            2
-        ));
-        assert_eq!(buf, vec![2.0, 6.0]);
-    }
-
-    #[test]
-    fn max_take_is_one_hour() {
-        assert_eq!(MAX_TAKE_SECS, 3600);
-        // runaway null-device output at 48 kHz still gets capped, just at 1 h
-        let cap = 48_000 * MAX_TAKE_SECS;
-        assert_eq!(cap, 172_800_000);
+        // stereo frames [1,3] [5,7] [9,11] -> mono 2, 6, 10
+        append_mono(&mut buf, &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0], 2);
+        assert_eq!(buf, vec![2.0, 6.0, 10.0]);
     }
 
     #[test]
