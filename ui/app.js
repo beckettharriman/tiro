@@ -1908,10 +1908,33 @@
   /* ════════════════════════════════════════════════════════════════════
      BOOT
      ════════════════════════════════════════════════════════════════════ */
+  /* The window is pinned to the design's height in CSS pixels, so any
+     deficit means the webview is rendering at a higher device pixel ratio
+     than the size the window was given — Windows' accessibility text
+     scaling ("Make text bigger") multiplies WebView2's ratio (150% display
+     x 110% text = 1.65) while the native window is still sized by the
+     display's 1.5 alone. The fixed-size design then overflows its viewport
+     and, because the layout anchors top and right, the excess is clipped
+     off the LEFT and BOTTOM. Cancel the mismatch with a root zoom so the
+     design lays out at its intended size and renders physically identical
+     to a machine with no text scaling. Measure unzoomed, and ignore
+     implausible ratios so a transient bad measurement can't wreck the UI. */
+  const DESIGN_H = 560;
+  function fitDesignScale() {
+    const root = document.documentElement;
+    root.style.zoom = "";
+    const h = window.innerHeight;
+    if (!h) return;
+    const z = h / DESIGN_H;
+    if (z > 0.5 && z < 1.5 && Math.abs(z - 1) > 0.005) root.style.zoom = String(z);
+  }
+
   let _booted = false;
   function boot() {
     if (_booted) return;
     _booted = true;
+    fitDesignScale();
+    window.addEventListener("resize", fitDesignScale);
     if (bridgeReady()) api = window.pywebview.api;
     /* re-sync the backend's expand state (input shape on Linux, window
        width on Windows) to the UI's actual state: a webview reload while

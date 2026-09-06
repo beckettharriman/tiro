@@ -147,6 +147,23 @@ canvas.viz{ display:block; flex:none; }
 (function () {
 "use strict";
 
+/* Same viewport/scale compensation the panel does (see fitDesignScale in
+   app.js): Windows text scaling makes WebView2 render at a higher device
+   pixel ratio than the window was sized for, which would clip the pill's
+   fixed-size stage. The pill window is pinned to 76 CSS px tall. */
+(function(){
+  function fit(){
+    const root = document.documentElement;
+    root.style.zoom = "";
+    const h = window.innerHeight;
+    if (!h) return;
+    const z = h / 76;
+    if (z > 0.5 && z < 1.5 && Math.abs(z - 1) > 0.005) root.style.zoom = String(z);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+})();
+
 /* ---------- level bus: the backend calls window.pillLevel(x), 0..1, ~15/sec ---------- */
 (function(){
   const subs = [];
