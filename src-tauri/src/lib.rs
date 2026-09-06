@@ -494,6 +494,7 @@ pub fn run() {
             //   compact size now, before its first show.
             #[cfg(target_os = "linux")]
             placement::panel_input_fixup(app);
+            placement::pin_webview_zoom(app);
             placement::set_panel_expanded(app.handle(), false);
             // The panel is configured hidden (summoned by hotkey/tray, which
             // land in phase 2/3); dev builds show it at startup so there is

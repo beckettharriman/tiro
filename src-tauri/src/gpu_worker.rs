@@ -209,8 +209,10 @@ pub fn run(argv: &[String]) -> i32 {
             break;
         };
         let audio: Vec<f32> = pcm
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         let beam = req["beam"].as_u64().unwrap_or(5) as usize;
         let vocab = req["vocab"].as_str().filter(|v| !v.is_empty());

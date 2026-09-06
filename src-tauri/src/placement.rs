@@ -845,6 +845,37 @@ fn without_protocol(atoms: &[usize], unwanted: usize) -> Option<Vec<usize>> {
     Some(atoms.iter().copied().filter(|&a| a != unwanted).collect())
 }
 
+/// Pin the webview page zoom to 1.0 on both windows, now and on every
+/// monitor-scale change.
+///
+/// WebView2 keeps a per-profile ZoomFactor that is SEPARATE from the DPI
+/// rasterization scale, persists across runs, and is known to end up stuck
+/// above 1.0 after DPI transitions (docking to a monitor with a different
+/// scale, remote sessions). Nothing in the app ever wants page zoom: the
+/// UI is a fixed-pixel design, so a stuck 105% zoom shrinks the CSS
+/// viewport below the window and shears content off the left and bottom
+/// edges (the glass anchors right/top). Seen live on the Blade 14 at 150%
+/// display scale: window, client area and webview bounds all exactly
+/// 800x560 logical while the page still clipped — the shrink was the
+/// renderer's zoom, nothing native. Re-asserting on ScaleFactorChanged
+/// covers the moment the disease is born; asserting at setup cures an
+/// already-poisoned profile. On Linux WebKitGTK zoom already defaults to
+/// 1.0 and this is a harmless re-assert.
+pub fn pin_webview_zoom(app: &tauri::App) {
+    for label in ["panel", "pill"] {
+        let Some(w) = app.webview_windows().get(label).cloned() else {
+            continue;
+        };
+        let _ = w.set_zoom(1.0);
+        let win = w.clone();
+        w.on_window_event(move |ev| {
+            if matches!(ev, tauri::WindowEvent::ScaleFactorChanged { .. }) {
+                let _ = win.set_zoom(1.0);
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
