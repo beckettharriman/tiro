@@ -2,6 +2,8 @@
 
 # Tiro
 
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE) ![Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-444.svg) ![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg) ![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg) ![Work in progress](https://img.shields.io/badge/status-work%20in%20progress-e8a33d.svg)
+
 *Offline, on device transcription tool. Turns out you never had to send your voice to a tech bro in Silicon Valley to get a decent transcript.*
 
 <img src="docs/tour.gif" width="720" alt="The Tiro panel opening and moving through its four pages">
@@ -10,8 +12,6 @@
 
 **Press a hotkey, talk, press it again.**<br>
 Your words land on the clipboard, or at your cursor. Nothing ever leaves your computer.
-
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE) ![Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-444.svg) ![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg) ![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg) ![Work in progress](https://img.shields.io/badge/status-work%20in%20progress-e8a33d.svg)
 
 </div>
 
