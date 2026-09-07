@@ -1,125 +1,135 @@
+<div align="center">
+
 # Tiro
 
-Press a hotkey, talk, press it again. Your words are on the clipboard, or pasted at your cursor, whichever you asked for. Nothing ever leaves your computer.
+*Offline, on device transcription tool. Turns out you never had to send your voice to a tech bro in Silicon Valley to get a decent transcript.*
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-0078D6.svg)
-![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg)
-![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg)
+<img src="docs/tour.gif" width="720" alt="The Tiro panel opening and moving through its four pages">
 
-<!-- TODO(launch): docs/demo.gif + docs/panel.png -->
+<img src="docs/pill.gif" width="480" alt="The recording pill, with the waveform following your voice">
+
+**Press a hotkey, talk, press it again.**<br>
+Your words land on the clipboard, or at your cursor. Nothing ever leaves your computer.
+
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE) ![Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-444.svg) ![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg) ![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg) ![Work in progress](https://img.shields.io/badge/status-work%20in%20progress-e8a33d.svg)
+
+</div>
+
+> [!IMPORTANT]
+> **Work in progress.** I use this every day on Linux and Windows for my real work and it's stable for me, but it isn't complete yet, and I'm still changing things. Consider this application in development beta and not a polished final product.
 
 ## Why I made this
 
-Every dictation tool I tried types into whatever box you're focused on. Click somewhere else and it stops, or it dumps half a sentence into the wrong window. That's the thing I built this to get away from. I talk while I'm doing other stuff, scrolling, clicking around, switching apps, and I don't want the app fighting me for the cursor the whole time.
+Every dictation tool I tried types into whatever box you're focused on. Click somewhere else and it stops, or it dumps half a sentence into the wrong window. I talk while I'm doing other stuff, clicking around, reviewing recent work, switching apps, and I don't want the app fighting me for the cursor.
 
-So Tiro splits the talking from the delivery. It records, transcribes locally with whisper.cpp, and then you decide where the text goes. It'll paste at your cursor if you want it to, or it'll just sit on the clipboard until you're ready. Either way you never have to be focused on a text box while you're actually talking.
+So Tiro splits the talking from the delivery. It records, transcribes locally with whisper.cpp, and you pick where the text goes.
 
-I mostly use it for journaling and for talking at agents instead of typing paragraphs at them.
+|  |  |
+|---|---|
+| **Quick transcribe** | Hold `Ctrl+Alt+V`, say something, let go. It lands at your cursor. |
+| **Toggle dictation, then paste it** | Tap `Ctrl+Alt+Space`, talk as long as you want, click around, find the window you actually wanted, and finish on `Ctrl+Alt+V`. |
+| **Just copy it** | Stop with `Ctrl+Alt+Space` and the output is stored in the clipboard and in the Tiro panel. |
 
-## The ways you can use it
-
-It's meant to be flexible. Same recording, different endings.
-
-**Hold and talk, paste when you let go.** Hold `Ctrl+Alt+V`, say the thing, let go. It lands at your cursor. Fastest way to fire one sentence into a chat box or a terminal.
-
-**Start a take, go do something, then paste.** Tap `Ctrl+Alt+Space`, talk for as long as you want, click around, open the window you actually wanted it in, then end the take on `Ctrl+Alt+V` and it pastes there.
-
-**Just copy it.** End on `Ctrl+Alt+Space` and it stays on the clipboard. Paste it in ten minutes, or three times, or never.
-
-The key you *finish* on is what decides. Space is clipboard only, V is clipboard plus paste. Everything goes to the clipboard either way, so pasting is an extra on top, not a replacement. If the keystroke can't be injected for some reason, the text is still sitting on your clipboard and the pill says so.
+The key you *finish* on decides. Everything reaches the clipboard either way, so pasting is an extra on top, never a replacement.
 
 ## Hotkeys
 
-| Key | What it does |
+| Key | Action |
 |---|---|
-| `Ctrl+Alt+Space` | Start dictating. Press again to stop and copy. |
-| `Ctrl+Alt+V` | Same, but it also pastes at your cursor when you stop. |
+| `Ctrl+Alt+Space` | Dictate. Tap to toggle, hold for push-to-talk. |
+| `Ctrl+Alt+V` | Same, and it pastes at your cursor. |
 | `Ctrl+Alt+C` | Show / hide the panel. |
-| `Ctrl+Alt+X` | Throw away the current recording. |
+| `Ctrl+Alt+X` | Throw away the recording. |
 
-Tap either of the first two to toggle, or hold it for push-to-talk and it stops when you let go. All four are rebindable in Settings, Shortcuts.
-
-## There's no time limit
-
-Talk for as long as you want. There used to be a ten minute cap, and one day it silently ate the back half of a thirty minute journal entry. The pill kept animating, the timer kept counting, and the mic had been dead for twenty minutes. That's the worst thing this app can possibly do, so the cap is gone entirely.
-
-The only real limit now is memory, about 700 MB per hour of talking. And Tiro refuses to open null or dummy input devices, which is what that cap was actually guarding against in the first place.
-
-## Offline
-
-The only time Tiro touches the network is downloading a Whisper model, and only when you ask it to. After that you can pull the ethernet cable out of the wall and nothing changes. No accounts, no telemetry, no cloud anything.
+All four are rebindable.
 
 ## The panel
 
-`Ctrl+Alt+C` summons a small frameless glass panel over whatever you're doing. Drag the header to move it, pin it to keep it on top, close it and it's gone again.
+`Ctrl+Alt+C` puts a panel over whatever you're doing: a mic picker, a record button, and recent transcriptions. Click any line to copy it again. Expand the panel for more controls and settings.
 
-Compact, it's a mic picker, a record button, and today's transcripts. Click any line to copy it again.
+|  |  |
+|---|---|
+| <img src="docs/transcribe.png" alt="Transcribe"> | <img src="docs/settings.png" alt="Settings"> |
+| **Transcribe.** Search back through everything you've dictated. Opens on today and streams older days in as you scroll. | **Settings.** Engine, audio, capture, input, shortcuts, storage, appearance, login. |
+| <img src="docs/vocabulary.png" alt="Vocabulary"> | <img src="docs/models.png" alt="Models"> |
+| **Vocabulary.** Hot words prime Whisper so it spells your names right. Corrections fix what it still misses, and only touch the copy you paste. | **Models.** Manage the transcription models installed on device, tiny through large-v3-turbo from Hugging Face. |
 
-The expand button widens it into four pages:
+There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit.
 
-**Transcribe.** Everything you've dictated, newest first, with a search box and a day pager. It opens on today and streams older days in as you scroll back, holding about five days at a time so it doesn't get heavy after a year of use.
+## Engine, GPU, laptop power savings
 
-**Settings.** Engine, audio, capture, input, shortcuts, storage, appearance, launch at login.
+Tiro works out what machine it's on at startup and shows only the settings that apply.
 
-**Vocabulary.** Hot words and corrections, below.
+| Machine | What you get |
+|---|---|
+| Laptop, discrete GPU | Auto Switch: GPU and the bigger model plugged in, CPU and the lighter one on battery |
+| Laptop, integrated | Stays on the GPU, just swaps the model |
+| Desktop | One compute row, one model, no battery settings |
+| No usable GPU | None of it shows up |
 
-**Models.** What's installed and what you can download.
+The same install should do the right thing on every kind of machine without you configuring it. A desktop just uses the GPU and never thinks about batteries, because it doesn't have one. A laptop shouldn't burn power on the discrete card to transcribe one sentence, so on battery it drops to the CPU and a lighter model, and every bit of GPU work lives in a child process that exits when it's done, because a GPU context held open inside a long lived app keeps that card awake and costs you watts all day. A machine with no usable GPU shouldn't be shown settings about one at all.
 
-There's a tray icon too. Left click toggles the panel, right click gives you Open, Start/Stop dictation, Restart, and Quit.
+## Nothing gets lost
 
-## Engine and GPU
+Every take is written verbatim to `Documents/Tiro`, one JSONL and one Markdown file per day. Clipboard cleanup and corrections change only the copy you paste, never the log. If the folder isn't writable, Tiro falls back next to the app and says so in the panel.
 
-Tiro figures out what kind of machine it's on once at startup, and then only shows you the settings that actually mean something on it.
+The one time it touches the network is downloading a model, and only when you ask. No accounts, no telemetry.
 
-**Laptop with a discrete GPU:** Auto Switch. GPU and the bigger model when you're plugged in, CPU and the lighter model on battery.
+## Install
 
-**Laptop with integrated graphics:** stays on the GPU, just swaps the model.
+**One click agentic install.** Paste this prompt at your terminal agent and get Tiro working with little effort:
 
-**Desktop:** one Compute row (GPU or CPU) and one model. No battery settings, because there's no battery. There's a "Treat as desktop" toggle for a laptop that lives on a dock.
+```text
+Set up Tiro on my machine.
 
-**No usable GPU:** none of that shows up at all.
+Read https://raw.githubusercontent.com/beckettharriman/tiro/main/SETUP.md and
+follow it end to end for my OS. That file is maintained in this repo and is the
+source of truth, so trust it over anything you already know about the project.
+If you can't fetch it, clone https://github.com/beckettharriman/tiro and read
+SETUP.md out of the checkout.
 
-You can override it with Always CPU or Always GPU any time, and then you get a single Model row instead. If you've got more than one GPU there's a picker for which one runs.
-
-The main process never initializes a GPU context. Not once, not even to list your GPUs. Everything Vulkan happens in a short lived child process (`tiro --gpu-worker` for inference, `tiro --gpu-enum` for enumeration) that exits the second it's done. This one matters a lot on a laptop: a single Vulkan context in a long lived process pins the discrete GPU out of its sleep state for as long as the app is open, and that's about seven watts, all day, for an app you leave running all day. When you unplug, the worker gets killed *before* the CPU model loads.
-
-The chip at the bottom of the panel shows the model and device that are actually running, not the one you asked for.
-
-## Models
-
-The Models page downloads GGUF models from Hugging Face. Tiny through large-v3-turbo, with English only versions of the smaller ones. Defaults are `base.en` (~80 MB) on battery and `small.en` (~250 MB) plugged in. Downloads are cancellable, watchdogged if they stall, and size checked, so a half finished file never gets treated as installed.
-
-## Vocabulary
-
-Two lists, both on the Vocabulary page.
-
-**Hot words** are names and jargon fed to Whisper as a prompt so it spells them right on the way in. It's a hint, not a guarantee. Whisper still does whatever it wants sometimes.
-
-**Corrections** are `heard → written` pairs for the stuff it keeps getting wrong anyway. These only touch the copy that goes to your clipboard. The transcript log always keeps the verbatim text, so a bad correction can never destroy what you actually said.
-
-They live in `vocab.txt` and `corrections.txt` next to the config if you'd rather edit them in a text editor.
-
-## Where the transcripts go
-
-`Documents/Tiro` by default, changeable in Settings, Storage:
-
-```
-Documents/Tiro/YYYY-MM-DD.jsonl   # verbatim text, cleaned copy, mic, model, device, duration
-Documents/Tiro/YYYY-MM-DD.md      # readable, one line per take
+Ask me before anything that needs sudo or changes system settings. When you're
+done, run the verification checklist at the end and tell me which keys to press.
 ```
 
-If that folder ever isn't writable, Tiro falls back to a `logs/` folder next to the app and puts a banner in the panel telling you. You can also turn saving off completely.
+**Install instructions.** The same steps written out in full, with per-distro package lines and troubleshooting, are in [SETUP.md](SETUP.md). It lives in the repo, so it changes in the same commit the build does and neither path goes stale. The short version:
 
-Clipboard cleanup (Off, Light, or + Fillers) only changes what gets copied. The log is always verbatim.
+**1. Prerequisites.** Rust, CMake, and a C/C++ toolchain everywhere. On Linux, also your distro's WebKitGTK 4.1, GTK 3, appindicator, librsvg, ALSA and libxdo dev packages. On Windows, VS 2022 with the C++ workload, a real Windows CMake, LLVM for `libclang.dll`, and the WebView2 runtime. Exact package lines per distro are in [SETUP.md](SETUP.md#1-prerequisites).
 
-## Linux
+**2. Clone and build.** A GPU build additionally needs the [Vulkan SDK](https://vulkan.lunarg.com/); without it, build CPU only and add the GPU later.
 
-In an X11 session the hotkeys are normal keyboard grabs and they just work.
+```sh
+git clone https://github.com/beckettharriman/tiro.git
+cd tiro/src-tauri
+cargo build --release                   # CPU only
+cargo build --release --features gpu    # + Vulkan
+```
 
-Wayland doesn't let apps grab global keys, so Tiro binds through the `GlobalShortcuts` portal instead. On KDE and GNOME that works fine and the shortcuts show up in your system shortcut settings. The portal has to be able to identify the app, which means an installed desktop file, so that's a one time setup for builds you didn't install from a package. See [BUILDING.md](BUILDING.md).
+**3. Run it.**
 
-If your compositor has no GlobalShortcuts backend, bind desktop level shortcuts to the CLI instead. A second launch remote controls the running instance:
+```sh
+./target/release/tiro
+```
+
+It starts hidden with a tray icon. `Ctrl+Alt+C` opens the panel. `config.ini` is written next to the app, and the first dictation downloads a model, about 80 MB.
+
+**4. Wayland only.** Install the desktop file so the shortcuts portal can identify Tiro, then restart it:
+
+```sh
+cp src-tauri/linux/dev.tiro.app.desktop ~/.local/share/applications/
+ln -s "$PWD/src-tauri/target/release/tiro" ~/.local/bin/tiro
+```
+
+**5. Check it.** Press `Ctrl+Alt+Space`, say a sentence, press it again. The text should appear in the panel and paste out of your clipboard.
+
+Anything that goes wrong is probably in [SETUP.md](SETUP.md#troubleshooting).
+
+<details>
+<summary><b>Linux hotkeys, X11 and Wayland</b></summary>
+
+X11 hotkeys are normal keyboard grabs. Wayland doesn't allow those, so Tiro binds through the `GlobalShortcuts` portal, which works on KDE and GNOME once the desktop file above is installed. Paste at cursor goes through the remote desktop portal, so the first one asks permission.
+
+If your compositor has no portal backend, bind desktop shortcuts to the CLI instead, since a second launch remote controls the running one:
 
 ```
 tiro --toggle   # start / stop dictating
@@ -128,34 +138,17 @@ tiro --panel    # show / hide the panel
 tiro --cancel   # throw away the recording
 ```
 
-Paste at cursor on Wayland goes through the remote desktop portal, so the first paste pops a permission dialog. Allow it and tell it to remember. Tiro stores the token so it doesn't come back.
+</details>
 
-## Requirements
+## Status
 
-- Windows 10/11 (WebView2, preinstalled on 11) or Linux with WebKitGTK 4.1
-- A microphone
-- Optionally a Vulkan GPU, if you build with `--features gpu`
+Working on both Windows and Linux: dictation, paste at cursor, hotkeys on X11 and Wayland, the panel, the engine and GPU policy, models, vocabulary, transcripts, tray, autostart. It is still a development beta and not a polished final product, and I'm still changing things.
 
-## Building
-
-There are no installers yet, packaging is the last thing left. For now:
-
-```sh
-cd src-tauri
-cargo build --release                   # CPU only, no GPU SDK needed
-cargo build --release --features gpu    # + Vulkan, needs the Vulkan SDK
-```
-
-Full prerequisites and the Wayland portal setup are in [BUILDING.md](BUILDING.md).
-
-## Still to do
-
-- Installers: NSIS/MSI on Windows, .deb and AppImage on Linux.
-- A demo GIF and a screenshot in this README.
+Not done: installers. NSIS/MSI on Windows, `.deb` and AppImage on Linux.
 
 ## The name
 
-Marcus Tullius Tiro was Cicero's secretary. He invented a shorthand system so he could write speech down as fast as people talked, which makes him more or less the first dictation software. Two thousand years later, here we are.
+[Marcus Tullius Tiro](https://en.wikipedia.org/wiki/Marcus_Tullius_Tiro) was Cicero's secretary. He invented a shorthand system so he could write speech down as fast as people talked, which makes him more or less the first dictation software. Two thousand years later, here we are.
 
 ## License
 
