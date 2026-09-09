@@ -167,10 +167,13 @@ dev dependency so every machine (and CI) runs the same one:
 
 ```sh
 npm ci
-npx tauri build            # from the repo root; CPU-only, like releases
+NO_STRIP=true npx tauri build   # from the repo root; CPU-only, like releases
 ```
 
-(`cargo install tauri-cli` and `cargo tauri build` work too.) Output
+(`cargo install tauri-cli` and `cargo tauri build` work too.) `NO_STRIP`
+is for the AppImage: linuxdeploy's bundled `strip` is too old for the
+`.relr.dyn` sections in current distro libraries and aborts the whole
+bundle when it fails on one; skipping it costs a few MB. Output
 lands under `src-tauri/target/release/bundle/`: `deb/`, `rpm/` and
 `appimage/` on Linux, `nsis/` (per-user setup .exe) and `msi/` on
 Windows. The AppImage step downloads linuxdeploy into `~/.cache/tauri`
