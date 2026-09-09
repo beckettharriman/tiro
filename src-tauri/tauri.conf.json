@@ -53,17 +53,25 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage", "nsis", "msi"],
+    "targets": ["deb", "rpm", "appimage", "nsis", "msi"],
     "shortDescription": "Always-on offline dictation to your clipboard",
     "longDescription": "Tiro listens on a global hotkey, transcribes speech locally with Whisper, and puts the text on your clipboard. Fully offline.",
     "category": "Utility",
+    "publisher": "Beckett Harriman",
+    "homepage": "https://github.com/beckettharriman/tiro",
+    "license": "GPL-3.0-only",
     "linux": {
       "deb": {
+        "depends": [
+          "libasound2",
+          "libayatana-appindicator3-1 | libappindicator3-1"
+        ],
         "files": {
           "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
         }
       },
       "rpm": {
+        "depends": ["alsa-lib", "libappindicator-gtk3"],
         "files": {
           "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
         }
@@ -73,6 +81,7 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]
