@@ -1,0 +1,134 @@
+# Builds the installers and attaches them to a GitHub Release.
+#
+# Runs on a version tag (v0.2.0) or by hand from the Actions tab; a manual
+# run only builds and leaves the installers on the run as artifacts. The
+# version lives in src-tauri/Cargo.toml alone (tauri.conf.json inherits it),
+# so a tag that disagrees with it fails fast instead of shipping a release
+# labelled one thing and reporting another.
+#
+# Released builds are CPU-only, without `--features gpu`. A Vulkan-linked
+# binary refuses to load at all on a machine with no Vulkan runtime (one
+# binary serves the main process and the GPU worker), whereas the CPU build
+# starts everywhere and the app reports the GPU as unavailable. Anyone who
+# wants GPU inference builds from source per SETUP.md, which also spares the
+# runners a per-OS Vulkan SDK install that would go stale on its own.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "Cargo.toml version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$VERSION" ]; then
+            echo "::error::tag v$tag does not match src-tauri/Cargo.toml version $VERSION"
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The .deb, .rpm and AppImage inherit this image's glibc and
+          # WebKitGTK as their floor; an older LTS label would run on more
+          # distros, at the price of the label disappearing sooner.
+          - os: ubuntu-24.04
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Same package line as SETUP.md, plus patchelf for the AppImage.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libasound2-dev libxdo-dev patchelf
+
+      # Windows runners ship VS 2022, a Windows CMake and LLVM; bindgen only
+      # needs pointing at libclang. NSIS and WiX are fetched by the bundler.
+      - name: Windows build environment
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - run: npm ci
+      # NO_STRIP: linuxdeploy ships a binutils too old for the .relr.dyn
+      # sections in current distro libraries and aborts the AppImage when
+      # its strip fails. Skipping the strip costs a few MB, nothing else.
+      - run: npx tauri build
+        env:
+          NO_STRIP: true
+
+      # Globbed by extension, never by name: a renamed bundle or a target
+      # added in tauri.conf.json still lands here, and an empty set fails.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - run: ls -l installers
+      # A draft, so the notes can be read over before anyone sees the
+      # release; publishing it is one click on the Releases page.
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Tiro ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: installers/*
