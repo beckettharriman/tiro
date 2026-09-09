@@ -61,16 +61,13 @@
     "license": "GPL-3.0-only",
     "linux": {
       "deb": {
-        "depends": [
-          "libasound2",
-          "libayatana-appindicator3-1 | libappindicator3-1"
-        ],
+        "depends": ["libasound2"],
         "files": {
           "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
         }
       },
       "rpm": {
-        "depends": ["alsa-lib", "libappindicator-gtk3"],
+        "depends": ["alsa-lib"],
         "files": {
           "/usr/share/applications/dev.tiro.app.desktop": "linux/dev.tiro.app.desktop"
         }
