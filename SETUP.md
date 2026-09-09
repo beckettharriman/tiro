@@ -14,8 +14,12 @@ Repo: <https://github.com/beckettharriman/tiro>
 > If anything here turns out to be wrong on a real machine, fix **this file** and
 > open a pull request. That is the whole point of it living in the repo.
 
-There are no installers yet, so today "installing" means building from source.
-It's two commands once the prerequisites are in place.
+Tagged releases ship installers on the [Releases page](https://github.com/beckettharriman/tiro/releases):
+a setup `.exe` and an `.msi` on Windows, a `.deb`, an `.rpm` and an AppImage on
+Linux, all CPU only. Install one of those, launch Tiro from the app menu, and
+pick up at [step 4](#4-first-run). Steps 1 to 3 are building from source, which
+is also the only way to get a GPU build. It's two commands once the
+prerequisites are in place.
 
 ## Before you start
 
@@ -124,11 +128,15 @@ model the first time you dictate: roughly 80 MB for `base.en`, 250 MB for
 
 For a cargo build, "next to the app" is the crate directory, so
 `src-tauri/config.ini`, `src-tauri/models/`, `src-tauri/vocab.txt`,
-`src-tauri/corrections.txt`. Set `TIRO_APP_DIR` to put them somewhere else.
+`src-tauri/corrections.txt`. A `.deb`, `.rpm`, AppImage or `.msi` install can't
+write next to the app, so those use `~/.local/share/tiro` on Linux and
+`%LOCALAPPDATA%\tiro` on Windows. Set `TIRO_APP_DIR` to put them somewhere else.
 
 ## 5. Linux: hotkeys on Wayland
 
-Skip this on X11 and on Windows.
+Skip this on X11 and on Windows, and after a `.deb` or `.rpm` install, which
+ships the desktop file. For an AppImage, symlink the AppImage itself as
+`~/.local/bin/tiro` in the second command.
 
 Wayland compositors don't let apps grab global keys, so Tiro binds through the
 `org.freedesktop.portal.GlobalShortcuts` portal. The portal refuses callers it
