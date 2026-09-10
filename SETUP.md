@@ -17,6 +17,12 @@ Repo: <https://github.com/beckettharriman/tiro>
 There are no installers yet, so today "installing" means building from source.
 It's two commands once the prerequisites are in place.
 
+## macOS
+
+For a Mac, follow [MACOS.md](MACOS.md) for the native app bundle, Metal
+acceleration, microphone and Accessibility permissions, and verification.
+The Linux and Windows steps below use a different packaging and data layout.
+
 ## Before you start
 
 Two things decide how the rest goes.

@@ -6,6 +6,8 @@
 (function () {
   "use strict";
 
+  const isMac = /Mac/.test(navigator.platform);
+
   function $(id) { return document.getElementById(id); }
 
   /* ── tiny DOM helper ─────────────────────────────────────────────────── */
@@ -52,7 +54,7 @@
     if (e.ctrlKey) a.push("Ctrl");
     if (e.altKey) a.push("Alt");
     if (e.shiftKey) a.push("Shift");
-    if (e.metaKey) a.push("Win");
+    if (e.metaKey) a.push(isMac ? "Cmd" : "Win");
     a.push(keyLabel(e.code));
     return a;
   }

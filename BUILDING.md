@@ -4,7 +4,15 @@ Tiro is a Tauri 2 app: a Rust backend (`src-tauri/`) serving the static
 vanilla-JS UI in `ui/`. Development builds run with plain `cargo` — no
 Node.js, no bundler.
 
-## Common prerequisites (both OSes)
+## macOS
+
+See [MACOS.md](MACOS.md) for the native build and permissions. From the repo
+root, `npm ci && npm run build:mac` produces an ad-hoc-signed `tiro.app`
+with Metal acceleration. `npm run build:mac:cpu` produces a CPU-only app.
+The transparent windows require Tauri's `macos-private-api` feature; this
+feature and the matching configuration are inert on Linux and Windows.
+
+## Common prerequisites
 
 - **Rust** (stable, via [rustup](https://rustup.rs)) — edition 2021.
 - **CMake** — whisper.cpp is built from source by `whisper-rs-sys`.
