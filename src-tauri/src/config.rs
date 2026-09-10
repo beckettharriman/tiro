@@ -31,6 +31,22 @@ const PARSE_OPTION: ParseOption = ParseOption {
     enabled_preserve_key_leading_whitespace: false,
 };
 
+fn load_literal_ini(path: &Path) -> Result<Ini, ini::Error> {
+    let text = fs::read_to_string(path).map_err(ini::Error::Io)?;
+    // Keep the file loader's UTF-8 BOM support. rust-ini treats a trailing
+    // backslash as a line continuation even with enabled_escape=false.
+    // A space before the newline prevents that special case and is trimmed
+    // by the parser. This changes only the in-memory input, not the user's
+    // file: shortcuts such as Control+Backslash and trailing Windows path
+    // separators stay literal and cannot consume the next setting.
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .replace("\\\r\n", "\\ \r\n")
+        .replace("\\\n", "\\ \n");
+    Ini::load_from_str_opt(&text, PARSE_OPTION).map_err(ini::Error::Parse)
+}
+
 fn write_option() -> WriteOption {
     WriteOption {
         escape_policy: EscapePolicy::Nothing,
@@ -116,7 +132,7 @@ impl ConfigStore {
         let defaults = defaults(app_dir);
         let mut changed = false;
         let ini = if path.exists() {
-            match Ini::load_from_file_opt(&path, PARSE_OPTION) {
+            match load_literal_ini(&path) {
                 Ok(mut ini) => {
                     // ONE-TIME migration to the split panel/paste scheme: a
                     // file from before `paste_hotkey` existed with the panel
@@ -321,6 +337,34 @@ mod tests {
             raw.contains(r"vault_dir = C:\Users\becke\Documents\Tiro"),
             "value must be written literally with configparser-style spacing: {raw}"
         );
+    }
+
+    #[test]
+    fn trailing_backslashes_preserve_following_settings_on_reload() {
+        for newline in ["\n", "\r\n"] {
+            for bom in ["", "\u{feff}"] {
+                let dir = TempDir::new().unwrap();
+                let path = dir.path().join("config.ini");
+                let raw = format!(
+                    "{bom}[general]{newline}dictation_hotkey = ctrl+\\{newline}\
+                     mic_name = MacBook Pro Microphone{newline}\
+                     vault_dir = C:\\Users\\me\\{newline}theme = dark{newline}"
+                );
+                fs::write(&path, raw).unwrap();
+                let cfg = load_in(&dir);
+                assert_eq!(cfg.get("dictation_hotkey"), "ctrl+\\");
+                assert_eq!(cfg.get("mic_name"), "MacBook Pro Microphone");
+                assert_eq!(cfg.get("vault_dir"), "C:\\Users\\me\\");
+                assert_eq!(cfg.get("theme"), "dark");
+                let saved = fs::read_to_string(&path).unwrap();
+                drop(cfg);
+                let cfg = load_in(&dir);
+                assert_eq!(cfg.get("dictation_hotkey"), "ctrl+\\");
+                assert_eq!(cfg.get("mic_name"), "MacBook Pro Microphone");
+                assert_eq!(cfg.get("vault_dir"), "C:\\Users\\me\\");
+                assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+            }
+        }
     }
 
     #[test]
