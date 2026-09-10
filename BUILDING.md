@@ -9,7 +9,8 @@ Node.js, no bundler.
 See [MACOS.md](MACOS.md) for the native build and permissions. From the repo
 root, `npm ci && npm run build:mac` produces an ad-hoc-signed `tiro.app`
 with Metal acceleration. `npm run build:mac:cpu` produces a CPU-only app.
-The transparent windows require Tauri's `macos-private-api` feature; this
+`npm run package:mac` creates the distributable DMG and ZIP in `dist/macos/`,
+including the license and corresponding source. The transparent windows require Tauri's `macos-private-api` feature; this
 feature and the matching configuration are inert on Linux and Windows.
 
 ## Common prerequisites

@@ -1,0 +1,39 @@
+TIRO FOR MAC
+
+INSTALL
+1. Open the Tiro disk image.
+2. Drag tiro.app onto Applications.
+3. Eject the disk image, then open Tiro from Applications.
+
+If using the ZIP, extract it and move tiro.app to Applications.
+You can use your personal ~/Applications folder instead when you do not
+have permission to install in the system Applications folder.
+
+No Rust, Node.js, Python, Homebrew, or terminal setup is needed to run Tiro.
+macOS 12 or newer is required. Choose arm64 for Apple Silicon, x86_64 for
+Intel, or universal for either. Build.txt identifies this package.
+
+FIRST DICTATION
+The panel opens when Tiro starts. Allow Microphone access when requested.
+The first use downloads a speech model; transcription then runs locally.
+Press Control+Option+Space to start and stop dictation, then Command+V to
+paste. Control+Option+V finishes a take and pastes into the focused app;
+allow Tiro in System Settings > Privacy & Security > Accessibility for
+that feature. Control+Option+C opens the panel, and Control+Option+X cancels.
+
+Your settings, models, vocabulary, and app logs are stored in
+~/Library/Application Support/dev.tiro.app. Transcripts default to
+~/Documents/Tiro. Moving or replacing the app does not replace those files.
+Quit Tiro before replacing an existing app. Disable and re-enable Launch
+at login in Tiro's settings if you move an app that already starts at login.
+
+LOCAL BUILD
+This is an ad-hoc-signed development build, not an Apple-notarized release.
+macOS may block copies downloaded from the internet. Verify where a build
+came from; do not disable Gatekeeper. Maintainers can use Developer ID
+signing and notarization for a public release.
+
+SOURCE AND LICENSE
+Tiro is licensed under GPL-3.0. LICENSE.txt contains the license, and
+Source.tar.gz contains this build's source code. Build.txt records its
+commit. The source includes MACOS.md with build and verification commands.
