@@ -77,9 +77,9 @@ The one time it touches the network is downloading a model, and only when you as
 
 ## Install
 
-**macOS:** build the native menu bar app with Metal acceleration using
-[the macOS guide](MACOS.md). It includes the permissions, shortcuts, and
-CPU-only alternative.
+**macOS:** install the native menu bar app from a DMG, or build your own
+installer with `npm ci && npm run package:mac`. See [the macOS guide](MACOS.md)
+for installation, Metal acceleration, permissions, and the CPU-only alternative.
 
 **One click agentic install.** Paste this prompt at your terminal agent and get Tiro working with little effort:
 

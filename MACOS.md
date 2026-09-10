@@ -4,7 +4,25 @@ Tiro builds as a native macOS menu bar app. Apple Silicon uses Metal for
 local Whisper inference; a CPU-only build is also available. macOS 12 or
 newer is required. Build on the Mac architecture you want to run.
 
-## Build and launch
+## Install a built application
+
+Open the `.dmg` for your Mac and drag `tiro.app` onto its **Applications**
+shortcut. Eject the disk image and open Tiro from Applications. Alternatively,
+extract the ZIP and move `tiro.app` to Applications. The `arm64` package is
+for Apple Silicon; `x86_64` is for Intel. A personal `~/Applications` folder
+also works without an administrator install.
+
+The app includes its executable, interface, and native transcription engine.
+No build tools or terminal setup are required to run it. The speech model
+downloads on first use. The installer includes a readme, license, exact source
+snapshot, and build revision. Settings and downloaded models are stored
+separately, so replacing the app preserves them.
+
+These local packages are ad-hoc signed, not notarized. macOS may block a build
+downloaded from the internet; a maintainer needs Developer ID signing and
+notarization for normal public distribution. Do not disable Gatekeeper.
+
+## Build an installer
 
 Install Xcode or its Command Line Tools, stable Rust, CMake, and Node.js.
 If you use Homebrew, `brew install cmake rust node` provides the build tools;
@@ -15,12 +33,23 @@ From the repository root:
 
 ```sh
 npm ci
-npm run build:mac
-open src-tauri/target/release/bundle/macos/tiro.app
+npm run package:mac
 ```
 
-For CPU-only inference, use `npm run build:mac:cpu`. For development and
-checks, use the ordinary Cargo commands in `src-tauri`:
+The command builds a Metal app and writes a DMG, ZIP, and SHA-256 manifest to
+`dist/macos/`, for example `Tiro-0.1.0-macOS-arm64-metal.dmg`. To verify the
+downloads, run `shasum -a 256 -c Tiro-0.1.0-macOS-arm64-metal.sha256` in that
+folder. Use `npm run package:mac:cpu` for CPU-only installers.
+
+Packaging requires a clean Git checkout so its included `Source.tar.gz`
+matches the executable. Build artifacts are ignored by Git. The DMG is
+created and verified using macOS's built-in `hdiutil`; it does not need
+Finder automation or additional packaging utilities.
+
+For an app bundle without an installer, use `npm run build:mac` (Metal) or
+`npm run build:mac:cpu`, then open
+`src-tauri/target/release/bundle/macos/tiro.app`. For development and checks,
+use the ordinary Cargo commands in `src-tauri`:
 
 ```sh
 cargo fmt --check
@@ -30,11 +59,10 @@ cargo test --features metal
 
 The app bundle is self-contained; Rust, Node, and CMake are needed only to
 build it. You can move `tiro.app` to Applications before granting permissions.
-The local build has an ad-hoc signature, not Apple notarization. Distribution
-to other Macs requires your own Developer ID signing and notarization setup.
-Do not disable Gatekeeper to run a downloaded build.
 
-If your checkout is in an iCloud-synced Documents folder, Finder may add
+The installer packager stages the app outside cloud-synced folders before
+checking its signature. When launching a bare app build instead, note that
+if your checkout is in an iCloud-synced Documents folder, Finder may add
 metadata that makes signature verification fail with `resource fork, Finder
 information, or similar detritus not allowed`. Copy your locally built app
 to a non-synced Applications folder and remove only that Finder metadata:

@@ -5,7 +5,9 @@
   "scripts": {
     "tauri": "tauri",
     "build:mac": "tauri build --features metal --bundles app",
-    "build:mac:cpu": "tauri build --bundles app"
+    "build:mac:cpu": "tauri build --bundles app",
+    "package:mac": "bash scripts/package-macos.sh metal",
+    "package:mac:cpu": "bash scripts/package-macos.sh cpu"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

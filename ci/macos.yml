@@ -34,17 +34,23 @@ jobs:
           cargo +stable test --locked "${features[@]}"
           cargo +stable clippy --locked --all-targets "${features[@]}" -- -D warnings
       - run: npm ci
-      - name: Build app bundle
+      - name: Package macOS installers
         env:
           BACKEND: ${{ matrix.backend }}
         run: |
           if [ "$BACKEND" = metal ]; then
-            npm run build:mac
+            npm run package:mac
           else
-            npm run build:mac:cpu
+            npm run package:mac:cpu
           fi
       - name: Verify signature and GPU probe
         run: |
           app=src-tauri/target/release/bundle/macos/tiro.app
           codesign --verify --deep --strict "$app"
           "$app/Contents/MacOS/tiro" --gpu-enum
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-${{ matrix.backend }}
+          path: dist/macos/*
+          if-no-files-found: error
