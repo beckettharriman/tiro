@@ -152,30 +152,45 @@ static APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// appeared not to persist across reboots. The rule, applied once per
 /// process:
 ///   1. `TIRO_APP_DIR` env var, when set (tests / portable installs).
-///   2. The executable's directory — the port's analog of the script dir.
+///   2. On macOS, ~/Library/Application Support/dev.tiro.app.
+///   3. Otherwise the executable's directory — the port's analog of the script dir.
 ///      A cargo-built exe (`<crate>/target/<profile>/tiro`) walks up to the
 ///      crate directory that owns the `target` tree (src-tauri), where the
 ///      app files have always lived in dev; both dev and autostart launches
 ///      run the same binary, so they converge on the same directory.
-///   3. The CWD, only if the exe path is unavailable.
+///   4. The CWD, only if the exe path is unavailable.
 pub fn app_dir() -> PathBuf {
     APP_DIR
         .get_or_init(|| {
-            if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
-                if !dir.is_empty() {
-                    return PathBuf::from(dir);
-                }
+            let dir = resolve_app_dir();
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                eprintln!("Cannot create app data directory {}: {err}", dir.display());
             }
-            if let Some(dir) = std::env::current_exe()
-                .ok()
-                .as_deref()
-                .and_then(Path::parent)
-            {
-                return dev_crate_root(dir).unwrap_or_else(|| dir.to_path_buf());
-            }
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            dir
         })
         .clone()
+}
+
+fn resolve_app_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // Never write into a signed .app bundle. Cargo and Finder
+    // launches share one writable, per-user location on macOS.
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return PathBuf::from(home).join("Library/Application Support/dev.tiro.app");
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+    {
+        return dev_crate_root(dir).unwrap_or_else(|| dir.to_path_buf());
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// For a cargo-built exe, the crate directory owning the build tree: the

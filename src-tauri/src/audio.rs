@@ -544,6 +544,8 @@ impl Recording {
     /// devices and the native/48k/44.1k/16k rate chain like the original
     /// `start_recording`.
     pub fn start(mic_name_substr: &str) -> Result<Self, AudioError> {
+        #[cfg(target_os = "macos")]
+        crate::macos::ensure_microphone_access().map_err(AudioError)?;
         let mut last_err = String::from("no input devices");
         for (device, name, native) in candidates(mic_name_substr) {
             let mut rates = vec![native];

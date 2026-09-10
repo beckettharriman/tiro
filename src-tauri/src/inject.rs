@@ -86,9 +86,17 @@ pub fn close_portal_session() {
     portal_impl::close_session();
 }
 
-/// Windows has no portal session; nothing to close.
-#[cfg(windows)]
+/// Windows and macOS have no portal session; nothing to close.
+#[cfg(any(windows, target_os = "macos"))]
 pub fn close_portal_session() {}
+
+#[cfg(target_os = "macos")]
+pub fn paste_at_cursor(
+    _load_token: impl FnOnce() -> String,
+    _save_token: impl FnOnce(&str),
+) -> Result<(), String> {
+    crate::macos::paste()
+}
 
 #[cfg(windows)]
 mod windows_impl {
