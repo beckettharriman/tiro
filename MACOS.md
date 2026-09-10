@@ -34,6 +34,26 @@ The local build has an ad-hoc signature, not Apple notarization. Distribution
 to other Macs requires your own Developer ID signing and notarization setup.
 Do not disable Gatekeeper to run a downloaded build.
 
+If your checkout is in an iCloud-synced Documents folder, Finder may add
+metadata that makes signature verification fail with `resource fork, Finder
+information, or similar detritus not allowed`. Copy your locally built app
+to a non-synced Applications folder and remove only that Finder metadata:
+
+```sh
+mkdir -p ~/Applications
+# Only when ~/Applications/tiro.app does not already contain your install:
+ditto --norsrc src-tauri/target/release/bundle/macos/tiro.app ~/Applications/tiro.app
+xattr -dr com.apple.FinderInfo ~/Applications/tiro.app
+codesign --verify --deep --strict ~/Applications/tiro.app
+open ~/Applications/tiro.app
+```
+
+`scripts/check-macos.sh metal` (or `cpu`) runs formatting, tests, strict
+linting, app packaging, signature verification, and GPU discovery. The
+optional GitHub Actions template is `ci/macos.yml`; copy it to
+`.github/workflows/macos.yml` using a GitHub login with workflow permission
+to run these checks on pushes and pull requests.
+
 ## Permissions and first dictation
 
 The panel opens at launch. Close it to keep Tiro in the menu bar. Click its

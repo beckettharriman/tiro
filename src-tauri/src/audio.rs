@@ -244,6 +244,10 @@ pub fn list_mic_names() -> Vec<String> {
 /// The raw cpal enumeration (always the source of truth on Windows).
 fn cpal_mic_names() -> Vec<String> {
     let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.description().ok())
+        .map(|description| description.name().to_string());
     let mut names = Vec::new();
     if let Ok(devices) = host.input_devices() {
         for device in devices {
@@ -257,6 +261,12 @@ fn cpal_mic_names() -> Vec<String> {
                 }
             }
         }
+    }
+    // Match Recording::start's default-first ordering. CoreAudio may
+    // enumerate Continuity Camera/iPhone inputs before the Mac's mic.
+    if let Some(index) = default_name.and_then(|name| names.iter().position(|n| *n == name)) {
+        let name = names.remove(index);
+        names.insert(0, name);
     }
     names
 }
