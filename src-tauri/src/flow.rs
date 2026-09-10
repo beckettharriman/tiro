@@ -157,7 +157,14 @@ static APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 ///      crate directory that owns the `target` tree (src-tauri), where the
 ///      app files have always lived in dev; both dev and autostart launches
 ///      run the same binary, so they converge on the same directory.
-///   3. The CWD, only if the exe path is unavailable.
+///   3. Packaged installs put the exe somewhere the user cannot write
+///      (/usr/bin from a .deb/.rpm, an AppImage's read-only mount, Program
+///      Files from the MSI), so when the exe dir refuses a write the app
+///      files live in the per-user data dir instead: `$XDG_DATA_HOME/tiro`
+///      (default `~/.local/share/tiro`) on Linux, `%LOCALAPPDATA%\tiro` on
+///      Windows. The per-user NSIS install (`%LOCALAPPDATA%\Programs\tiro`)
+///      is writable and keeps rule 2, same as a portable unzip.
+///   4. The CWD, only if the exe path is unavailable.
 pub fn app_dir() -> PathBuf {
     APP_DIR
         .get_or_init(|| {
@@ -171,11 +178,63 @@ pub fn app_dir() -> PathBuf {
                 .as_deref()
                 .and_then(Path::parent)
             {
-                return dev_crate_root(dir).unwrap_or_else(|| dir.to_path_buf());
+                if let Some(root) = dev_crate_root(dir) {
+                    return root;
+                }
+                if dir_is_writable(dir) {
+                    return dir.to_path_buf();
+                }
+                if let Some(user) = user_data_dir() {
+                    // Best effort: a failure here surfaces as the same
+                    // unwritable-dir symptoms the fallback exists to avoid.
+                    let _ = std::fs::create_dir_all(&user);
+                    return user;
+                }
+                return dir.to_path_buf();
             }
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         })
         .clone()
+}
+
+/// Whether the process can create files in `dir`, proven by doing it: the
+/// permission bits alone lie on read-only mounts (AppImage) and under
+/// Windows ACLs. The probe is removed immediately.
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".tiro-write-probe");
+    let ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .is_ok();
+    if ok {
+        let _ = std::fs::remove_file(&probe);
+    }
+    ok
+}
+
+/// The per-user directory a packaged install keeps its app files in
+/// (rule 3 above). None when the environment names no home at all.
+fn user_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(|v| PathBuf::from(v).join("tiro"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(|h| PathBuf::from(h).join(".local").join("share"))
+            })
+            .map(|d| d.join("tiro"))
+    }
 }
 
 /// For a cargo-built exe, the crate directory owning the build tree: the
@@ -1489,10 +1548,19 @@ pub fn cancel_record(app: &AppHandle) {
 
 #[cfg(test)]
 mod app_dir_tests {
-    use super::{adopt_strays_into, dev_crate_root};
+    use super::{adopt_strays_into, dev_crate_root, dir_is_writable};
     use std::fs;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
+
+    #[test]
+    fn write_probe_reports_writable_and_leaves_nothing_behind() {
+        let dir = TempDir::new().unwrap();
+        assert!(dir_is_writable(dir.path()));
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+        // a directory that does not exist cannot take the probe
+        assert!(!dir_is_writable(&dir.path().join("missing")));
+    }
 
     fn set_mtime(path: &std::path::Path, when: SystemTime) {
         fs::File::options()

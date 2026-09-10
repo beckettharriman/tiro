@@ -92,6 +92,8 @@ Ask me before anything that needs sudo or changes system settings. When you're
 done, run the verification checklist at the end and tell me which keys to press.
 ```
 
+**Installers.** Every tagged release has them on the [Releases page](https://github.com/beckettharriman/tiro/releases): a setup `.exe` and an `.msi` on Windows, a `.deb`, an `.rpm` and an AppImage on Linux. They're CPU only; a GPU build still means building from source, below.
+
 **Install instructions.** The same steps written out in full, with per-distro package lines and troubleshooting, are in [SETUP.md](SETUP.md). It lives in the repo, so it changes in the same commit the build does and neither path goes stale. The short version:
 
 **1. Prerequisites.** Rust, CMake, and a C/C++ toolchain everywhere. On Linux, also your distro's WebKitGTK 4.1, GTK 3, appindicator, librsvg, ALSA and libxdo dev packages. On Windows, VS 2022 with the C++ workload, a real Windows CMake, LLVM for `libclang.dll`, and the WebView2 runtime. Exact package lines per distro are in [SETUP.md](SETUP.md#1-prerequisites).
@@ -144,7 +146,7 @@ tiro --cancel   # throw away the recording
 
 Working on both Windows and Linux: dictation, paste at cursor, hotkeys on X11 and Wayland, the panel, the engine and GPU policy, models, vocabulary, transcripts, tray, autostart. It is still a development beta and not a polished final product, and I'm still changing things.
 
-Not done: installers. NSIS/MSI on Windows, `.deb` and AppImage on Linux.
+Installers (NSIS/MSI on Windows, `.deb`, `.rpm` and AppImage on Linux) are built for every tagged release.
 
 ## The name
 

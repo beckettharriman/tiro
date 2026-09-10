@@ -162,6 +162,48 @@ code):
 
 ## Packaging
 
-Installer builds (`cargo tauri build` — NSIS/MSI on Windows, .deb and
-AppImage on Linux) are covered by PORT_PLAN task 5.2 and additionally
-need the Tauri CLI: `cargo install tauri-cli`.
+Installers come out of the Tauri bundler. The CLI is pinned as an npm
+dev dependency so every machine (and CI) runs the same one:
+
+```sh
+npm ci
+NO_STRIP=true npx tauri build   # from the repo root; CPU-only, like releases
+```
+
+(`cargo install tauri-cli` and `cargo tauri build` work too.) `NO_STRIP`
+is for the AppImage: linuxdeploy's bundled `strip` is too old for the
+`.relr.dyn` sections in current distro libraries and aborts the whole
+bundle when it fails on one; skipping it costs a few MB. Output
+lands under `src-tauri/target/release/bundle/`: `deb/`, `rpm/` and
+`appimage/` on Linux, `nsis/` (per-user setup .exe) and `msi/` on
+Windows. The AppImage step downloads linuxdeploy into `~/.cache/tauri`
+the first time; NSIS and WiX are fetched the same way on Windows.
+
+Everything the bundles contain is declared in `src-tauri/tauri.conf.json`:
+the UI (`build.frontendDist`, embedded into the binary at compile time),
+the icons (`bundle.icon`; `icon.ico` carries 16/32/128/256, the PNGs
+become the hicolor sizes on Linux), and the portal identity file
+`linux/dev.tiro.app.desktop` (`bundle.linux.{deb,rpm}.files`) next to
+the launcher entry the bundler generates. Adding a UI file needs no
+packaging change. The runtime dependencies the bundler cannot see
+(ALSA, the appindicator library the tray loads with dlopen) are listed
+under `depends`; WebKitGTK and GTK are added by the bundler itself.
+
+The version lives in `src-tauri/Cargo.toml` **only**; `tauri.conf.json`
+has no `version` key so it inherits that one. Bump it there and nowhere
+else.
+
+`.github/workflows/release.yml` builds the whole set on a `v*` tag
+(Linux and Windows runners), checks the tag against Cargo.toml, and
+attaches every `*.deb`, `*.rpm`, `*.AppImage`, `*.exe` and `*.msi` it
+finds to a draft GitHub Release for the tag. The Actions tab can also run
+it by hand, which builds without releasing. Released builds are CPU-only:
+a Vulkan-linked binary will not load at all on a machine without the
+Vulkan runtime, and it is the one binary for the main process and the
+worker, so a GPU build stays a from-source option.
+
+An installed binary sits somewhere the user cannot write (`/usr/bin`,
+the AppImage mount, Program Files), so `flow::app_dir()` keeps the app
+files in `$XDG_DATA_HOME/tiro` (`~/.local/share/tiro`) or
+`%LOCALAPPDATA%\tiro` in that case; a cargo build and the per-user NSIS
+install keep them next to the app as before.

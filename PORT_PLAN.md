@@ -116,21 +116,21 @@ side and the hard platform corners.)
 - [x] **5.1 Parity audit.** Walk PORTING_NOTES top to bottom against the
   running app; fix gaps; record intentional deviations at the bottom of
   PORTING_NOTES.
-- [ ] **5.2 Packaging.** `cargo tauri build` installers: NSIS/MSI on Windows,
-  .deb + AppImage on Linux. App icon (port tiro.ico, add Linux sizes).
+- [x] **5.2 Packaging.** `cargo tauri build` installers: NSIS/MSI on Windows,
+  .deb + .rpm + AppImage on Linux. App icon (port tiro.ico, add Linux sizes).
+  Version lives in Cargo.toml alone; `.github/workflows/release.yml` builds
+  every installer on a version tag and attaches them to a draft release.
 - [x] **5.3 Docs.** Rewrite README.md for the new app (install, build, usage,
   hotkeys, offline/privacy story, Wayland notes). LICENSE carried over.
   `vocab.example.txt` + `config.example.ini` included.
 - [x] **5.4 Pre-release hygiene sweep.** Run the attribution greps from
-  CLAUDE.md over full history and tree; scrub logs/temp files; verify
+  the project rules over full history and tree; scrub logs/temp files; verify
   .gitignore covers runtime artifacts; confirm repo is clean for an eventual
   public flip (stays private until owner says otherwise).
 
 ## Blockers
 
-- **5.2 AppImage**: tauri-bundler hardcodes `/usr/bin/xdg-open` when
-  assembling the AppImage and the WSL box lacks `xdg-utils` (no
-  passwordless sudo in the work session). Everything else in 5.2 is done
-  (.deb, NSIS, MSI all built). To clear: `sudo apt-get install -y
-  xdg-utils`, then re-run `npx @tauri-apps/cli build` in `src-tauri`
-  and check 5.2 off.
+None. (The 5.2 AppImage note about a missing `/usr/bin/xdg-open` was a
+WSL-only gap; native Fedora has it. The AppImage's real snag was
+linuxdeploy's old `strip` failing on `.relr.dyn` sections, cleared with
+`NO_STRIP=true`, which the release workflow and BUILDING.md both set.)
