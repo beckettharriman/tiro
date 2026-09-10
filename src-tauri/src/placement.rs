@@ -497,8 +497,8 @@ pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     let _ = app.clone().run_on_main_thread(move || {
         #[cfg(target_os = "linux")]
         set_panel_expanded_linux(&app, on);
-        #[cfg(windows)]
-        set_panel_expanded_windows(&app, on);
+        #[cfg(any(windows, target_os = "macos"))]
+        set_panel_expanded_native(&app, on);
     });
 }
 
@@ -568,7 +568,7 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
     }
 }
 
-/// Windows body of `set_panel_expanded`: the original native resize.
+/// Windows/macOS body of `set_panel_expanded`: native window resizing.
 /// The resize is deliberately INSTANT in both directions; the 520 ms
 /// motion the eye tracks is the CSS width transition on the glass, which
 /// app.js orders around this call so the window never moves mid-animation.
@@ -576,8 +576,8 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
 /// is what keeps a `resizable: true` frameless window fixed); the
 /// constraints move with the size, direction-aware so min never exceeds
 /// max in between. Main thread only.
-#[cfg(windows)]
-fn set_panel_expanded_windows(app: &AppHandle, on: bool) {
+#[cfg(any(windows, target_os = "macos"))]
+fn set_panel_expanded_native(app: &AppHandle, on: bool) {
     let Some(w) = app.get_webview_window("panel") else {
         return;
     };

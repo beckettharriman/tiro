@@ -152,47 +152,29 @@ static APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// appeared not to persist across reboots. The rule, applied once per
 /// process:
 ///   1. `TIRO_APP_DIR` env var, when set (tests / portable installs).
-///   2. The executable's directory — the port's analog of the script dir.
+///   2. On macOS, ~/Library/Application Support/dev.tiro.app — never inside
+///      the signed .app bundle.
+///   3. Otherwise the executable's directory — the port's analog of the script dir.
 ///      A cargo-built exe (`<crate>/target/<profile>/tiro`) walks up to the
 ///      crate directory that owns the `target` tree (src-tauri), where the
 ///      app files have always lived in dev; both dev and autostart launches
 ///      run the same binary, so they converge on the same directory.
-///   3. Packaged installs put the exe somewhere the user cannot write
+///   4. Packaged installs put the exe somewhere the user cannot write
 ///      (/usr/bin from a .deb/.rpm, an AppImage's read-only mount, Program
 ///      Files from the MSI), so when the exe dir refuses a write the app
 ///      files live in the per-user data dir instead: `$XDG_DATA_HOME/tiro`
 ///      (default `~/.local/share/tiro`) on Linux, `%LOCALAPPDATA%\tiro` on
 ///      Windows. The per-user NSIS install (`%LOCALAPPDATA%\Programs\tiro`)
-///      is writable and keeps rule 2, same as a portable unzip.
-///   4. The CWD, only if the exe path is unavailable.
+///      is writable and keeps rule 3, same as a portable unzip.
+///   5. The CWD, only if the exe path is unavailable.
 pub fn app_dir() -> PathBuf {
     APP_DIR
         .get_or_init(|| {
-            if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
-                if !dir.is_empty() {
-                    return PathBuf::from(dir);
-                }
+            let dir = resolve_app_dir();
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                eprintln!("Cannot create app data directory {}: {err}", dir.display());
             }
-            if let Some(dir) = std::env::current_exe()
-                .ok()
-                .as_deref()
-                .and_then(Path::parent)
-            {
-                if let Some(root) = dev_crate_root(dir) {
-                    return root;
-                }
-                if dir_is_writable(dir) {
-                    return dir.to_path_buf();
-                }
-                if let Some(user) = user_data_dir() {
-                    // Best effort: a failure here surfaces as the same
-                    // unwritable-dir symptoms the fallback exists to avoid.
-                    let _ = std::fs::create_dir_all(&user);
-                    return user;
-                }
-                return dir.to_path_buf();
-            }
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            dir
         })
         .clone()
 }
@@ -235,6 +217,38 @@ fn user_data_dir() -> Option<PathBuf> {
             })
             .map(|d| d.join("tiro"))
     }
+}
+
+/// Resolve the app directory once, per the rules on `app_dir`.
+fn resolve_app_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TIRO_APP_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    // Never write into a signed .app bundle. Cargo and Finder
+    // launches share one writable, per-user location on macOS.
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return PathBuf::from(home).join("Library/Application Support/dev.tiro.app");
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+    {
+        if let Some(root) = dev_crate_root(dir) {
+            return root;
+        }
+        if dir_is_writable(dir) {
+            return dir.to_path_buf();
+        }
+        if let Some(user) = user_data_dir() {
+            return user;
+        }
+        return dir.to_path_buf();
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// For a cargo-built exe, the crate directory owning the build tree: the

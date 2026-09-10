@@ -6,6 +6,8 @@
 (function () {
   "use strict";
 
+  const isMac = /Mac/.test(navigator.platform);
+
   function $(id) { return document.getElementById(id); }
 
   /* ── tiny DOM helper ─────────────────────────────────────────────────── */
@@ -52,7 +54,7 @@
     if (e.ctrlKey) a.push("Ctrl");
     if (e.altKey) a.push("Alt");
     if (e.shiftKey) a.push("Shift");
-    if (e.metaKey) a.push("Win");
+    if (e.metaKey) a.push(isMac ? "Cmd" : "Win");
     a.push(keyLabel(e.code));
     return a;
   }
@@ -239,7 +241,7 @@
         model = s.model || s.modelBattery;
       } else {
         if (cls === "none") device = "CPU";
-        else if (cls === "integrated") device = "GPU"; /* GPU across flips */
+        else if (cls === "integrated" || cls === "unified") device = "GPU"; /* GPU across flips */
         else device = plugged ? "GPU" : "CPU";         /* discrete laptop */
         model = plugged ? s.modelPlugged : s.modelBattery;
       }
@@ -1226,7 +1228,7 @@
     $("engineHelp").textContent = desktop
       ? ((noGpu || computeCpu) ? engineHelpCopy.desktopNone : engineHelpCopy.desktopGpu)
       : (noGpu ? engineHelpCopy.laptopNone
-        : (hw.gpuClass === "integrated" ? engineHelpCopy.laptopIntegrated
+        : (["integrated", "unified"].includes(hw.gpuClass) ? engineHelpCopy.laptopIntegrated
           : engineHelpCopy.laptopDiscrete));
   }
   function syncGpuSelect() {

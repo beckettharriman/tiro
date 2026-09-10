@@ -143,11 +143,11 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
         .as_deref()
         .ok_or("--models-dir is required")?;
     let use_gpu = opts.device == "gpu";
-    if use_gpu && !cfg!(feature = "gpu") {
-        // Built without the Vulkan feature: claiming a GPU here would just
+    if use_gpu && !cfg!(any(feature = "gpu", feature = "metal")) {
+        // Built without a GPU backend: claiming a GPU here would just
         // serve silent CPU inference while the chip says GPU. Fail loudly
         // so the parent latches GPU off and serves on CPU honestly.
-        return Err("built without GPU support (rebuild with --features gpu)".into());
+        return Err("built without GPU support (rebuild with --features metal on macOS or --features gpu for Vulkan)".into());
     }
     let model_path = transcribe::ensure_model(models_dir, name, &opts.compute_type)?;
     let vad_path = match transcribe::ensure_vad_model(models_dir) {
@@ -174,7 +174,7 @@ pub fn run(argv: &[String]) -> i32 {
         opts.device,
         opts.gpu_device,
         opts.models_dir,
-        cfg!(feature = "gpu")
+        cfg!(any(feature = "gpu", feature = "metal"))
     ));
 
     let transcriber = match load(&opts) {

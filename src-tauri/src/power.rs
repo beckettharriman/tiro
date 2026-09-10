@@ -7,6 +7,9 @@
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
+pub use crate::macos::{battery_present, on_ac_power};
+
 /// Any Mains-type supply reporting online == 1 means AC power. No supplies
 /// at all (VMs, some desktops) reads as battery — the safe default.
 #[cfg(target_os = "linux")]

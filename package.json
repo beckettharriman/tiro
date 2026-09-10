@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:mac": "tauri build --features metal --bundles app",
+    "build:mac:cpu": "tauri build --bundles app"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

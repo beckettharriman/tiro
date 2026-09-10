@@ -21,6 +21,12 @@ pick up at [step 4](#4-first-run). Steps 1 to 3 are building from source, which
 is also the only way to get a GPU build. It's two commands once the
 prerequisites are in place.
 
+## macOS
+
+For a Mac, follow [MACOS.md](MACOS.md) for the native app bundle, Metal
+acceleration, microphone and Accessibility permissions, and verification.
+The Linux and Windows steps below use a different packaging and data layout.
+
 ## Before you start
 
 Two things decide how the rest goes.

@@ -17,6 +17,8 @@ pub mod hotkeys;
 pub mod hotkeys_portal;
 pub mod hw;
 pub mod inject;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod placement;
 pub mod power;
 pub mod store;
@@ -60,8 +62,12 @@ fn list_mics() -> Vec<String> {
 }
 
 #[tauri::command]
-fn toggle_record(app: tauri::AppHandle) {
-    flow::toggle_record(&app);
+async fn toggle_record(app: tauri::AppHandle) -> Result<(), String> {
+    // Opening a microphone can include the first macOS permission dialog.
+    // Keep the event loop responsive while the recording thread opens it.
+    tauri::async_runtime::spawn_blocking(move || flow::toggle_record(&app))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -436,6 +442,8 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             // On Linux the WebKitGTK widget reports a ~200 px minimum height,
             // so GTK refuses to make the pill window its configured 76 px.
             // Clear the size request on every descendant widget and re-apply
@@ -500,7 +508,7 @@ pub fn run() {
             // land in phase 2/3); dev builds show it at startup so there is
             // something to work against. The pill is driven by the recording
             // state machine.
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, target_os = "macos"))]
             {
                 use tauri::Manager;
                 if let Some(w) = app.webview_windows().get("panel") {

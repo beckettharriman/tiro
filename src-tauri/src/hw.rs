@@ -35,15 +35,12 @@ use serde::{Deserialize, Serialize};
 /// wedged longer than this should not stall app startup.
 const ENUM_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The GPU silicon class. `Unified` is reserved for a future Apple port —
-/// it exists so the policy table's shape doesn't churn then; nothing
-/// constructs it today.
+/// The GPU silicon class. Apple Silicon uses unified CPU/GPU memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuClass {
     None,
     Integrated,
     Discrete,
-    #[allow(dead_code)] // future Apple-silicon variant; policy-table-ready
     Unified,
 }
 
@@ -66,7 +63,7 @@ impl GpuClass {
 pub struct GpuDevice {
     pub index: usize,
     pub name: String,
-    /// "discrete" | "integrated" (ggml's GPU vs IGPU device type).
+    /// "discrete" | "integrated" | "unified" (Apple Silicon).
     pub kind: String,
     /// Total device-local memory in bytes; 0 when the driver hides it.
     pub vram_bytes: u64,
@@ -118,6 +115,8 @@ pub fn warm_up() {
 pub fn classify(gpus: &[GpuDevice]) -> GpuClass {
     if gpus.iter().any(|g| g.kind == "discrete") {
         GpuClass::Discrete
+    } else if gpus.iter().any(|g| g.kind == "unified") {
+        GpuClass::Unified
     } else if gpus.is_empty() {
         GpuClass::None
     } else {
@@ -163,6 +162,12 @@ fn enum_devices_in_process() -> Vec<GpuDevice> {
                 sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU => "discrete",
                 sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU => "integrated",
                 _ => continue,
+            };
+            // Apple Silicon GPUs share system memory and cannot be eGPUs.
+            let kind = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                "unified"
+            } else {
+                kind
             };
             let name = {
                 let desc = sys::ggml_backend_dev_description(dev);
@@ -440,6 +445,10 @@ mod tests {
     #[test]
     fn classify_covers_all_lists() {
         assert_eq!(classify(&[]), GpuClass::None);
+        assert_eq!(
+            classify(&[dev(0, "Apple GPU", "unified", 0)]),
+            GpuClass::Unified
+        );
         assert_eq!(
             classify(&[dev(0, "iGPU", "integrated", 0)]),
             GpuClass::Integrated

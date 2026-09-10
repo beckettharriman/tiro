@@ -118,9 +118,16 @@ pub fn keys_to_combo(hotkey: &str) -> Value {
                 shift = true;
                 keys.push("Shift".into());
             }
-            "windows" | "win" | "meta" => {
+            "windows" | "win" | "meta" | "cmd" => {
                 meta = true;
-                keys.push("Win".into());
+                keys.push(
+                    if cfg!(target_os = "macos") {
+                        "Cmd"
+                    } else {
+                        "Win"
+                    }
+                    .into(),
+                );
             }
             low => {
                 let label = match low {
@@ -906,7 +913,16 @@ mod tests {
         assert_eq!(c["shift"], true);
         assert_eq!(c["meta"], true);
         assert_eq!(c["code"], "F5", "capitalize()");
-        assert_eq!(c["keys"], json!(["Shift", "Win", "F5"]));
+        let meta_label = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Win"
+        };
+        assert_eq!(c["keys"], json!(["Shift", meta_label, "F5"]));
+
+        let c = keys_to_combo("cmd+v");
+        assert_eq!(c["meta"], true);
+        assert_eq!(c["code"], "KeyV");
 
         let c = keys_to_combo("");
         assert_eq!(c["code"], "");

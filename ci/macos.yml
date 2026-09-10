@@ -1,0 +1,50 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        backend: [cpu, metal]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +stable fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: Test and lint
+        working-directory: src-tauri
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          features=()
+          if [ "$BACKEND" = metal ]; then features=(--features metal); fi
+          cargo +stable test --locked "${features[@]}"
+          cargo +stable clippy --locked --all-targets "${features[@]}" -- -D warnings
+      - run: npm ci
+      - name: Build app bundle
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          if [ "$BACKEND" = metal ]; then
+            npm run build:mac
+          else
+            npm run build:mac:cpu
+          fi
+      - name: Verify signature and GPU probe
+        run: |
+          app=src-tauri/target/release/bundle/macos/tiro.app
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/tiro" --gpu-enum
