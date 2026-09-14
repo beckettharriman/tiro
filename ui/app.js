@@ -184,7 +184,7 @@
       pillPosition: "bottom", pillPadding: 110,
       clipboardCleanup: "light", smartVocab: true,
       micName: "MacBook Pro Microphone", launchAtLogin: true,
-      saveTranscripts: true, savePath: "~/Documents/Tiro", transparency: 35,
+      saveTranscripts: true, savePath: "~/Documents/Tiro", transparency: 8,
       storageFallback: false, storagePath: ""
     },
     engine: { model: "small.en", device: "GPU", power: "plugged" },

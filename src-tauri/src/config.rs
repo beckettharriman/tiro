@@ -97,10 +97,13 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("clipboard_cleanup", "light".into()),
         ("use_vocab_bias", "true".into()),
         ("theme", "system".into()),
-        ("panel_transparency", "45".into()),
+        ("panel_transparency", "8".into()),
         ("vault_dir", vault.to_string_lossy().into_owned()),
         ("fallback_dir", fallback.to_string_lossy().into_owned()),
         ("save_transcripts", "true".into()),
+        // Set once, the first time an installed copy switches launch at
+        // login on. Never re-armed, so turning the toggle off sticks.
+        ("autostart_bootstrapped", "false".into()),
         ("auto_restart", "true".into()),
         // RemoteDesktop-portal restore token for paste injection on Wayland
         // (set after the user approves the one-time permission dialog).
@@ -283,7 +286,8 @@ mod tests {
         assert_eq!(cfg.get("sound_volume"), "1.0");
         assert_eq!(cfg.get("clipboard_cleanup"), "light");
         assert_eq!(cfg.get("theme"), "system");
-        assert_eq!(cfg.get("panel_transparency"), "45");
+        assert_eq!(cfg.get("panel_transparency"), "8");
+        assert!(!cfg.get_bool("autostart_bootstrapped"));
         assert_eq!(cfg.get("pill_position"), "bottom");
         assert_eq!(cfg.get("pill_padding"), "110");
         assert_eq!(

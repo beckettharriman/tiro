@@ -435,7 +435,7 @@ pub fn get_state(app: &AppHandle) -> Value {
             "launchAtLogin": launch_at_login_enabled(app),
             "saveTranscripts": cfg.get_bool("save_transcripts"),
             "savePath": cfg.get("vault_dir"),
-            "transparency": clamp_int_str(&cfg.get("panel_transparency"), 0, 100, 45),
+            "transparency": clamp_int_str(&cfg.get("panel_transparency"), 0, 100, 8),
             "storageFallback": !is_vault,
             "storagePath": store_path,
             "treatAsDesktop": cfg.get_bool("treat_as_desktop"),
@@ -734,7 +734,7 @@ pub fn set_setting(app: &AppHandle, key: &str, value: &Value) -> Value {
             "transparency" => {
                 cfg.set(
                     "panel_transparency",
-                    &clamp_int(value, 0, 100, 45).to_string(),
+                    &clamp_int(value, 0, 100, 8).to_string(),
                 );
             }
             "launchAtLogin" => set_launch_at_login(app, truthy(value)),

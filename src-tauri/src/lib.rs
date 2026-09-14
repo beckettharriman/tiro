@@ -526,6 +526,22 @@ pub fn run() {
             // Detect the hardware class off-thread NOW (the --gpu-enum
             // child + battery probe) so the first get_state / resolve
             // never pays the spawn latency inline.
+            // Tiro is only useful when it is already running, so an
+            // installed copy switches launch at login on the first time it
+            // starts. The attempt is recorded in the config, so switching
+            // the toggle off in Settings is never undone on a later launch.
+            // Cargo builds are left alone (see `flow::is_dev_build`).
+            if !flow::is_dev_build() {
+                use tauri::Manager as _;
+                let ctx = app.state::<flow::AppCtx>();
+                let armed = flow::lock(&ctx.cfg).get_bool("autostart_bootstrapped");
+                if !armed {
+                    // Registering the login item touches the filesystem, so
+                    // it runs with the cfg lock released.
+                    api::set_launch_at_login(app.handle(), true);
+                    flow::lock(&ctx.cfg).set("autostart_bootstrapped", "true");
+                }
+            }
             hw::warm_up();
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());

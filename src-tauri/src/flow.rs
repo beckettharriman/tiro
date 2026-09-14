@@ -251,6 +251,19 @@ fn resolve_app_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Whether this process is a cargo build running out of its own target
+/// tree rather than an installed copy. First-run setup that changes the
+/// user's machine (the launch-at-login default) is skipped for these, so
+/// `cargo run` never registers a login item.
+pub fn is_dev_build() -> bool {
+    std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(dev_crate_root)
+        .is_some()
+}
+
 /// For a cargo-built exe, the crate directory owning the build tree: the
 /// nearest ancestor of `exe_dir` named `target` whose parent holds a
 /// `Cargo.toml`. None for an installed binary (its own directory is the
