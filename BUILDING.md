@@ -45,6 +45,15 @@ On first launch the app downloads the Whisper GGUF model(s) it needs into
   set `LIBCLANG_PATH` to the directory containing `libclang.dll`.
 - **WebView2 Runtime** — preinstalled on Windows 11; on Windows 10 install
   the [Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+- For the GPU worker (see "GPU builds"): the
+  [Vulkan SDK](https://vulkan.lunarg.com/) with `VULKAN_SDK` set (the
+  installer sets it), and a **short target directory** for the worker
+  build — whisper.cpp builds its Vulkan shader generator as a nested
+  CMake project, and MSVC's file tracker fails with `FTK1011` once those
+  paths pass MAX_PATH, which they do under `<repo>\src-tauri\target`.
+  `scripts\build-gpu-worker.cmd` builds the worker in
+  `%SystemDrive%\tiro-gpu` and copies the exe next to `tiro.exe`;
+  `tauri build` runs it for you.
 
 ## Linux
 
@@ -122,17 +131,33 @@ a dialog.
 
 ## GPU builds (optional)
 
+Tiro is two executables. `tiro` is the app; it links no GPU backend, so
+it loads on any machine. `tiro-gpu-worker` is the GPU side — device
+enumeration (`--gpu-enum`) and the inference child (`--gpu-worker`, see
+PORTING_NOTES §6) — and the only binary that links Vulkan. The app looks
+for it next to its own executable and serves on CPU when it is missing or
+cannot run (no Vulkan runtime, no usable device). The main process never
+initializes a GPU context either way (design rule 1).
+
 ```sh
-cargo build --features gpu
+cargo build --release
+cargo build --release --bin tiro-gpu-worker --features gpu   # Windows: ..\scripts\build-gpu-worker.cmd
+./target/release/tiro --gpu-enum
 ```
 
-The `gpu` feature compiles whisper.cpp's Vulkan backend for the
-`tiro --gpu-worker` child process and requires the
+The plain build produces both binaries, with a CPU-only worker that
+declines GPU requests. The second line rebuilds just the worker with
+whisper.cpp's Vulkan backend and requires the
 [Vulkan SDK](https://vulkan.lunarg.com/) (headers + `glslc`) at build
-time. Plain builds never need it: the app then serves CPU inference and
-reports the GPU as unavailable. The main process never initializes a GPU
-context in either build — GPU inference always lives in the worker child
-(see PORTING_NOTES §6).
+time — on Debian/Ubuntu `libvulkan-dev glslc`, on Fedora
+`vulkan-headers vulkan-loader-devel glslc`. Keep it a separate, later
+step: Cargo features are package-wide, so `cargo build --features gpu`
+would link Vulkan into `tiro` too (and `tiro` would then refuse to load
+on a machine without the runtime), and a plain build after it puts the
+CPU-only worker back. The third line asks the worker for the GPU list (an
+empty list means the worker is missing, the Vulkan runtime is, or no
+device is usable; the reason is in tiro.log). A plain build alone never
+needs the SDK.
 
 ## Development notes: WSLg quirks vs real-Linux issues
 
@@ -177,10 +202,16 @@ dev dependency so every machine (and CI) runs the same one:
 
 ```sh
 npm ci
-NO_STRIP=true npx tauri build   # from the repo root; CPU-only, like releases
+NO_STRIP=true npx tauri build   # from the repo root; needs the Vulkan SDK
 ```
 
-(`cargo install tauri-cli` and `cargo tauri build` work too.) `NO_STRIP`
+`tauri build` runs the plain `cargo build --release`, then — through the
+`beforeBundleCommand` in `tauri.linux.conf.json` / `tauri.windows.conf.json`
+(`scripts/build-gpu-worker.cmd` on Windows, see the MAX_PATH note under
+"Windows") — the worker-only Vulkan build from "GPU builds", and bundles
+both binaries from `target/release`: a `tiro` that links no GPU backend
+next to a `tiro-gpu-worker` that does. (`cargo install tauri-cli` and
+`cargo tauri build` work too.) `NO_STRIP`
 is for the AppImage: linuxdeploy's bundled `strip` is too old for the
 `.relr.dyn` sections in current distro libraries and aborts the whole
 bundle when it fails on one; skipping it costs a few MB. Output
@@ -189,15 +220,23 @@ lands under `src-tauri/target/release/bundle/`: `deb/`, `rpm/` and
 Windows. The AppImage step downloads linuxdeploy into `~/.cache/tauri`
 the first time; NSIS and WiX are fetched the same way on Windows.
 
-Everything the bundles contain is declared in `src-tauri/tauri.conf.json`:
-the UI (`build.frontendDist`, embedded into the binary at compile time),
-the icons (`bundle.icon`; `icon.ico` carries 16/32/128/256, the PNGs
-become the hicolor sizes on Linux), and the portal identity file
-`linux/dev.tiro.app.desktop` (`bundle.linux.{deb,rpm}.files`) next to
-the launcher entry the bundler generates. Adding a UI file needs no
-packaging change. The runtime dependencies the bundler cannot see
-(ALSA, the appindicator library the tray loads with dlopen) are listed
-under `depends`; WebKitGTK and GTK are added by the bundler itself.
+Everything the bundles contain is declared in `src-tauri/tauri.conf.json`
+and `src-tauri/Cargo.toml`: the UI (`build.frontendDist`, embedded into
+the binary at compile time), the icons (`bundle.icon`; `icon.ico` carries
+16/32/128/256, the PNGs become the hicolor sizes on Linux), the portal
+identity file `linux/dev.tiro.app.desktop` (`bundle.linux.{deb,rpm}.files`)
+next to the launcher entry the bundler generates, and every `[[bin]]`
+target of the package — which is how `tiro-gpu-worker` lands beside
+`tiro` in each installer (`/usr/bin` in the deb and rpm, `usr/bin` in the
+AppImage, the install directory on Windows). Adding a UI file needs no
+packaging change. The runtime dependencies the bundler cannot see (ALSA,
+the appindicator library the tray loads with dlopen, and the Vulkan
+loader the worker links: `libvulkan1` / `vulkan-loader`) are listed under
+`depends`; WebKitGTK and GTK are added by the bundler itself. The AppImage
+has no package dependencies: linuxdeploy follows both binaries' libraries,
+so it carries its own `libvulkan.so.1` (the loader, which then finds the
+host's driver ICDs); a host without a Vulkan-capable driver gets the same
+CPU fallback as everywhere else.
 
 The version lives in `src-tauri/Cargo.toml` **only**; `tauri.conf.json`
 has no `version` key so it inherits that one. Bump it there and nowhere
@@ -207,10 +246,13 @@ else.
 (Linux and Windows runners), checks the tag against Cargo.toml, and
 attaches every `*.deb`, `*.rpm`, `*.AppImage`, `*.exe` and `*.msi` it
 finds to a draft GitHub Release for the tag. The Actions tab can also run
-it by hand, which builds without releasing. Released builds are CPU-only:
-a Vulkan-linked binary will not load at all on a machine without the
-Vulkan runtime, and it is the one binary for the main process and the
-worker, so a GPU build stays a from-source option.
+it by hand, which builds without releasing. Both runners install the
+Vulkan SDK (Ubuntu's `libvulkan-dev glslc`; the LunarG installer on
+Windows, pinned by version and checksum) so the bundle hook can build the
+worker with `--features gpu`; a verify step fails the run if `tiro` links
+Vulkan or an installer lacks the worker. Every installer therefore ships
+GPU support, and a machine without a Vulkan runtime or device still runs
+the app on CPU.
 
 An installed binary sits somewhere the user cannot write (`/usr/bin`,
 the AppImage mount, Program Files), so `flow::app_dir()` keeps the app

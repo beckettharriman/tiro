@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Always-on, fully-offline dictation to clipboard"
 authors = ["beckettharriman"]
 edition = "2021"
+# Two binaries (see [[bin]] below): `cargo run` and the bundler mean this one.
+default-run = "tiro"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,6 +15,19 @@ edition = "2021"
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "tiro_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The GPU side of the app is its own executable. `tiro` never links a GPU
+# backend, so it starts on any machine; `tiro-gpu-worker` is the one binary
+# that does, and the app spawns it next to itself (gpu.rs / hw.rs). Cargo
+# features are package-wide, so the split only holds when the worker gets
+# its own invocation, AFTER the plain build (which rebuilds it CPU-only):
+#   cargo build --release
+#   cargo build --release --bin tiro-gpu-worker --features gpu
+# `tauri build` runs the second line itself (beforeBundleCommand in
+# tauri.linux.conf.json / tauri.windows.conf.json) and ships both binaries.
+[[bin]]
+name = "tiro-gpu-worker"
+path = "src/bin/tiro-gpu-worker.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -40,11 +55,14 @@ tauri-plugin-autostart = "2.5.1"
 auto-launch = "0.5"
 
 [features]
-# GPU inference (Vulkan) for the `--gpu-worker` child process. Plain
-# `cargo build` stays CPU-only and needs no Vulkan SDK; the worker
-# subcommand then reports itself unavailable and the app serves on CPU.
+# GPU inference (Vulkan) for `tiro-gpu-worker`. Needs the Vulkan SDK
+# (headers + `glslc`) at build time. Build it with `--bin tiro-gpu-worker`
+# only: enabled for the `tiro` binary too, that binary would refuse to
+# load on a machine without a Vulkan runtime. A plain build gives a
+# CPU-only worker that declines GPU requests, and the app serves on CPU.
 gpu = ["whisper-rs/vulkan"]
-# Native Apple GPU backend; no Vulkan SDK is needed on macOS.
+# Native Apple GPU backend; no Vulkan SDK is needed on macOS. The whole
+# package builds with it (`npm run build:mac`): Metal is always present.
 metal = ["whisper-rs/metal"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -67,7 +85,7 @@ gtk = "0.18"
 x11rb = { version = "0.14", features = ["xtest"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_Power", "Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"

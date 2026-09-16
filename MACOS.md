@@ -106,8 +106,8 @@ menu bar icon to show it again, or use the panel shortcut below.
 | Control+Option+C | Show or hide the panel |
 | Control+Option+X | Cancel the recording |
 
-Option is the key called Alt in the default configuration. Shortcuts are
-rebindable in Settings. VoiceOver also uses Control+Option; if you use
+Option is the key stored as `alt` in the configuration file; the panel
+labels it Option on a Mac. Shortcuts are rebindable in Settings. VoiceOver also uses Control+Option; if you use
 VoiceOver, choose different Tiro shortcuts. Command shortcuts are supported.
 
 ## Data and acceleration
@@ -142,6 +142,9 @@ Headless GPU discovery is available without opening a window:
 src-tauri/target/release/bundle/macos/tiro.app/Contents/MacOS/tiro --gpu-enum
 ```
 
-A Metal build on Apple Silicon should report an Apple GPU with kind
+The app forwards this to `tiro-gpu-worker` beside it in `Contents/MacOS`,
+the executable that carries the Metal backend and runs GPU inference (the
+`metal` feature builds both binaries; a CPU package carries a CPU-only
+worker). A Metal build on Apple Silicon should report an Apple GPU with kind
 `unified`. A CPU-only build should report an empty array. Diagnostics go to
 `tiro.log` in the app data directory.

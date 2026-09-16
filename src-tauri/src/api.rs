@@ -110,9 +110,16 @@ pub fn keys_to_combo(hotkey: &str) -> Value {
                 ctrl = true;
                 keys.push("Ctrl".into());
             }
-            "alt" => {
+            "alt" | "option" => {
                 alt = true;
-                keys.push("Alt".into());
+                keys.push(
+                    if cfg!(target_os = "macos") {
+                        "Option"
+                    } else {
+                        "Alt"
+                    }
+                    .into(),
+                );
             }
             "shift" => {
                 shift = true;
@@ -169,7 +176,7 @@ pub fn combo_to_hotkey(combo: &Value) -> String {
         let low = kk.to_lowercase();
         let part = match low.as_str() {
             "ctrl" | "control" => "ctrl".to_string(),
-            "alt" => "alt".to_string(),
+            "alt" | "option" => "alt".to_string(),
             "shift" => "shift".to_string(),
             "win" | "windows" | "meta" | "cmd" => "windows".to_string(),
             "esc" | "escape" => "esc".to_string(),
@@ -897,17 +904,24 @@ mod tests {
 
     #[test]
     fn keys_to_combo_matches_python() {
+        // The stored string is "alt" everywhere; only the label differs:
+        // the Mac keyboard calls that key Option (Cmd for meta, below).
+        let alt_label = if cfg!(target_os = "macos") {
+            "Option"
+        } else {
+            "Alt"
+        };
         let c = keys_to_combo("ctrl+alt+space");
         assert_eq!(c["ctrl"], true);
         assert_eq!(c["alt"], true);
         assert_eq!(c["shift"], false);
         assert_eq!(c["meta"], false);
         assert_eq!(c["code"], "Space");
-        assert_eq!(c["keys"], json!(["Ctrl", "Alt", "Space"]));
+        assert_eq!(c["keys"], json!(["Ctrl", alt_label, "Space"]));
 
         let c = keys_to_combo("ctrl+alt+v");
         assert_eq!(c["code"], "KeyV");
-        assert_eq!(c["keys"], json!(["Ctrl", "Alt", "V"]));
+        assert_eq!(c["keys"], json!(["Ctrl", alt_label, "V"]));
 
         let c = keys_to_combo("shift+windows+f5");
         assert_eq!(c["shift"], true);
@@ -939,6 +953,11 @@ mod tests {
             combo_to_hotkey(&json!({"keys": ["Cmd", "Return", "Escape"]})),
             "windows+enter+esc",
             "aliases normalize"
+        );
+        assert_eq!(
+            combo_to_hotkey(&json!({"keys": ["Ctrl", "Option", "Space"]})),
+            "ctrl+alt+space",
+            "the Mac label round-trips to the stored name"
         );
         assert_eq!(
             combo_to_hotkey(&json!({"keys": ["Ctrl", "V"]})),

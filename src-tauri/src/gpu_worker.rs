@@ -1,5 +1,7 @@
-//! The `tiro --gpu-worker` subcommand: GPU Whisper inference in a
-//! disposable child process, ported from the original's gpu_worker.py.
+//! The `tiro-gpu-worker --gpu-worker` child: GPU Whisper inference in a
+//! disposable process, ported from the original's gpu_worker.py. It lives
+//! in its own executable (src/bin/tiro-gpu-worker.rs) so that the app
+//! binary never links a GPU backend.
 //!
 //! WHY THIS EXISTS (POWER_AND_DGPU.md, "Fix 2"): the first time a process
 //! touches the GPU, the driver creates a per-process context that lives
@@ -147,7 +149,7 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
         // Built without a GPU backend: claiming a GPU here would just
         // serve silent CPU inference while the chip says GPU. Fail loudly
         // so the parent latches GPU off and serves on CPU honestly.
-        return Err("built without GPU support (rebuild with --features metal on macOS or --features gpu for Vulkan)".into());
+        return Err("worker built without GPU support (rebuild it with --features gpu for Vulkan, or --features metal on macOS)".into());
     }
     let model_path = transcribe::ensure_model(models_dir, name, &opts.compute_type)?;
     let vad_path = match transcribe::ensure_vad_model(models_dir) {
@@ -165,7 +167,8 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
     Ok(t)
 }
 
-/// Entry point for `tiro --gpu-worker ...`; returns the process exit code.
+/// Entry point for `tiro-gpu-worker --gpu-worker ...`; returns the process
+/// exit code.
 pub fn run(argv: &[String]) -> i32 {
     let opts = parse_args(argv);
     log(&format!(

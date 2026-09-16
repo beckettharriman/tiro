@@ -52,7 +52,7 @@
   function comboKeys(e) {
     const a = [];
     if (e.ctrlKey) a.push("Ctrl");
-    if (e.altKey) a.push("Alt");
+    if (e.altKey) a.push(isMac ? "Option" : "Alt");
     if (e.shiftKey) a.push("Shift");
     if (e.metaKey) a.push(isMac ? "Cmd" : "Win");
     a.push(keyLabel(e.code));
