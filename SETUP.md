@@ -142,6 +142,10 @@ worker; the reason is in `tiro.log` next to the binary.
 
 Tiro starts hidden with a tray icon. Press `Ctrl+Alt+C` to bring up the panel.
 
+An installed copy also switches launch at login on the first time it runs, so
+it's there after a reboot. The Login switch in Settings turns it off and it
+stays off. A cargo build never registers itself.
+
 It writes `config.ini` next to the app on first launch, and downloads the Whisper
 model the first time you dictate: roughly 80 MB for `base.en`, 250 MB for
 `small.en`. **That download is the only network access Tiro ever performs.**

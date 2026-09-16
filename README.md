@@ -2,7 +2,7 @@
 
 # Tiro
 
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE) ![Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-444.svg) ![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg) ![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg) ![Work in progress](https://img.shields.io/badge/status-work%20in%20progress-e8a33d.svg)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE) ![macOS | Windows | Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-444.svg) ![Rust + Tauri](https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange.svg) ![Offline](https://img.shields.io/badge/100%25-offline-30d158.svg) ![Work in progress](https://img.shields.io/badge/status-work%20in%20progress-e8a33d.svg)
 
 *Offline, on device transcription tool. Turns out you never had to send your voice to a tech bro in Silicon Valley to get a decent transcript.*
 
@@ -54,7 +54,7 @@ All four are rebindable.
 | <img src="docs/vocabulary.png" alt="Vocabulary"> | <img src="docs/models.png" alt="Models"> |
 | **Vocabulary.** Hot words prime Whisper so it spells your names right. Corrections fix what it still misses, and only touch the copy you paste. | **Models.** Manage the transcription models installed on device, tiny through large-v3-turbo from Hugging Face. |
 
-There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit.
+There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit. On a Mac it lives in the menu bar.
 
 ## Engine, GPU, laptop power savings
 
@@ -63,7 +63,7 @@ Tiro works out what machine it's on at startup and shows only the settings that 
 | Machine | What you get |
 |---|---|
 | Laptop, discrete GPU | Auto Switch: GPU and the bigger model plugged in, CPU and the lighter one on battery |
-| Laptop, integrated | Stays on the GPU, just swaps the model |
+| Laptop, integrated or Apple Silicon | Stays on the GPU, just swaps the model |
 | Desktop | One compute row, one model, no battery settings |
 | No usable GPU | None of it shows up |
 
@@ -71,17 +71,31 @@ The same install should do the right thing on every kind of machine without you 
 
 ## Nothing gets lost
 
-Every take is written verbatim to `Documents/Tiro`, one JSONL and one Markdown file per day. Clipboard cleanup and corrections change only the copy you paste, never the log. If the folder isn't writable, Tiro falls back next to the app and says so in the panel.
+Every take is written verbatim to one JSONL and one Markdown file per day. Clipboard cleanup and corrections change only the copy you paste, never the log. If that folder isn't writable, Tiro falls back to its own folder and says so in the panel.
 
 The one time it touches the network is downloading a model, and only when you ask. No accounts, no telemetry.
 
 ## Install
 
-**macOS:** install the native menu bar app from a DMG, or build your own
-installer with `npm ci && npm run package:mac`. See [the macOS guide](MACOS.md)
-for installation, Metal acceleration, permissions, and the CPU-only alternative.
+Three ways in: grab an installer (recommended), paste a prompt at an agent, or build it yourself. They all end up in the same place.
 
-**One click agentic install.** Paste this prompt at your terminal agent and get Tiro working with little effort:
+### Installers
+
+Official releases are available on the [Releases page](https://github.com/beckettharriman/tiro/releases). Tiro is two programs, the app and a worker beside it that does the GPU work. If your machine has a Vulkan driver the worker uses it, and if it doesn't you get the CPU and nothing breaks.
+
+| | Get | Then |
+|---|---|---|
+| **Windows** | The setup `.exe`. The `.msi` does the same thing machine-wide. | Run it. Windows will say the publisher is unknown, because I haven't bought a certificate. More info, Run anyway. |
+| **Linux** | `.deb` on Debian and Ubuntu, `.rpm` on Fedora, the AppImage anywhere. | `sudo apt install ./tiro_*.deb`, or `sudo dnf install ./tiro-*.rpm`. For the AppImage, make it executable and run it. |
+| **macOS** | The `.dmg`, or build one yourself with `npm run package:mac`. | Drag Tiro into Applications. Allow the microphone when asked, and Accessibility if you want paste at cursor. [MACOS.md](MACOS.md) has the details. |
+
+Tiro starts hidden with a tray icon, and an installed copy switches itself on at login so it's there next boot. Both are in Settings if you'd rather not. `Ctrl+Alt+C` opens the panel, and the first dictation downloads a model, about 80 MB.
+
+Nothing is tagged yet, so that page is empty until the first release.
+
+### Let an agent do it
+
+Paste this at your terminal agent:
 
 ```text
 Set up Tiro on my machine.
@@ -96,19 +110,19 @@ Ask me before anything that needs sudo or changes system settings. When you're
 done, run the verification checklist at the end and tell me which keys to press.
 ```
 
-**Installers.** Every tagged release has them on the [Releases page](https://github.com/beckettharriman/tiro/releases): a setup `.exe` and an `.msi` on Windows, a `.deb`, an `.rpm` and an AppImage on Linux. They're CPU only; a GPU build still means building from source, below.
+### From source
 
-**Install instructions.** The same steps written out in full, with per-distro package lines and troubleshooting, are in [SETUP.md](SETUP.md). It lives in the repo, so it changes in the same commit the build does and neither path goes stale. The short version:
+The full version, with per-distro package lines and troubleshooting, is [SETUP.md](SETUP.md). It lives in the repo, so it changes in the same commit the build does and neither path goes stale. The short version:
 
-**1. Prerequisites.** Rust, CMake, and a C/C++ toolchain everywhere. On Linux, also your distro's WebKitGTK 4.1, GTK 3, appindicator, librsvg, ALSA and libxdo dev packages. On Windows, VS 2022 with the C++ workload, a real Windows CMake, LLVM for `libclang.dll`, and the WebView2 runtime. Exact package lines per distro are in [SETUP.md](SETUP.md#1-prerequisites).
+**1. Prerequisites.** Rust, CMake, and a C/C++ toolchain everywhere. On Linux, also your distro's WebKitGTK 4.1, GTK 3, appindicator, librsvg, ALSA and libxdo dev packages. On Windows, VS 2022 with the C++ workload, a real Windows CMake, LLVM for `libclang.dll`, and the WebView2 runtime. On macOS, the Xcode command line tools. Exact package lines per distro are in [SETUP.md](SETUP.md#1-prerequisites).
 
-**2. Clone and build.** A GPU build additionally needs the [Vulkan SDK](https://vulkan.lunarg.com/); without it, build CPU only and add the GPU later.
+**2. Clone and build.** The GPU worker needs the [Vulkan SDK](https://vulkan.lunarg.com/) to build. If you don't have it, skip that line and you get the CPU; add it later without losing anything. On a Mac, build everything with `--features metal` instead, which needs no SDK.
 
 ```sh
 git clone https://github.com/beckettharriman/tiro.git
 cd tiro/src-tauri
-cargo build --release                   # CPU only
-cargo build --release --features gpu    # + Vulkan
+cargo build --release                                        # the app
+cargo build --release --bin tiro-gpu-worker --features gpu   # the GPU worker
 ```
 
 **3. Run it.**
@@ -117,9 +131,9 @@ cargo build --release --features gpu    # + Vulkan
 ./target/release/tiro
 ```
 
-It starts hidden with a tray icon. `Ctrl+Alt+C` opens the panel. `config.ini` is written next to the app, and the first dictation downloads a model, about 80 MB.
+A source build keeps `config.ini` and its models next to the app, in `src-tauri/`. An installer keeps them in a per-user folder instead. Keep the two binaries together, since the app looks for the worker next to itself.
 
-**4. Wayland only.** Install the desktop file so the shortcuts portal can identify Tiro, then restart it:
+**4. Wayland only.** Install the desktop file so the shortcuts portal can identify Tiro, then restart it. The `.deb` and `.rpm` already did this for you; for an AppImage, symlink the AppImage itself in the second line.
 
 ```sh
 cp src-tauri/linux/dev.tiro.app.desktop ~/.local/share/applications/
@@ -148,9 +162,9 @@ tiro --cancel   # throw away the recording
 
 ## Status
 
-Working on both Windows and Linux: dictation, paste at cursor, hotkeys on X11 and Wayland, the panel, the engine and GPU policy, models, vocabulary, transcripts, tray, autostart. It is still a development beta and not a polished final product, and I'm still changing things.
+Working on Linux, Windows and macOS: dictation, paste at cursor, hotkeys, the panel, the engine and GPU policy, models, vocabulary, transcripts, tray, autostart. Linux and Windows are what I use every day. The macOS port is Trevor Buettgen's work and I don't run it myself, so it gets less of my attention than the other two.
 
-Installers (NSIS/MSI on Windows, `.deb`, `.rpm` and AppImage on Linux) are built for every tagged release.
+Installers are built for every tagged release. There hasn't been a tagged release yet.
 
 ## The name
 
