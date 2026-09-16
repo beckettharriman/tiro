@@ -16,9 +16,11 @@ Repo: <https://github.com/beckettharriman/tiro>
 
 Tagged releases ship installers on the [Releases page](https://github.com/beckettharriman/tiro/releases):
 a setup `.exe` and an `.msi` on Windows, a `.deb`, an `.rpm` and an AppImage on
-Linux, all CPU only. Install one of those, launch Tiro from the app menu, and
-pick up at [step 4](#4-first-run). Steps 1 to 3 are building from source, which
-is also the only way to get a GPU build. It's two commands once the
+Linux. All of them include GPU support: Tiro is two executables, the app and
+a `tiro-gpu-worker` beside it that does the GPU work, and the app uses the
+worker when a Vulkan driver is present and runs on CPU otherwise. Install one
+of those, launch Tiro from the app menu, and pick up at [step 4](#4-first-run).
+Steps 1 to 3 are building from source. It's a few commands once the
 prerequisites are in place.
 
 ## macOS
@@ -31,10 +33,11 @@ The Linux and Windows steps below use a different packaging and data layout.
 
 Two things decide how the rest goes.
 
-**1. CPU or GPU build.** A GPU build needs the [Vulkan SDK](https://vulkan.lunarg.com/)
-(headers and `glslc`) at build time. Without it, build CPU only: Tiro runs fine
-that way and reports the GPU as unavailable. You can rebuild with the GPU
-feature later without losing anything.
+**1. CPU or GPU build.** The GPU side of Tiro is a separate executable,
+`tiro-gpu-worker`, and building it needs the [Vulkan SDK](https://vulkan.lunarg.com/)
+(headers and `glslc`) at build time. Without it, build the app alone: Tiro
+runs fine that way and reports the GPU as unavailable. You can add the worker
+later without losing anything.
 
 **2. On Linux, X11 or Wayland.** X11 needs nothing extra. Wayland needs the
 one-time desktop-file step in [step 5](#5-linux-hotkeys-on-wayland). Check with:
@@ -104,12 +107,22 @@ cd tiro
 
 ```sh
 cd src-tauri
-cargo build --release                   # CPU only
-cargo build --release --features gpu    # + Vulkan
+cargo build --release                                        # the app, plus a CPU-only worker
+cargo build --release --bin tiro-gpu-worker --features gpu   # the GPU worker (needs the Vulkan SDK; skip for CPU only)
 ```
 
-The first build compiles whisper.cpp and takes a while. The binary lands at
-`src-tauri/target/release/tiro` (`tiro.exe` on Windows).
+On Windows, run `..\scripts\build-gpu-worker.cmd` instead of the second
+line: it builds the worker in `C:\tiro-gpu` (the default target path is too
+long for MSVC's build tools with whisper.cpp's Vulkan backend) and copies
+the exe next to `tiro.exe`.
+
+Keep the two lines separate and in that order: the app must be built
+without `--features gpu` (a Vulkan-linked app would not load on a machine
+without the runtime), and a plain build rebuilds the worker CPU-only, so the
+GPU line comes last. The first build compiles whisper.cpp and takes a while.
+The binaries land at `src-tauri/target/release/tiro` and `tiro-gpu-worker`
+(`.exe` on Windows); the app looks for the worker next to itself, so keep
+them together.
 
 Check it before going further:
 
@@ -117,8 +130,9 @@ Check it before going further:
 ./target/release/tiro --gpu-enum
 ```
 
-That prints the Vulkan devices as one line of JSON and exits. An empty list means
-no usable GPU, which is expected on a CPU build.
+That asks the worker for the Vulkan devices, prints them as one line of JSON
+and exits. An empty list means no usable GPU, which is expected without the
+worker; the reason is in `tiro.log` next to the binary.
 
 ## 4. First run
 
@@ -205,7 +219,9 @@ settings change, and strips comments when it does.
 |---|---|
 | `Could not create named generator Visual Studio 17 2022` | An MSYS/MinGW `cmake` is shadowing the Windows one. Point at the right one: `set CMAKE=C:\path\to\cmake.exe` |
 | bindgen fails, `libclang.dll` not found | LLVM isn't on `PATH`. Set `LIBCLANG_PATH` to the directory holding `libclang.dll` |
-| Build fails on `glslc` or Vulkan headers | GPU build without the Vulkan SDK. Install it, or drop `--features gpu` |
+| Build fails on `glslc` or Vulkan headers | Worker build without the Vulkan SDK. Install it, or skip the worker line |
+| `FileTracker : error FTK1011` while building the worker on Windows | The build path is longer than MAX_PATH. Use `scripts\build-gpu-worker.cmd`, which builds in `C:\tiro-gpu` |
+| Chip says CPU on a machine with a GPU | `tiro --gpu-enum` prints `[]` and `tiro.log` says why: the worker is not next to the app, the Vulkan runtime is missing (`libvulkan1` / `vulkan-loader` on Linux, the GPU driver on Windows), or the driver exposes no Vulkan device |
 | `failed to remove file … tiro.exe, Access is denied` | Tiro is running and holding its own binary. Quit it, then rebuild |
 | Hotkeys do nothing on Wayland | Step 5. Check `tiro.log` for `NotAllowed: An app id is required` |
 | Hotkeys do nothing on X11 | Another app already owns the combo. Rebind in Settings → Shortcuts |

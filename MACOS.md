@@ -142,6 +142,9 @@ Headless GPU discovery is available without opening a window:
 src-tauri/target/release/bundle/macos/tiro.app/Contents/MacOS/tiro --gpu-enum
 ```
 
-A Metal build on Apple Silicon should report an Apple GPU with kind
+The app forwards this to `tiro-gpu-worker` beside it in `Contents/MacOS`,
+the executable that carries the Metal backend and runs GPU inference (the
+`metal` feature builds both binaries; a CPU package carries a CPU-only
+worker). A Metal build on Apple Silicon should report an Apple GPU with kind
 `unified`. A CPU-only build should report an empty array. Diagnostics go to
 `tiro.log` in the app data directory.
