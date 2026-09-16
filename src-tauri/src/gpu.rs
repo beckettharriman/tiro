@@ -1,7 +1,9 @@
-//! Parent-side client for the `tiro --gpu-worker` child (PORTING_NOTES §6).
+//! Parent-side client for the `tiro-gpu-worker --gpu-worker` child
+//! (PORTING_NOTES §6).
 //!
-//! The client re-execs our own binary with the `--gpu-worker` subcommand
-//! and speaks the framed stdin/stdout protocol (see gpu_worker.rs). A
+//! The client spawns the sibling `tiro-gpu-worker` executable — the one
+//! binary that links a GPU backend, see `worker_command` — and speaks the
+//! framed stdin/stdout protocol (see gpu_worker.rs). A
 //! dedicated reader thread owns the child's stdout and forwards frames
 //! over a channel so every wait can carry a timeout: ready 30 s with a
 //! cached model / 120 s when the worker may be downloading it, and per
@@ -11,7 +13,7 @@
 //! safety net — no extra machinery needed.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
@@ -25,6 +27,94 @@ use crate::flow::lock;
 
 pub const READY_TIMEOUT_CACHED: Duration = Duration::from_secs(30);
 pub const READY_TIMEOUT_DOWNLOAD: Duration = Duration::from_secs(120);
+
+/// File name of the worker executable (`.exe` on Windows).
+pub const WORKER_EXE: &str = "tiro-gpu-worker";
+
+/// Where the worker lives: next to this executable. That is `/usr/bin`
+/// for the deb/rpm, `usr/bin` inside the AppImage mount, the install dir
+/// on Windows, `Contents/MacOS` in the app bundle and `target/<profile>`
+/// for a cargo build.
+pub fn worker_exe() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
+    Ok(dir.join(format!("{WORKER_EXE}{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Is the GPU runtime the worker links against present? Only the Vulkan
+/// LOADER is probed (`libvulkan.so.1` / `vulkan-1.dll`): loading a shared
+/// library is not a GPU context — the loader touches no driver until an
+/// instance is created, which only ever happens in the worker (design
+/// rule 1). Without the loader the worker cannot even start (on Windows
+/// the OS would put up a "vulkan-1.dll was not found" box for it), so the
+/// app reports the GPU unavailable up front instead. macOS uses Metal,
+/// which is always present.
+pub fn gpu_runtime_check() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let name = c"libvulkan.so.1";
+        // SAFETY: a valid NUL-terminated name; the handle is closed again
+        // right away and nothing from the library is called.
+        let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if handle.is_null() {
+            return Err("Vulkan runtime (libvulkan.so.1) is not installed".into());
+        }
+        unsafe { libc::dlclose(handle) };
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FreeLibrary;
+        use windows_sys::Win32::System::LibraryLoader::{
+            LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        };
+        let name: Vec<u16> = "vulkan-1.dll\0".encode_utf16().collect();
+        // SAFETY: a valid NUL-terminated wide string; the module is freed
+        // again right away and nothing from it is called.
+        let handle = unsafe {
+            LoadLibraryExW(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        if handle.is_null() {
+            return Err("Vulkan runtime (vulkan-1.dll) is not installed".into());
+        }
+        unsafe { FreeLibrary(handle) };
+        Ok(())
+    }
+}
+
+/// A `Command` for the sibling worker, or why it cannot run: the file is
+/// missing (a plain `cargo build`, see Cargo.toml) or the GPU runtime is.
+/// Every caller treats the error as "GPU unavailable" and serves on CPU —
+/// the worker is optional equipment, never a reason to crash.
+pub fn worker_command() -> Result<Command, String> {
+    let exe = worker_exe()?;
+    if !exe.is_file() {
+        return Err(format!(
+            "{} is missing (build it with `cargo build --bin {WORKER_EXE} --features gpu`)",
+            exe.display()
+        ));
+    }
+    gpu_runtime_check()?;
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(exe);
+    #[cfg(target_os = "windows")]
+    {
+        // CREATE_NO_WINDOW, like the original's pythonw spawn.
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    Ok(cmd)
+}
 
 enum Frame {
     Ready(Value),
@@ -83,8 +173,7 @@ impl GpuWorker {
         gpu_device: usize,
         ready_timeout: Duration,
     ) -> Result<Self, String> {
-        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-        let mut cmd = Command::new(exe);
+        let mut cmd = worker_command()?;
         cmd.args([
             "--gpu-worker",
             "--model",
@@ -101,12 +190,6 @@ impl GpuWorker {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-        #[cfg(target_os = "windows")]
-        {
-            // CREATE_NO_WINDOW, like the original's pythonw spawn.
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("worker spawn failed: {e}"))?;

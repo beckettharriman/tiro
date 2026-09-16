@@ -9,8 +9,9 @@
 //!   main process must NEVER initialize a GPU/Vulkan context — even a bare
 //!   enumeration creates a driver context that pins the discrete GPU out of
 //!   D3cold until process exit. So enumeration runs in a short-lived child
-//!   (`tiro --gpu-enum`, the same re-exec pattern as `--gpu-worker`): the
-//!   child creates the Vulkan instance, prints the device list as one JSON
+//!   (`tiro-gpu-worker --gpu-enum`, the same sibling executable the GPU
+//!   worker runs in — the only binary linking a GPU backend): the child
+//!   creates the Vulkan instance, prints the device list as one JSON
 //!   line, and exits — the context dies with it. The parent caches the
 //!   result for the life of the process (re-enumerated each app start).
 //!
@@ -23,7 +24,7 @@
 //! AC/battery logic is inert.
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -126,13 +127,24 @@ pub fn classify(gpus: &[GpuDevice]) -> GpuClass {
 
 // ---- the --gpu-enum child --------------------------------------------------
 
-/// Entry point for `tiro --gpu-enum`: enumerate ggml backend devices (this
-/// initializes the Vulkan instance — in THIS disposable process only),
-/// print them as one JSON line on stdout, exit. Diagnostics go to stderr;
-/// stdout carries only the JSON.
+/// Entry point for `tiro-gpu-worker --gpu-enum`: enumerate ggml backend
+/// devices (this initializes the Vulkan instance — in THIS disposable
+/// process only), print them as one JSON line on stdout, exit.
+/// Diagnostics go to stderr; stdout carries only the JSON.
 pub fn gpu_enum_main() -> i32 {
-    let devices = enum_devices_in_process();
-    match serde_json::to_string(&devices) {
+    print_devices(&enum_devices_in_process())
+}
+
+/// Entry point for `tiro --gpu-enum`: the same JSON line, obtained the
+/// way the app obtains it — from the sibling worker, never in-process. A
+/// missing worker or runtime prints `[]` (and says why on stderr), which
+/// is exactly what the app would conclude.
+pub fn gpu_enum_forward() -> i32 {
+    print_devices(&enumerate_gpus())
+}
+
+fn print_devices(devices: &[GpuDevice]) -> i32 {
+    match serde_json::to_string(devices) {
         Ok(json) => {
             println!("{json}");
             0
@@ -192,10 +204,11 @@ fn enum_devices_in_process() -> Vec<GpuDevice> {
     out
 }
 
-/// Parent side: run `tiro --gpu-enum` (re-exec, like the GPU worker spawn)
-/// and parse its JSON line. Any failure — spawn error, timeout, bad JSON —
-/// degrades to an empty list (gpu_class none): the battery-safe reading,
-/// and the CPU engine always works.
+/// Parent side: run `tiro-gpu-worker --gpu-enum` (the sibling executable
+/// the GPU worker spawn uses) and parse its JSON line. Any failure —
+/// missing worker or runtime, spawn error, timeout, bad JSON — degrades
+/// to an empty list (gpu_class none): the battery-safe reading, and the
+/// CPU engine always works.
 ///
 /// `TIRO_GPU_ENUM_JSON` overrides the child entirely (tests and headless
 /// class previews); unit tests never spawn — re-execing the test binary
@@ -207,24 +220,17 @@ fn enumerate_gpus() -> Vec<GpuDevice> {
     if cfg!(test) {
         return Vec::new();
     }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
+    let mut cmd = match crate::gpu::worker_command() {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("gpu-enum: current_exe failed: {e}");
+            eprintln!("gpu-enum: GPU unavailable: {e}");
             return Vec::new();
         }
     };
-    let mut cmd = Command::new(exe);
     cmd.arg("--gpu-enum")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        // CREATE_NO_WINDOW, matching the worker spawn.
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -245,7 +251,18 @@ fn enumerate_gpus() -> Vec<GpuDevice> {
     });
     match rx.recv_timeout(ENUM_TIMEOUT) {
         Ok(buf) => {
-            let _ = child.wait();
+            let status = child.wait();
+            if buf.trim().is_empty() {
+                // A worker that could not start (no Vulkan runtime on the
+                // host, a broken install) dies before printing anything.
+                eprintln!(
+                    "gpu-enum: worker printed nothing (exit status {}); assuming no usable GPU",
+                    status
+                        .ok()
+                        .and_then(|s| s.code())
+                        .map_or_else(|| "unknown".to_string(), |c| c.to_string())
+                );
+            }
             parse_enum_output(&buf)
         }
         Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {

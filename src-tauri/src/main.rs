@@ -92,14 +92,12 @@ fn main() {
     stderr_to_log();
     // CLI subcommands run headless, before any window/GPU machinery exists.
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--gpu-worker") {
-        std::process::exit(tiro_lib::gpu_worker::run(&args));
-    }
     if args.iter().any(|a| a == "--gpu-enum") {
-        // Vulkan device enumeration in a disposable child: the GPU context
-        // it creates dies with this process (design rule 1 — the main
-        // process never touches the GPU, not even to enumerate).
-        std::process::exit(tiro_lib::hw::gpu_enum_main());
+        // Forwarded to the sibling `tiro-gpu-worker --gpu-enum`: this
+        // binary links no GPU backend and never touches the GPU, not even
+        // to enumerate (design rule 1) — the worker's context dies with
+        // the worker.
+        std::process::exit(tiro_lib::hw::gpu_enum_forward());
     }
     if std::env::args().any(|a| a == "--record-test") {
         tiro_lib::audio::record_test();
