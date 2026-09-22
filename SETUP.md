@@ -23,6 +23,10 @@ of those, launch Tiro from the app menu, and pick up at [step 4](#4-first-run).
 Steps 1 to 3 are building from source. It's a few commands once the
 prerequisites are in place.
 
+> **There is no published release yet.** The Releases page is empty and the
+> repo has no tags, so until the first one lands, building from source is the
+> only route on every OS. Skip ahead to [step 1](#1-prerequisites).
+
 ## macOS
 
 For a Mac, follow [MACOS.md](MACOS.md) for the native app bundle, Metal
@@ -96,6 +100,32 @@ sudo pacman -S base-devel cmake webkit2gtk-4.1 gtk3 \
 - WebView2 Runtime. Preinstalled on Windows 11; on Windows 10, install the
   Evergreen runtime.
 
+All of it is on `winget`, if you'd rather not click through installers:
+
+```powershell
+winget install --id Rustlang.Rustup -e
+winget install --id Kitware.CMake -e
+winget install --id LLVM.LLVM -e
+winget install --id KhronosGroup.VulkanSDK -e          # GPU build only
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override `
+  "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Two things that catch people out afterwards:
+
+- **The LLVM installer does not add itself to `PATH`.** It lands in
+  `C:\Program Files\LLVM`, `bindgen` never finds `libclang.dll`, and the build
+  fails. Set `LIBCLANG_PATH` before building — treat it as a required step on
+  Windows rather than a fix to reach for once the build has already failed:
+
+  ```powershell
+  $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+  ```
+
+- **CMake and the Vulkan SDK only reach `PATH` in newly opened shells.** If you
+  installed them a moment ago, open a fresh terminal before building, or the
+  build will not see `cmake` or `glslc`.
+
 ## 2. Get the source
 
 ```sh
@@ -132,7 +162,23 @@ Check it before going further:
 
 That asks the worker for the Vulkan devices, prints them as one line of JSON
 and exits. An empty list means no usable GPU, which is expected without the
-worker; the reason is in `tiro.log` next to the binary.
+worker; the reason is in `tiro.log` in the app directory (next to
+`config.ini` — for a cargo build that is `src-tauri/`, *not* alongside the
+binary in `target/release/`).
+
+On Windows, `tiro.exe` is a GUI-subsystem binary with no console attached, so
+this prints nothing at all when you run it in a terminal. Redirect it to a file
+to read the output:
+
+```powershell
+.\target\release\tiro.exe --gpu-enum > gpu.json 2>&1 ; type gpu.json
+```
+
+A healthy result names the device:
+
+```json
+[{"index":0,"name":"NVIDIA GeForce RTX 2080 SUPER","kind":"discrete","vram_bytes":8599371776}]
+```
 
 ## 4. First run
 
@@ -190,6 +236,11 @@ shortcuts to the CLI instead. A second launch remote-controls the running one:
 GNOME: Settings → Keyboard → Custom Shortcuts. KDE: System Settings →
 Shortcuts → Add Command. sway/hyprland: `bindsym` / `bind`.
 
+Those four commands are not Wayland-specific — a second launch remote-controls
+the running instance on every OS. They are the fastest way to check that
+recording works when a global hotkey turns out to be unavailable, and on Windows
+they are a usable fallback for a combo another app has taken.
+
 ## 6. Configure
 
 Everything is in the panel (`Ctrl+Alt+C`, then the expand button, then Settings),
@@ -217,6 +268,15 @@ settings change, and strips comments when it does.
 - [ ] A `YYYY-MM-DD.jsonl` and `.md` pair appeared in `Documents/Tiro`.
 - [ ] `Ctrl+Alt+X` during a recording throws it away.
 
+Start at `tiro.log`: it records one line per hotkey at every launch, so a combo
+another app has taken shows up there as `hotkey registration FAILED` before you
+spend any time wondering why a key does nothing. A healthy start ends with
+`Ready on GPU (worker).` or the CPU equivalent.
+
+Nothing is written to `Documents/Tiro` when a take has no speech in it — the log
+says `(no speech detected)` and no `.jsonl`/`.md` pair appears. That is working
+as intended, not a failed write.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -229,6 +289,8 @@ settings change, and strips comments when it does.
 | `failed to remove file … tiro.exe, Access is denied` | Tiro is running and holding its own binary. Quit it, then rebuild |
 | Hotkeys do nothing on Wayland | Step 5. Check `tiro.log` for `NotAllowed: An app id is required` |
 | Hotkeys do nothing on X11 | Another app already owns the combo. Rebind in Settings → Shortcuts |
+| One hotkey does nothing on Windows, the rest work | Another app owns that combo. `tiro.log` names it: `hotkey registration FAILED for dictate = ctrl+alt+space (HotKey already registered…)`. Rebind in Settings → Shortcuts; peripheral and gaming suites (Razer Synapse and the like) are common holders of `ctrl+alt+space`. `tiro --toggle` works meanwhile |
+| `tiro --gpu-enum` prints nothing on Windows | Not a failure. It's a GUI-subsystem binary with no console; redirect to a file (see [step 3](#3-build)) |
 | No tray icon | The desktop has no StatusNotifier host. Use the hotkeys or `tiro --panel` |
 | Panel or pill won't render on Linux | Force X11: `GDK_BACKEND=x11 ./tiro` |
 | Recording produces silence | Wrong input device. Settings → Input, pick the mic, press Test and watch the meter |
