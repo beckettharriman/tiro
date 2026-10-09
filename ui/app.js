@@ -753,6 +753,28 @@
     if (sub) sub.textContent = cur ? "Live from " + cur + "." : "Live from the selected microphone.";
   }
 
+  /* Mics come and go (a USB mic replugged, a headset paired, a device
+     disabled in Sound settings): re-read the list whenever the user is
+     about to pick one — the menu opening, Settings opening, a select
+     getting focus, the panel being summoned. Re-renders only on change,
+     so an open menu is not rebuilt under the pointer for nothing. */
+  let micRefresh = null;
+  function refreshMics() {
+    if (micRefresh || !api.list_mics) return;
+    micRefresh = Promise.resolve(api.list_mics()).then((names) => {
+      micRefresh = null;
+      if (!Array.isArray(names) || names.join("\n") === App.mics.join("\n")) return;
+      App.mics = names;
+      renderMics();
+    }).catch(() => { micRefresh = null; });
+  }
+  window.addEventListener("focus", refreshMics);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshMics(); });
+  [selMic, selMicT].forEach((sel) => {
+    sel.addEventListener("mousedown", refreshMics);
+    sel.addEventListener("focus", refreshMics);
+  });
+
   function setMic(name, closeMenu) {
     if (closeMenu) setMicOpen(false);
     setSetting("micName", name);
@@ -763,7 +785,12 @@
     panel.classList.toggle("mic-open", open);
     micCap.setAttribute("aria-expanded", open);
   }
-  micCap.addEventListener("click", (e) => { e.stopPropagation(); setMicOpen(!panel.classList.contains("mic-open")); });
+  micCap.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !panel.classList.contains("mic-open");
+    if (open) refreshMics();
+    setMicOpen(open);
+  });
   document.addEventListener("click", (e) => { if (!micMenu.contains(e.target)) setMicOpen(false); });
 
   /* ════════════════════════════════════════════════════════════════════
@@ -917,6 +944,7 @@
       /* the render waits out any in-flight expand transition */
       loadDays().then(() => afterSettle(renderAdv));
     }
+    if (v === "settings") refreshMics();
     if (v === "vocab") loadVocab();
     if (v === "models") refreshModels();
     kickWave();

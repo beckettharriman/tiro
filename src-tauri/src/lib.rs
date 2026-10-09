@@ -56,9 +56,13 @@ fn set_setting(app: tauri::AppHandle, key: String, value: Value) -> Value {
     api::set_setting(&app, &key, &value)
 }
 
+// Device enumeration takes tens of ms (WASAPI) — never on the main thread,
+// which the panel now calls it from every time the mic menu opens.
 #[tauri::command]
-fn list_mics() -> Vec<String> {
-    audio::list_mic_names()
+async fn list_mics() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(audio::list_mic_names)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
