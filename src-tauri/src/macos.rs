@@ -13,7 +13,6 @@ extern "C" {
     fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
     fn IOPSCopyPowerSourcesList(info: CFTypeRef) -> CFArrayRef;
     fn IOPSGetPowerSourceDescription(info: CFTypeRef, source: CFTypeRef) -> CFDictionaryRef;
-    fn IOPSGetProvidingPowerSourceType(info: CFTypeRef) -> CFStringRef;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -28,15 +27,6 @@ fn power_info() -> Option<CFType> {
     // Copy functions transfer ownership; the CF wrappers release on drop.
     let info = unsafe { IOPSCopyPowerSourcesInfo() };
     (!info.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(info) })
-}
-
-pub fn on_ac_power() -> bool {
-    let Some(info) = power_info() else {
-        return false;
-    };
-    let source = unsafe { IOPSGetProvidingPowerSourceType(info.as_CFTypeRef()) };
-    !source.is_null()
-        && unsafe { CFString::wrap_under_get_rule(source) } == CFString::new("AC Power")
 }
 
 fn is_internal_battery(description: &CFDictionary<CFString, CFType>) -> bool {

@@ -378,71 +378,24 @@ impl PowerPref {
     }
 }
 
-/// Which config key the serving model comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelSlot {
-    /// The single `model` key (forced modes, and every mode on a desktop).
-    Single,
-    /// `model_ac` — the plugged-in model of a laptop's pair.
-    Ac,
-    /// `model_battery` — the lighter on-battery model of a laptop's pair.
-    Battery,
-}
-
-/// THE POLICY TABLE (owner-specified, one cell per machine class):
-///
-/// | class      | machine | Auto behavior                                      |
-/// |------------|---------|----------------------------------------------------|
-/// | discrete   | laptop  | AC: GPU+model_ac; battery: CPU+model_battery       |
-/// |            |         | (kill the worker BEFORE the CPU load — D3cold law) |
-/// | discrete   | desktop | always GPU + `model`                               |
-/// | integrated | laptop  | GPU ALWAYS (no D3cold prize on an iGPU);           |
-/// |            |         | AC: model_ac, battery: model_battery               |
-/// | integrated | desktop | always GPU + `model`                               |
-/// | none       | laptop  | CPU; AC: model_ac, battery: model_battery          |
-/// |            |         | (the battery model still saves CPU watts)          |
-/// | none       | desktop | CPU + `model`                                      |
-/// | unified    | —       | reserved (treated like integrated for now)        |
-///
-/// Forced modes (Always CPU / Always GPU) run the single `model` key on
-/// every machine class. Pure function of its inputs so every cell is unit-
-/// tested; GPU health (`gpu_ok`) and the worker-child mechanics live in
-/// `flow::resolve_target` / `flow::load_engine`, not here.
-pub fn policy(
-    class: GpuClass,
-    desktop: bool,
-    on_ac: bool,
-    pref: PowerPref,
-) -> (&'static str, ModelSlot) {
+/// THE POLICY: which device serves, from the machine class and the user's
+/// preference alone. Auto takes the GPU whenever a usable one exists and
+/// the CPU otherwise; the forced modes do what they say (a forced GPU on a
+/// machine without one fails fast and serves the CPU honestly through the
+/// normal fallback). There is deliberately no battery or power-source
+/// input any more: the AC/battery switching of earlier versions kept the
+/// engine in transition on laptops (every flip or re-probe tore the
+/// engine down for a minutes-long reload) and confused more people than
+/// it saved watts for. The old policy table lives on the
+/// `stash/battery-auto-switch` branch should it ever come back.
+pub fn policy(class: GpuClass, pref: PowerPref) -> &'static str {
     match pref {
-        PowerPref::ForceCpu => ("cpu", ModelSlot::Single),
-        // Forced GPU keeps its meaning on every class: attempt the GPU and
-        // let the normal failure path fall back (a class-none machine just
-        // fails fast and serves CPU honestly).
-        PowerPref::ForceGpu => ("gpu", ModelSlot::Single),
-        PowerPref::Auto => {
-            let slot = if desktop {
-                ModelSlot::Single
-            } else if on_ac {
-                ModelSlot::Ac
-            } else {
-                ModelSlot::Battery
-            };
-            let device = match class {
-                GpuClass::None => "cpu",
-                GpuClass::Integrated | GpuClass::Unified => "gpu",
-                GpuClass::Discrete => {
-                    if desktop || on_ac {
-                        "gpu"
-                    } else {
-                        // The Blade 14 cell: on battery the worker dies and
-                        // the CPU model serves — the dGPU reaches D3cold.
-                        "cpu"
-                    }
-                }
-            };
-            (device, slot)
-        }
+        PowerPref::ForceCpu => "cpu",
+        PowerPref::ForceGpu => "gpu",
+        PowerPref::Auto => match class {
+            GpuClass::None => "cpu",
+            GpuClass::Integrated | GpuClass::Unified | GpuClass::Discrete => "gpu",
+        },
     }
 }
 
@@ -484,61 +437,19 @@ mod tests {
         );
     }
 
-    /// Every cell of the policy table, exactly as specified.
+    /// Every cell of the policy: Auto follows the hardware, forced modes
+    /// follow the user, and nothing depends on a power source.
     #[test]
-    fn policy_table_every_cell() {
+    fn policy_every_cell() {
         use GpuClass::*;
-        use ModelSlot::*;
         use PowerPref::*;
-        // (class, desktop, on_ac, pref) -> (device, slot)
-        let cells: &[(GpuClass, bool, bool, PowerPref, &str, ModelSlot)] = &[
-            // discrete + laptop: TODAY'S BEHAVIOR EXACTLY (the Blade 14 cell)
-            (Discrete, false, true, Auto, "gpu", Ac),
-            (Discrete, false, false, Auto, "cpu", Battery),
-            // discrete + desktop: always GPU + single model
-            (Discrete, true, true, Auto, "gpu", Single),
-            (Discrete, true, false, Auto, "gpu", Single),
-            // integrated + laptop: GPU always, model follows the power source
-            (Integrated, false, true, Auto, "gpu", Ac),
-            (Integrated, false, false, Auto, "gpu", Battery),
-            // integrated + desktop
-            (Integrated, true, true, Auto, "gpu", Single),
-            (Integrated, true, false, Auto, "gpu", Single),
-            // none: CPU only everywhere; laptop keeps the two model slots
-            (None, false, true, Auto, "cpu", Ac),
-            (None, false, false, Auto, "cpu", Battery),
-            (None, true, true, Auto, "cpu", Single),
-            (None, true, false, Auto, "cpu", Single),
-            // unified (future Apple): rides the integrated cells
-            (Unified, false, true, Auto, "gpu", Ac),
-            (Unified, false, false, Auto, "gpu", Battery),
-            (Unified, true, true, Auto, "gpu", Single),
-            (Unified, true, false, Auto, "gpu", Single),
-        ];
-        for &(class, desktop, on_ac, pref, want_dev, want_slot) in cells {
-            let (dev, slot) = policy(class, desktop, on_ac, pref);
-            assert_eq!(
-                (dev, slot),
-                (want_dev, want_slot),
-                "auto cell {class:?} desktop={desktop} on_ac={on_ac}"
-            );
+        assert_eq!(policy(None, Auto), "cpu");
+        for class in [Integrated, Discrete, Unified] {
+            assert_eq!(policy(class, Auto), "gpu", "auto {class:?}");
         }
-        // Forced modes: single model key on ALL machine classes.
         for class in [None, Integrated, Discrete, Unified] {
-            for desktop in [false, true] {
-                for on_ac in [false, true] {
-                    assert_eq!(
-                        policy(class, desktop, on_ac, ForceCpu),
-                        ("cpu", Single),
-                        "forced-cpu cell {class:?} desktop={desktop} on_ac={on_ac}"
-                    );
-                    assert_eq!(
-                        policy(class, desktop, on_ac, ForceGpu),
-                        ("gpu", Single),
-                        "forced-gpu cell {class:?} desktop={desktop} on_ac={on_ac}"
-                    );
-                }
-            }
+            assert_eq!(policy(class, ForceCpu), "cpu", "forced-cpu {class:?}");
+            assert_eq!(policy(class, ForceGpu), "gpu", "forced-gpu {class:?}");
         }
     }
 

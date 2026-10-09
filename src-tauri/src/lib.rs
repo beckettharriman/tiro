@@ -170,22 +170,17 @@ fn cancel_download(name: String) -> Value {
     api::cancel_download(&name)
 }
 
-/// The original's 20 s `power_watcher` tick: keep the engine chip's power
-/// label and the system theme in sync with the live machine state. (Theme
-/// polling is needed because on Linux tao emits OS ThemeChanged with a
-/// dummy window id that never reaches on_window_event; the device swap on
-/// power flips joins in task 3.5.)
-///
-/// On DESKTOP machines (no battery, or treat_as_desktop) the AC/battery
-/// half is inert: no power sampling, no flip pushes — the policy table has
-/// no power-dependent cell there. The dead-worker latch and the policy
-/// reconcile stay on every class (they are crash recovery, not power
-/// flapping).
-fn power_watcher(app: tauri::AppHandle) {
+/// The 20 s engine watcher: crash recovery for the GPU worker (a worker
+/// that died on its own is latched off and the engine steered to CPU; a
+/// later re-probe may bring it back) plus the policy reconcile after a
+/// settings change, and the theme poll (on Linux tao emits OS ThemeChanged
+/// with a dummy window id that never reaches on_window_event). This tick
+/// no longer samples the power source: the engine does not switch on
+/// AC/battery any more (see `hw::policy`).
+fn engine_watcher(app: tauri::AppHandle) {
     use tauri::Manager;
     std::thread::spawn(move || {
         let mut last_theme: Option<String> = None;
-        let mut last_power = power::on_ac_power();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(20));
             let ctx = app.state::<flow::AppCtx>();
@@ -195,26 +190,14 @@ fn power_watcher(app: tauri::AppHandle) {
             {
                 let engine = flow::lock(&ctx.engine);
                 if engine.device == "gpu" && !engine.worker.as_ref().is_some_and(|w| w.alive()) {
-                    eprintln!("power: GPU worker died unexpectedly; latching GPU off");
+                    eprintln!("engine: GPU worker died unexpectedly; latching GPU off");
                     flow::latch_gpu_off(&ctx);
                 }
             }
             let target = flow::resolve_target(&ctx);
-            // Device AND model must match the policy cell — an integrated
-            // laptop swaps models on a power flip without changing device.
             if !flow::engine_in_policy(&ctx, target) {
-                eprintln!("Power/device change -> switching to {target}");
+                eprintln!("engine: switching to {target}");
                 flow::ensure_device(&app, target); // kills/spawns; pushes the chip
-            }
-            if !flow::machine_is_desktop(&ctx) {
-                let ac = power::on_ac_power();
-                if ac != last_power {
-                    last_power = ac;
-                    eprintln!("power flip -> {}", if ac { "plugged" } else { "battery" });
-                    // power may have flipped without a device swap; keep the
-                    // footer chip's power label current.
-                    flow::push_panel(&app, "tiroSetEngine", flow::engine_dict(&ctx));
-                }
             }
             let eff = {
                 // snapshot then drop the lock: effective_theme can shell
@@ -545,7 +528,7 @@ pub fn run() {
             hw::warm_up();
             flow::boot_engine(app.handle().clone());
             hotkeys::register_all(app.handle());
-            power_watcher(app.handle().clone());
+            engine_watcher(app.handle().clone());
             if let Err(e) = build_tray(app) {
                 eprintln!("tray unavailable: {e}");
             }

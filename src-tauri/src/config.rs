@@ -71,13 +71,8 @@ pub fn defaults(app_dir: &Path) -> Vec<(&'static str, String)> {
         ("paste_hotkey", "ctrl+alt+v".into()),
         ("panel_hotkey", "ctrl+alt+c".into()),
         ("model", "base.en".into()),
-        ("model_battery", "base.en".into()),
-        ("model_ac", "small.en".into()),
         ("device", "auto".into()),
         ("compute_type", "int8".into()),
-        // Ignore battery state — a battery machine the user runs docked
-        // can opt into desktop policy (single model, no AC/battery split).
-        ("treat_as_desktop", "false".into()),
         // Multi-GPU machines: the chosen Vulkan device, stored as index +
         // name so a hardware change invalidates sanely (a stale name falls
         // back to the default device). Empty = auto (prefer discrete,
@@ -151,6 +146,32 @@ impl ConfigStore {
                             "panel_hotkey".to_string(),
                             "ctrl+alt+c".to_string(),
                         );
+                        changed = true;
+                    }
+                    // ONE-TIME migration off the plugged-in/battery model
+                    // pair: the engine serves a single `model` now. A file
+                    // that still carries `model_ac` keeps the model it ran
+                    // on the GPU (the accurate one) unless the device was
+                    // forced to CPU, where the lighter battery model was
+                    // the one actually serving. The retired keys are
+                    // removed so a config written by this version is
+                    // exactly what the Settings page shows.
+                    let ac = ini.get_from(Some(SECTION), "model_ac").map(str::to_string);
+                    let bat = ini
+                        .get_from(Some(SECTION), "model_battery")
+                        .map(str::to_string);
+                    if ac.is_some() || bat.is_some() {
+                        let forced_cpu = ini.get_from(Some(SECTION), "device") == Some("cpu");
+                        let keep = if forced_cpu { bat.clone() } else { ac.clone() }
+                            .filter(|m| !m.is_empty())
+                            .or_else(|| ac.clone().filter(|m| !m.is_empty()))
+                            .or_else(|| bat.clone().filter(|m| !m.is_empty()));
+                        if let Some(model) = keep {
+                            ini.set_to(Some(SECTION), "model".to_string(), model);
+                        }
+                        for key in ["model_ac", "model_battery", "treat_as_desktop"] {
+                            ini.delete_from(Some(SECTION), key);
+                        }
                         changed = true;
                     }
                     for (key, value) in &defaults {
@@ -279,8 +300,7 @@ mod tests {
         assert_eq!(cfg.get("panel_pos"), "", "no remembered position yet");
         assert_eq!(cfg.get("device"), "auto");
         assert_eq!(cfg.get("compute_type"), "int8");
-        assert_eq!(cfg.get("model_battery"), "base.en");
-        assert_eq!(cfg.get("model_ac"), "small.en");
+        assert_eq!(cfg.get("model"), "base.en");
         assert_eq!(cfg.get("model"), "base.en");
         assert_eq!(cfg.get("mic_name"), "");
         assert_eq!(cfg.get("sound_volume"), "1.0");
@@ -325,7 +345,7 @@ mod tests {
         assert_eq!(cfg.get("theme"), "dark");
         assert_eq!(cfg.get("mic_name"), "USB Microphone");
         assert!(!cfg.get_bool("save_transcripts"));
-        assert_eq!(cfg.get("model_battery"), "base.en", "other keys untouched");
+        assert_eq!(cfg.get("model"), "base.en", "other keys untouched");
     }
 
     #[test]
@@ -378,11 +398,43 @@ mod tests {
         fs::write(&path, "[general]\ntheme = light\n").unwrap();
         let cfg = ConfigStore::load(path, dir.path());
         assert_eq!(cfg.get("theme"), "light", "existing value preserved");
-        assert_eq!(cfg.get("model_ac"), "small.en", "missing key backfilled");
+        assert_eq!(cfg.get("model"), "base.en", "missing key backfilled");
         assert_eq!(cfg.get("pill_position"), "bottom", "pill keys backfilled");
         assert_eq!(cfg.get("pill_padding"), "110", "pill keys backfilled");
         let raw = fs::read_to_string(cfg.path()).unwrap();
         assert!(raw.contains("dictation_hotkey"), "backfill was persisted");
+    }
+
+    /// The plugged-in/battery pair collapses into the single `model` key:
+    /// the GPU-side model wins unless the device was forced to CPU, and
+    /// the retired keys leave the file.
+    #[test]
+    fn model_pair_migrates_to_the_single_model() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.ini");
+        fs::write(
+            &path,
+            "[general]\nmodel = base.en\nmodel_battery = small.en\nmodel_ac = large-v3-turbo\ndevice = auto\ntreat_as_desktop = false\n",
+        )
+        .unwrap();
+        let cfg = ConfigStore::load(path.clone(), dir.path());
+        assert_eq!(cfg.get("model"), "large-v3-turbo");
+        let raw = fs::read_to_string(&path).unwrap();
+        for gone in ["model_ac", "model_battery", "treat_as_desktop"] {
+            assert!(!raw.contains(gone), "{gone} removed from the file");
+        }
+        // forced CPU: the battery model was the one serving
+        fs::write(
+            &path,
+            "[general]\nmodel = base.en\nmodel_battery = small.en\nmodel_ac = large-v3-turbo\ndevice = cpu\n",
+        )
+        .unwrap();
+        let cfg = ConfigStore::load(path.clone(), dir.path());
+        assert_eq!(cfg.get("model"), "small.en");
+        // an already-migrated file is left alone
+        fs::write(&path, "[general]\nmodel = tiny.en\ndevice = auto\n").unwrap();
+        let cfg = ConfigStore::load(path, dir.path());
+        assert_eq!(cfg.get("model"), "tiny.en");
     }
 
     #[test]

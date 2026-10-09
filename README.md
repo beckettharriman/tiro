@@ -56,18 +56,17 @@ All four are rebindable.
 
 There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit. On a Mac it lives in the menu bar.
 
-## Engine, GPU, laptop power savings
+## Engine and GPU
 
 Tiro works out what machine it's on at startup and shows only the settings that apply.
 
 | Machine | What you get |
 |---|---|
-| Laptop, discrete GPU | Auto Switch: GPU and the bigger model plugged in, CPU and the lighter one on battery |
-| Laptop, integrated or Apple Silicon | Stays on the GPU, just swaps the model |
-| Desktop | One compute row, one model, no battery settings |
-| No usable GPU | None of it shows up |
+| A usable GPU (discrete, integrated or Apple Silicon) | Runs on the graphics card. Compute device: Auto, CPU or GPU, and one model |
+| More than one GPU | A Graphics device picker on top |
+| No usable GPU | Runs on the processor; none of the GPU settings show up |
 
-The same install should do the right thing on every kind of machine without you configuring it. A desktop just uses the GPU and never thinks about batteries, because it doesn't have one. A laptop shouldn't burn power on the discrete card to transcribe one sentence, so on battery it drops to the CPU and a lighter model, and every bit of GPU work lives in a child process that exits when it's done, because a GPU context held open inside a long lived app keeps that card awake and costs you watts all day. A machine with no usable GPU shouldn't be shown settings about one at all.
+Every bit of GPU work lives in a child process that exits when it's done, because a GPU context held open inside a long lived app keeps that card awake and costs you watts all day. Earlier versions also switched between the GPU and the CPU on the power source; that is gone. It kept the engine in transition on laptops and confused more people than it helped, so now Auto means the GPU when there is one, and the engine stays put.
 
 ## Nothing gets lost
 

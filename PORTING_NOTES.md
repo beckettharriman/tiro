@@ -254,3 +254,11 @@ from the original in these ways:
   stop-and-paste-at-cursor); the finishing key picks the destination. There is
   no replay-last-take action. (Not in the original at all — post-parity
   feature.)
+- **No AC/battery switching** (0.2): the original's power-source policy
+  (GPU + the bigger model plugged in, CPU + the lighter one on battery,
+  `treat_as_desktop`) is removed. `device` is auto | cpu | cuda, Auto means
+  the GPU whenever a usable one exists, and there is one `model` key.
+  `model_ac` / `model_battery` / `treat_as_desktop` are migrated once and
+  dropped from the file. The GPU-worker child and the never-touch-the-GPU
+  rule for the main process stay (§6 still holds for those). The full
+  power policy is preserved on the `stash/battery-auto-switch` branch.
