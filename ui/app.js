@@ -784,10 +784,10 @@
   });
 
   /* ── expand / collapse: the OS window never moves or resizes here — on
-     Linux it is permanently at the expanded footprint (X11 cannot apply a
-     move+resize atomically, which made the old native choreography flash
-     the glass sideways), and the backend keeps the window's mouse-input
-     shape matched to the glass so the transparent margin never eats
+     Linux and Windows it is permanently at the expanded footprint (a
+     native move+resize under the glass flashed it sideways on both), and
+     the backend keeps the window's mouse-input shape (X) or window region
+     (Win32) matched to the glass so the transparent margin never eats
      clicks. Everything the eye tracks is CSS inside the fixed window:
        t=0       .adv toggles the 520 ms width transition on the glass; on
                  expand `.swap` holds the advanced area back while the
@@ -797,21 +797,22 @@
        t=160 ms  content swap: the other body fades in (existing advIn);
        settle    the history list may (re)render — never mid-transition
                  (see afterSettle).
-     `set_expanded` is just the input-shape notify hook on Linux (and the
-     native resize on Windows, where the window still tracks the glass). */
+     `set_expanded` is just the input-shape / region notify hook on Linux
+     and Windows (and the native resize on macOS, where the window still
+     tracks the glass). */
   const expandBtn = $("expandBtn");
   let advTimer = null;
   let advGen = 0;
-  /* Windows and macOS resize the OS window to the glass (Linux keeps a
-     fixed footprint and only retargets its input shape). On those the
-     native resize must land BEFORE the width transition starts: a window
+  /* macOS resizes the OS window to the glass (Linux and Windows keep a
+     fixed footprint and only retarget input). There the native resize
+     must land BEFORE the width transition starts: a window
      that grows under a running animation forces the webview to rebuild
      its surface and re-lay out mid-transition, which is what made the
      expand look choppy. The window grows leftward with its top-right
      corner pinned and the glass hugs the right edge, so the resize alone
      changes nothing the eye can see; the glass then animates inside a
      window that is already its final size. */
-  const nativeResize = bridgeReady() && !/Linux/.test(navigator.platform);
+  const nativeResize = bridgeReady() && /Mac/.test(navigator.platform);
   function afterNativeResize(fn) {
     if (!nativeResize) { fn(); return; }
     let done = false;

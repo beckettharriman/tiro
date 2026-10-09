@@ -42,12 +42,12 @@ body{
   -webkit-font-smoothing:antialiased;
   overflow:hidden;
   background:transparent;              /* frameless transparent OS window */
-  /* right-anchor the glass: on Linux the OS window is permanently at the
-     expanded footprint and only the glass animates width inside it (the
-     backend shapes mouse input down to the glass rect while compact); on
-     Windows the window still resizes natively around the same right-fixed
-     anchor — either way the surface hugs the transparent window's right
-     edge throughout */
+  /* right-anchor the glass: on Linux and Windows the OS window is
+     permanently at the expanded footprint and only the glass animates
+     width inside it (the backend shapes mouse input down to the glass rect
+     while compact); on macOS the window still resizes natively around the
+     same right-fixed anchor — either way the surface hugs the transparent
+     window's right edge throughout */
   display:flex; justify-content:flex-end;
 }
 a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }

@@ -40,11 +40,11 @@ const SAVE_DEBOUNCE_MS: u64 = 800;
 pub struct Placement {
     pinned: AtomicBool,
     /// Last known on-screen position of the panel GLASS — the compact
-    /// 400x560 visible surface, physical px. On Windows this equals the
+    /// 400x560 visible surface, physical px. On macOS this equals the
     /// window's outer origin (the window always matches the glass); on
-    /// Linux the window is permanently at the expanded footprint and the
-    /// glass hugs its right edge, so window x = glass x − the compact
-    /// offset (see `glass_offset_x`). Stored as the glass rect so configs
+    /// Linux and Windows the window is permanently at the expanded
+    /// footprint and the glass hugs its right edge, so window x = glass x
+    /// − the compact offset (see `glass_offset_x`). Stored as the glass rect so configs
     /// written by the old 400-wide-window builds keep rendering the glass
     /// in exactly the same screen spot. Seeded from config at startup,
     /// refreshed by every Moved event while the panel is visible, and
@@ -55,10 +55,10 @@ pub struct Placement {
     /// One-time guard for `init_panel_tracking`.
     tracking: AtomicBool,
     /// Whether the UI is currently in the expanded (advanced) state. On
-    /// Linux this drives the input shape (the window itself never
-    /// resizes); on Windows it is what the native resize is coming FROM,
-    /// owned here because geometry queries on an unmapped window are
-    /// unreliable.
+    /// Linux and Windows this drives the input shape / window region (the
+    /// window itself never resizes); on macOS it is what the native resize
+    /// is coming FROM, owned here because geometry queries on an unmapped
+    /// window are unreliable.
     expanded: AtomicBool,
 }
 
@@ -382,10 +382,10 @@ pub const PANEL_W_EXPANDED: u32 = 800;
 pub const PANEL_H: u32 = 560;
 
 /// Physical-px x offset from the panel WINDOW's left edge to the COMPACT
-/// glass left edge. With the fixed expanded footprint (Linux) the glass
-/// hugs the window's right edge, so the compact glass sits
+/// glass left edge. With the fixed expanded footprint (Linux, Windows) the
+/// glass hugs the window's right edge, so the compact glass sits
 /// (expanded − compact) logical px in; where the window still resizes
-/// natively to match the glass (Windows) the offset is zero. One rounding
+/// natively to match the glass (macOS) the offset is zero. One rounding
 /// of the whole offset, so glass↔window conversions round-trip exactly at
 /// any fractional scale. Pure, extracted for tests.
 pub(crate) fn glass_offset_x(fixed_footprint: bool, scale: f64) -> i32 {
@@ -395,10 +395,11 @@ pub(crate) fn glass_offset_x(fixed_footprint: bool, scale: f64) -> i32 {
     ((f64::from(PANEL_W_EXPANDED) - f64::from(PANEL_W_COMPACT)) * scale).round() as i32
 }
 
-/// This build's compact-glass offset: the footprint is fixed on Linux only
-/// (X11's non-atomic move+resize is the reason — see `set_panel_expanded`).
+/// This build's compact-glass offset: the footprint is fixed on Linux and
+/// Windows (a native resize under the glass shows a stale surface at the
+/// wrong spot for a frame or more on both — see `set_panel_expanded`).
 fn compact_glass_offset_x(scale: f64) -> i32 {
-    glass_offset_x(cfg!(target_os = "linux"), scale)
+    glass_offset_x(cfg!(any(target_os = "linux", windows)), scale)
 }
 
 /// The compact glass rect's physical size at `scale`.
@@ -486,20 +487,104 @@ fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
 /// area's left edge that the expanded surface would not fit (see
 /// `clamp_expanded_into_work_area`).
 ///
-/// Windows: keeps the original native resize path — instant resize with
-/// the min==max constraints moved direction-aware, re-anchored so the
-/// TOP-RIGHT corner stays put. DWM applies position+size in one
-/// SetWindowPos, so the Linux failure mode does not exist there, and a
-/// window that always matches the glass needs no input-shape counterpart
-/// (per-pixel hit-testing on Win32 would be its own project).
+/// Windows: the same fixed footprint. The native resize it used to do
+/// (size, then position, then WebView2 catching up with the new bounds)
+/// put the glass on screen at the wrong spot on both ends of the motion,
+/// measured with Desktop Duplication: the compact glass drawn a full
+/// glass-width left of its place for ~70 ms at the start of every expand,
+/// and the glass flashing ~460 px right for a frame at the end of every
+/// collapse. A window region stands in for the X input shape: compact, it
+/// is the glass rect, so the transparent margin is no part of the window
+/// at all and clicks there reach whatever is behind; expanded, it is
+/// removed (see `apply_panel_window_region`). Changing a region never
+/// resizes the webview, so nothing re-lays out under the animation.
+///
+/// macOS keeps the native resize path — instant resize with the min==max
+/// constraints moved direction-aware, re-anchored so the TOP-RIGHT corner
+/// stays put.
 pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         #[cfg(target_os = "linux")]
         set_panel_expanded_linux(&app, on);
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(windows)]
+        set_panel_expanded_windows(&app, on);
+        #[cfg(target_os = "macos")]
         set_panel_expanded_native(&app, on);
     });
+}
+
+/// Windows body of `set_panel_expanded`: bookkeeping, the work-area clamp
+/// (shared with Linux) and the window region. Main thread only.
+#[cfg(windows)]
+fn set_panel_expanded_windows(app: &AppHandle, on: bool) {
+    let was = state(app).expanded.swap(on, Ordering::SeqCst);
+    if on && !was {
+        clamp_expanded_into_work_area(app);
+    }
+    apply_panel_window_region(app);
+}
+
+/// The compact glass rect inside a panel window of physical size
+/// (win_w, win_h): the right-hand compact width, full height. Window
+/// coordinates (SetWindowRgn's), physical px. Pure, extracted for tests.
+#[cfg(any(windows, test))]
+pub(crate) fn compact_region_rect(win_w: i32, win_h: i32, scale: f64) -> (i32, i32, i32, i32) {
+    let glass_w = (f64::from(PANEL_W_COMPACT) * scale).round() as i32;
+    ((win_w - glass_w).max(0), 0, win_w, win_h)
+}
+
+/// Clip the panel window to the glass while compact; remove the clip while
+/// expanded. A region is both what DWM shows and what hit-tests, for the
+/// window and its WebView2 child alike, so a click on the transparent
+/// margin of a compact panel lands on the window behind it (an
+/// HTTRANSPARENT hit-test would only forward it within this thread).
+/// Main thread only.
+#[cfg(windows)]
+fn apply_panel_window_region(app: &AppHandle) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+    let Some(w) = app.get_webview_window("panel") else {
+        return;
+    };
+    let (Ok(hwnd), Ok(size)) = (w.hwnd(), w.outer_size()) else {
+        return;
+    };
+    let hwnd = hwnd.0 as windows_sys::Win32::Foundation::HWND;
+    if state(app).expanded.load(Ordering::SeqCst) {
+        // SAFETY: a valid top-level HWND; a null region removes the clip.
+        unsafe { SetWindowRgn(hwnd, std::ptr::null_mut(), 1) };
+        return;
+    }
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let (l, t, r, b) = compact_region_rect(size.width as i32, size.height as i32, scale);
+    // SAFETY: plain GDI calls on a valid HWND. On success the system owns
+    // the region; on failure it is still ours to free.
+    unsafe {
+        let rgn = CreateRectRgn(l, t, r, b);
+        if !rgn.is_null() && SetWindowRgn(hwnd, rgn, 1) == 0 {
+            DeleteObject(rgn);
+        }
+    }
+}
+
+/// Windows counterpart of `panel_input_fixup`: the region is in physical
+/// px, so re-derive it whenever the window's physical size can change (a
+/// move to a monitor with another scale), and once now for the boot state.
+#[cfg(windows)]
+pub fn panel_region_fixup(app: &tauri::App) {
+    let Some(panel) = app.webview_windows().get("panel").cloned() else {
+        return;
+    };
+    let handle = app.handle().clone();
+    panel.on_window_event(move |ev| {
+        if matches!(
+            ev,
+            tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+        ) {
+            apply_panel_window_region(&handle);
+        }
+    });
+    apply_panel_window_region(app.handle());
 }
 
 /// Linux body of `set_panel_expanded`: bookkeeping, the work-area clamp,
@@ -529,8 +614,9 @@ fn set_panel_expanded_linux(app: &AppHandle, on: bool) {
 /// an expand-clamp cycle the compact glass keeps the new right edge.
 /// Here the window simply never moves on collapse, which lands the
 /// glass in exactly that spot; `panel_pos` is updated at the slide so
-/// config and the reposition burst agree.
-#[cfg(target_os = "linux")]
+/// config and the reposition burst agree. Windows shares this as is: one
+/// SetWindowPos move, no resize.
+#[cfg(any(target_os = "linux", windows))]
 fn clamp_expanded_into_work_area(app: &AppHandle) {
     let Some(w) = app.get_webview_window("panel") else {
         return;
@@ -568,7 +654,7 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
     }
 }
 
-/// Windows/macOS body of `set_panel_expanded`: native window resizing.
+/// macOS body of `set_panel_expanded`: native window resizing.
 /// The resize is deliberately INSTANT in both directions; the 520 ms
 /// motion the eye tracks is the CSS width transition on the glass, which
 /// app.js orders around this call so the window never moves mid-animation.
@@ -576,7 +662,7 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
 /// is what keeps a `resizable: true` frameless window fixed); the
 /// constraints move with the size, direction-aware so min never exceeds
 /// max in between. Main thread only.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn set_panel_expanded_native(app: &AppHandle, on: bool) {
     let Some(w) = app.get_webview_window("panel") else {
         return;
@@ -1083,6 +1169,19 @@ mod tests {
                 (0, 0, 800 * scale, 560 * scale)
             );
         }
+    }
+
+    #[test]
+    fn window_region_is_the_compact_glass() {
+        // physical px: the right-hand glass of an 800x560-logical window
+        assert_eq!(compact_region_rect(800, 560, 1.0), (400, 0, 800, 560));
+        assert_eq!(compact_region_rect(1200, 840, 1.5), (600, 0, 1200, 840));
+        // fractional scale: the glass width rounds once and the region
+        // still ends exactly at the window's right edge
+        assert_eq!(compact_region_rect(1000, 700, 1.25), (500, 0, 1000, 700));
+        assert_eq!(compact_region_rect(1064, 745, 1.33), (532, 0, 1064, 745));
+        // a window narrower than the glass is never given a negative left
+        assert_eq!(compact_region_rect(300, 560, 1.0), (0, 0, 300, 560));
     }
 
     #[test]
