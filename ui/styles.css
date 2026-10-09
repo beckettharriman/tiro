@@ -188,6 +188,47 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 .mic-item[aria-selected="true"] svg{ opacity:.9; }
 @media (prefers-reduced-motion: reduce){ .mic-menu{ transition-duration:1ms; } }
 
+/* import (transcribe a file): a round ghost matching the record button's
+   footprint, sitting between the mic capsule and the record button */
+.filebtn{
+  width:36px; height:36px; border-radius:50%;
+  border:0.5px solid var(--hairline);
+  background:rgba(var(--ink),.05);
+  color:rgba(var(--ink),.72);
+}
+.filebtn:hover{ background:rgba(var(--ink),.11); color:rgba(var(--ink),.92); }
+.filebtn svg{ width:15px; height:15px; }
+.filebtn:disabled{ opacity:.4; pointer-events:none; }
+.panel.recording .filebtn{ opacity:.35; pointer-events:none; }
+
+/* import strip: lives above the list while a file is decoding /
+   transcribing (a 30-minute file takes minutes — the pill alone is not
+   enough feedback), and carries the reason when an import fails */
+.import{
+  display:none; align-items:center; gap:var(--s-2);
+  margin: 0 var(--s-4) var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius:var(--r-btn);
+  border:0.5px solid var(--hairline);
+  background:rgba(var(--ink),.05);
+  font-size:12px; line-height:1.4; letter-spacing:-0.004em;
+  color:rgba(var(--ink),.72);
+  min-width:0;
+}
+.panel.importing .import{ display:flex; animation: land var(--t-med) var(--ease) both; }
+.adv-body .import{ margin: 0 var(--s-1) var(--s-4); }
+.import .spin{ width:13px; height:13px; flex:none; opacity:.8; animation: importSpin 900ms linear infinite; }
+.import.err .spin{ display:none; }
+.import .import-name{ font-weight:600; color:rgba(var(--ink),.90); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.import .import-sub{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.import.err{ border-color:rgba(var(--ink),.22); }
+.import.err .import-sub{ white-space:normal; }
+.import .ghost{ width:22px; height:22px; flex:none; }
+.import .ghost svg{ width:11px; height:11px; }
+@keyframes importSpin{ to{ transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){ .import .spin{ animation:none; } }
+.empty .drophint{ font-size:12px; color:rgba(var(--ink),.40); margin-top:calc(-1 * var(--s-3)); }
+
 .recbtn{
   appearance:none; flex:none; cursor:pointer;
   width:36px; height:36px; border-radius:50%;

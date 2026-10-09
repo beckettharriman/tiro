@@ -124,6 +124,33 @@ Examples: GNOME → Settings → Keyboard → Custom Shortcuts; KDE → System
 Settings → Shortcuts → Add Command; sway/hyprland → `bindsym`/`bind`
 to `tiro --toggle`.
 
+## Transcribing a file headless
+
+`tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]`
+decodes any file ffmpeg can read (mp3, m4a, ogg, flac, wav, a video's
+audio track, ...) to the 16 kHz mono buffer a live take uses and runs it
+through the same engine code the app serves dictation with: the CPU
+model in-process, or the `tiro-gpu-worker` child on `gpu`. The verbatim
+transcript goes to stdout; everything else goes to stderr (which a
+release build sends to `tiro.log` in the app dir, like the other test
+flags). The model defaults to the config's, beam to the live policy (GPU
+5, CPU 1); a model that is not installed downloads first. Needs `ffmpeg`
+on PATH (or `FFMPEG=/path/to/ffmpeg`).
+
+`scripts/transcribe-file.sh <file-or-url> [--model NAME] [--device gpu|cpu] [--out DIR]`
+wraps it: a YouTube (or any yt-dlp) URL is fetched as an mp3 first, and
+the result lands as `<out>/<stem>.txt` (text), `.md` (text with a header:
+source, model, device, timing) and `.log` (the run's diagnostics).
+
+```sh
+pipx install yt-dlp                                  # URLs only
+scripts/transcribe-file.sh talk.m4a --model large-v3-turbo --device gpu
+scripts/transcribe-file.sh "https://www.youtube.com/watch?v=..." --device gpu --out ~/transcripts
+```
+
+The panel's file button (and dropping a file on the panel) is the same
+path with the app's serving engine: see `docs/mp3-upload-idea.md`.
+
 Rebinding a hotkey in the panel re-runs the portal bind (the portal has
 no unbind, so Tiro closes the old session and binds a fresh one); the
 new combo is offered as the preferred trigger, which KDE accepts without

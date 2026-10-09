@@ -468,6 +468,13 @@ pub fn get_state(app: &AppHandle) -> Value {
         "settings": settings,
         "engine": flow::engine_dict(&ctx),
         "hardware": hardware,
+        // Whether the Import (file) path can work at all: ffmpeg does the
+        // decoding, so without it the button explains itself instead of
+        // failing on every click.
+        "import": match crate::import::ffmpeg_status() {
+            Ok(v) => json!({ "available": true, "ffmpeg": v }),
+            Err(e) => json!({ "available": false, "reason": e }),
+        },
         "mics": audio::list_mic_names(),
         "shortcuts": shortcuts,
         "theme": theme,
@@ -789,6 +796,42 @@ pub fn pick_folder(app: &AppHandle) -> Option<Value> {
     let ctx = app.state::<AppCtx>();
     lock(&ctx.cfg).set("vault_dir", &path);
     Some(json!({ "path": path }))
+}
+
+/// `transcribe_file`: the panel's Import button. Without a path, open the
+/// native file picker (audio and video first, any file allowed — ffmpeg
+/// decides what it can decode); then hand the file to the take pipeline
+/// (`flow::transcribe_file`). Replies `{ok, name, path}`, `{ok: false,
+/// cancelled: true}` for a dismissed picker, or `{ok: false, error}`.
+pub fn transcribe_file(app: &AppHandle, path: Option<&str>) -> Value {
+    use tauri_plugin_dialog::DialogExt;
+    let path = match path {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => {
+            let picked = app
+                .dialog()
+                .file()
+                .set_title("Transcribe an audio file")
+                .add_filter(
+                    "Audio & video",
+                    &[
+                        "mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "wma", "aiff",
+                        "webm", "mp4", "mkv", "mov", "m4v",
+                    ],
+                )
+                .add_filter("All files", &["*"])
+                .blocking_pick_file();
+            match picked.map(|p| p.into_path()) {
+                Some(Ok(p)) => p,
+                _ => return json!({ "ok": false, "cancelled": true }),
+            }
+        }
+    };
+    let name = crate::import::file_label(&path);
+    match flow::transcribe_file(app, path.clone()) {
+        Ok(()) => json!({ "ok": true, "name": name, "path": path.to_string_lossy() }),
+        Err(e) => json!({ "ok": false, "name": name, "error": e }),
+    }
 }
 
 /// `rebind_shortcut`: validate + persist a new hotkey, then re-register all

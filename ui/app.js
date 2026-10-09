@@ -250,6 +250,29 @@
       return Promise.resolve(null);
     },
     cancel_record() { return Promise.resolve(null); },
+    transcribe_file(path) {
+      // preview: a "picked" file walks the same phases the backend pushes
+      const name = path ? String(path).split(/[\\/]/).pop() : "standup-2026-09-23.m4a";
+      const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
+      push({ phase: "decoding", name: name });
+      setTimeout(() => push({ phase: "transcribing", name: name, secs: 724 }), 700);
+      setTimeout(() => {
+        const now = new Date();
+        let hh = now.getHours();
+        const ap = hh >= 12 ? "PM" : "AM"; hh = hh % 12 || 12;
+        if (window.tiroAddEntry) {
+          window.tiroAddEntry({
+            id: "f" + Date.now(),
+            clock: hh + ":" + String(now.getMinutes()).padStart(2, "0") + " " + ap,
+            dur: "12:04",
+            mic: name,
+            text: "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers."
+          });
+        }
+        push({ phase: "done", name: name, secs: 724 });
+      }, 2600);
+      return Promise.resolve({ ok: true, name: name });
+    },
     set_pin() { return Promise.resolve(null); },
     set_expanded() { return Promise.resolve(null); },
     ui_log() { return Promise.resolve(null); },
@@ -324,6 +347,9 @@
     shortcuts: {},
     theme: "dark",
     recording: false,
+    /* file import: can it work (ffmpeg present), and what is in flight */
+    importer: { available: true, reason: "" },
+    import: { phase: "idle", name: "", secs: 0, error: "" },
     pinned: false,
     adv: false,
     view: "settings",
@@ -1495,6 +1521,68 @@
   $("recBtn2").addEventListener("click", onRecord);
 
   /* ════════════════════════════════════════════════════════════════════
+     IMPORT (transcribe a file)
+     The file button opens the native picker (a drop on the panel skips
+     it); the backend decodes with ffmpeg and runs the take pipeline, and
+     pushes progress into window.tiroSetImport. The strip above the list
+     shows the phase — a long file sits in "transcribing" for minutes, so
+     the pill alone is not enough — and the reason when an import fails.
+     ════════════════════════════════════════════════════════════════════ */
+  const importStrips = Array.from(document.querySelectorAll(".import"));
+  function importBusy() {
+    return App.import.phase === "decoding" || App.import.phase === "transcribing";
+  }
+  function fmtSecs(s) {
+    s = Math.round(Number(s) || 0);
+    const m = Math.floor(s / 60), r = String(s % 60).padStart(2, "0");
+    return m >= 60 ? Math.floor(m / 60) + ":" + String(m % 60).padStart(2, "0") + ":" + r : m + ":" + r;
+  }
+  let importClear;
+  function renderImport() {
+    const p = App.import, busy = importBusy(), err = p.phase === "error";
+    panel.classList.toggle("importing", busy || err);
+    let sub = "";
+    if (p.phase === "decoding") sub = "Decoding…";
+    else if (p.phase === "transcribing") {
+      sub = (p.secs ? fmtSecs(p.secs) + " · " : "") + "Transcribing on " + (App.engine.device || "CPU") + "…";
+    } else if (err) sub = p.error || "Import failed";
+    importStrips.forEach((strip) => {
+      strip.classList.toggle("err", err);
+      strip.querySelector(".import-name").textContent = p.name || "";
+      strip.querySelector(".import-sub").textContent = sub;
+      strip.querySelector(".import-dismiss").style.display = busy ? "none" : "";
+    });
+    ["importBtn", "importBtn2"].forEach((id) => {
+      const b = $(id);
+      b.disabled = busy || !App.importer.available;
+      b.title = App.importer.available
+        ? "Transcribe an audio file"
+        : "Install ffmpeg to transcribe files" + (App.importer.reason ? " — " + App.importer.reason : "");
+    });
+    clearTimeout(importClear);
+    if (err) importClear = setTimeout(() => { App.import = { phase: "idle" }; renderImport(); }, 8000);
+  }
+  function onImport() {
+    if (importBusy() || App.recording) return;
+    Promise.resolve(api.transcribe_file(null)).then((r) => {
+      if (r && r.ok === false && !r.cancelled) {
+        App.import = { phase: "error", name: r.name || "", error: r.error || "Import failed" };
+        renderImport();
+      }
+    }).catch((e) => {
+      App.import = { phase: "error", name: "", error: String(e) };
+      renderImport();
+    });
+  }
+  $("importBtn").addEventListener("click", onImport);
+  $("importBtn2").addEventListener("click", onImport);
+  importStrips.forEach((strip) => strip.querySelector(".import-dismiss").addEventListener("click", () => {
+    if (importBusy()) return;
+    App.import = { phase: "idle" };
+    renderImport();
+  }));
+
+  /* ════════════════════════════════════════════════════════════════════
      INPUT LEVEL + TEST
      Real app (bridge live): Test starts a backend monitor on the selected
      mic that pushes real levels (~15/s, the pill's envelope math) into
@@ -1732,6 +1820,7 @@
     if (Array.isArray(state.mics)) App.mics = state.mics;
     if (state.shortcuts) App.shortcuts = state.shortcuts;
     if (state.theme) App.theme = state.theme;
+    if (state.import) App.importer = state.import;
     if (state.effectiveTheme) applyTheme(state.effectiveTheme);
     else applyTheme(App.theme === "light" ? "light" : "dark");
     if (App.settings && typeof App.settings.transparency === "number") {
@@ -1746,6 +1835,7 @@
     renderShortcuts();
     syncSettings();
     updateEngine();
+    renderImport();
     if (App.adv && App.view === "history") afterSettle(renderAdv);
   }
 
@@ -1796,6 +1886,13 @@
     panel.classList.toggle("recording", App.recording);
     $("recBtn").title = App.recording ? "Stop" : "Record";
     $("recBtn2").title = App.recording ? "Stop" : "Record";
+  };
+
+  /* file import progress from the backend (see IMPORT above) */
+  window.tiroSetImport = function (p) {
+    if (!p) return;
+    App.import = { phase: p.phase || "idle", name: p.name || "", secs: p.secs || 0, error: p.error || "" };
+    renderImport();
   };
 
   window.tiroSetStorage = function (obj) {

@@ -1071,6 +1071,103 @@ fn stop_recording(app: &AppHandle, ctx: &AppCtx, paste: bool) {
     std::thread::spawn(move || transcribe_worker(app, take, secs, mic, session));
 }
 
+/// Panel-side import progress (`window.tiroSetImport`): `phase` is
+/// "decoding" | "transcribing" | "done" | "error", with the file `name`,
+/// `secs` once the length is known, and `error` text on failure.
+fn push_import(app: &AppHandle, payload: serde_json::Value) {
+    push_panel(app, "tiroSetImport", payload);
+}
+
+/// Import an audio (or video) file as a take — the "transcribe a file"
+/// idea. ffmpeg decodes it to the 16 kHz f32 mono a mic take is resampled
+/// to, and from that point it IS a take: the same session/cancel
+/// semantics, the same engine (GPU worker or CPU model, whichever serves),
+/// the same vocab prompt, cleanup, corrections, clipboard copy, transcript
+/// log and panel entry, all through `transcribe_worker`. The file name
+/// rides in the mic column of the log.
+///
+/// Refused while a recording or a transcription is in flight: the session
+/// bump would supersede the live take and its worker would discard it
+/// (STATE-2 in `transcribe_worker`), and a file must never cost a take.
+/// Decoding runs on the spawned thread (a long file takes a second or
+/// two); the panel follows along through `push_import`.
+pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    if ctx.recording.load(Ordering::SeqCst) || ctx.busy.load(Ordering::SeqCst) {
+        return Err("Stop the recording first".into());
+    }
+    if ctx.xscribing.load(Ordering::SeqCst) {
+        return Err("Still transcribing the last take".into());
+    }
+    if !path.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    crate::import::ffmpeg_status()?;
+    let name = crate::import::file_label(&path);
+    // A fresh session like `stop_recording`: never pastes, clears a stale
+    // cancel, and marks a transcription in flight.
+    let session = ctx.session.fetch_add(1, Ordering::SeqCst) + 1;
+    ctx.paste_session.store(0, Ordering::SeqCst);
+    ctx.cancel_xscribe.store(false, Ordering::SeqCst);
+    ctx.xscribing.store(true, Ordering::SeqCst);
+    show_pill(app, &ctx, "transcribing", None);
+    crate::set_tray_state(app, "transcribing");
+    push_import(app, json!({ "phase": "decoding", "name": name }));
+    eprintln!("import: decoding {}", path.display());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let ctx = app.state::<AppCtx>();
+        let decoded = crate::import::decode_to_16k(&path).and_then(|s| {
+            if audio::too_short(s.len(), audio::SAMPLE_RATE) {
+                Err("no audio to transcribe (shorter than 0.3 s)".to_string())
+            } else {
+                Ok(s)
+            }
+        });
+        let samples = match decoded {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("import failed: {e}");
+                if ctx.session.load(Ordering::SeqCst) == session {
+                    ctx.xscribing.store(false, Ordering::SeqCst);
+                    crate::set_tray_state(&app, "idle");
+                    play(&ctx, "error");
+                    show_pill(&app, &ctx, "error", Some("Import failed"));
+                    arm_pill_hide(&app, &ctx, 2000);
+                }
+                push_import(&app, json!({ "phase": "error", "name": name, "error": e }));
+                return;
+            }
+        };
+        let secs = samples.len() as f64 / f64::from(audio::SAMPLE_RATE);
+        eprintln!("import: {name} decoded, {secs:.1} s of audio");
+        push_import(
+            &app,
+            json!({ "phase": "transcribing", "name": name, "secs": secs }),
+        );
+        let take = Take {
+            samples,
+            rate: audio::SAMPLE_RATE,
+            mic_name: name.clone(),
+        };
+        let outcome = transcribe_worker(app.clone(), take, secs, name.clone(), session);
+        let (phase, error) = match outcome {
+            Outcome::Done => ("done", None),
+            Outcome::Empty => ("error", Some("No speech found")),
+            Outcome::Error => ("error", Some("Transcription failed")),
+            Outcome::Model => ("error", Some("Model not ready")),
+            Outcome::CopyFail => ("error", Some("Transcribed, but the clipboard copy failed")),
+            Outcome::Noop => ("error", Some("Cancelled")),
+        };
+        push_import(
+            &app,
+            json!({ "phase": phase, "name": name, "secs": secs, "error": error }),
+        );
+    });
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
 enum Outcome {
     Done,
     Empty,
@@ -1184,7 +1281,7 @@ fn fallback_target(
 /// from the closure maps to an `Outcome`, and a panic anywhere inside it
 /// (whisper bindings, clipboard, log IO) is caught and treated as an error
 /// rather than killing the thread with the pill still showing.
-fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session: u64) {
+fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session: u64) -> Outcome {
     let ctx = app.state::<AppCtx>();
     let mut clean: Option<String> = None;
     let mut rec: Option<store::Rec> = None;
@@ -1387,6 +1484,7 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
         ctx.xscribing.store(false, Ordering::SeqCst);
     }
     finish(&app, &ctx, outcome, clean, rec, is_vault, session);
+    outcome
 }
 
 /// `_finish`: resolve pill/cue/panel after a take, never clobbering a newer

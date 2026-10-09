@@ -42,6 +42,11 @@
       stop_mic_monitor: function () { return invoke("stop_mic_monitor"); },
       set_vocab: function (hotwords, corrections) {
         return invoke("set_vocab", { hotwords: hotwords, corrections: corrections });
+      },
+      /* Import an audio file as a take. No path = open the native picker;
+         a path (from a drop) skips it. */
+      transcribe_file: function (path) {
+        return invoke("transcribe_file", { path: path == null ? null : String(path) });
       }
     }
   };

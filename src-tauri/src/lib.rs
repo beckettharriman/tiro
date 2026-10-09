@@ -16,6 +16,7 @@ pub mod hotkeys;
 #[cfg(target_os = "linux")]
 pub mod hotkeys_portal;
 pub mod hw;
+pub mod import;
 pub mod inject;
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -117,6 +118,16 @@ fn begin_drag(window: WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Option<Value> {
     api::pick_folder(&app)
+}
+
+// Import a file as a take. The native picker blocks and the file check
+// touches disk, so it runs off the event loop like the other dialog/disk
+// commands.
+#[tauri::command]
+async fn transcribe_file(app: tauri::AppHandle, path: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::transcribe_file(&app, path.as_deref()))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -411,6 +422,32 @@ pub fn run() {
         .manage(flow::AppCtx::new())
         .manage(placement::Placement::default())
         .on_window_event(|window, event| {
+            // Drop an audio file on the panel to transcribe it: the Import
+            // button without the picker. One file per drop (one take);
+            // the rest of a multi-drop is ignored on purpose.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() != "panel" {
+                    return;
+                }
+                use tauri::Manager;
+                let app = window.app_handle();
+                if let Some(path) = paths.first() {
+                    let reply = api::transcribe_file(app, Some(&path.to_string_lossy()));
+                    if reply["ok"] != true {
+                        eprintln!("drop import refused: {reply}");
+                        flow::push_panel(
+                            app,
+                            "tiroSetImport",
+                            serde_json::json!({
+                                "phase": "error",
+                                "name": reply["name"],
+                                "error": reply["error"],
+                            }),
+                        );
+                    }
+                }
+                return;
+            }
             // Follow the OS light/dark setting while theme == "system" (the
             // original polled the registry every 20 s; Tauri delivers events).
             if let tauri::WindowEvent::ThemeChanged(theme) = event {
@@ -564,7 +601,8 @@ pub fn run() {
             stop_mic_monitor,
             list_models,
             download_model,
-            cancel_download
+            cancel_download,
+            transcribe_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

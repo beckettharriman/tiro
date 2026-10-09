@@ -151,6 +151,11 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--transcribe-file") {
+        // Any audio/video file -> ffmpeg -> the engine -> text on stdout.
+        tiro_lib::import::transcribe_file_cli(&args, i);
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--transcribe-test") {
         match args.get(i + 1) {
             Some(wav) => tiro_lib::transcribe::transcribe_test(wav),
