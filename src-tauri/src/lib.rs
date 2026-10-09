@@ -492,11 +492,16 @@ pub fn run() {
             //   glass sideways — so booting compact only means shaping
             //   input down to the glass rect (the transparent left margin
             //   must not eat clicks), re-asserted on every realize/map.
-            // - Windows: the native resize path is kept (DWM applies
-            //   move+resize atomically), so this shrinks the window to the
-            //   compact size now, before its first show.
+            // - Windows: the same permanent footprint; the margin watcher
+            //   makes the window click-through while the pointer is over
+            //   the compact panel's transparent margin. See
+            //   placement::watch_panel_margin.
+            // - macOS: the native resize path is kept, so this shrinks the
+            //   window to the compact size now, before its first show.
             #[cfg(target_os = "linux")]
             placement::panel_input_fixup(app);
+            #[cfg(windows)]
+            placement::watch_panel_margin(app);
             placement::pin_webview_zoom(app);
             placement::set_panel_expanded(app.handle(), false);
             // The panel is configured hidden (summoned by hotkey/tray, which

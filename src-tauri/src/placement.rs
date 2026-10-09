@@ -40,11 +40,11 @@ const SAVE_DEBOUNCE_MS: u64 = 800;
 pub struct Placement {
     pinned: AtomicBool,
     /// Last known on-screen position of the panel GLASS — the compact
-    /// 400x560 visible surface, physical px. On Windows this equals the
+    /// 400x560 visible surface, physical px. On macOS this equals the
     /// window's outer origin (the window always matches the glass); on
-    /// Linux the window is permanently at the expanded footprint and the
-    /// glass hugs its right edge, so window x = glass x − the compact
-    /// offset (see `glass_offset_x`). Stored as the glass rect so configs
+    /// Linux and Windows the window is permanently at the expanded
+    /// footprint and the glass hugs its right edge, so window x = glass x
+    /// − the compact offset (see `glass_offset_x`). Stored as the glass rect so configs
     /// written by the old 400-wide-window builds keep rendering the glass
     /// in exactly the same screen spot. Seeded from config at startup,
     /// refreshed by every Moved event while the panel is visible, and
@@ -55,10 +55,10 @@ pub struct Placement {
     /// One-time guard for `init_panel_tracking`.
     tracking: AtomicBool,
     /// Whether the UI is currently in the expanded (advanced) state. On
-    /// Linux this drives the input shape (the window itself never
-    /// resizes); on Windows it is what the native resize is coming FROM,
-    /// owned here because geometry queries on an unmapped window are
-    /// unreliable.
+    /// Linux and Windows this drives the input shape / margin watcher (the
+    /// window itself never resizes); on macOS it is what the native resize
+    /// is coming FROM, owned here because geometry queries on an unmapped
+    /// window are unreliable.
     expanded: AtomicBool,
 }
 
@@ -382,10 +382,10 @@ pub const PANEL_W_EXPANDED: u32 = 800;
 pub const PANEL_H: u32 = 560;
 
 /// Physical-px x offset from the panel WINDOW's left edge to the COMPACT
-/// glass left edge. With the fixed expanded footprint (Linux) the glass
-/// hugs the window's right edge, so the compact glass sits
+/// glass left edge. With the fixed expanded footprint (Linux, Windows) the
+/// glass hugs the window's right edge, so the compact glass sits
 /// (expanded − compact) logical px in; where the window still resizes
-/// natively to match the glass (Windows) the offset is zero. One rounding
+/// natively to match the glass (macOS) the offset is zero. One rounding
 /// of the whole offset, so glass↔window conversions round-trip exactly at
 /// any fractional scale. Pure, extracted for tests.
 pub(crate) fn glass_offset_x(fixed_footprint: bool, scale: f64) -> i32 {
@@ -395,10 +395,11 @@ pub(crate) fn glass_offset_x(fixed_footprint: bool, scale: f64) -> i32 {
     ((f64::from(PANEL_W_EXPANDED) - f64::from(PANEL_W_COMPACT)) * scale).round() as i32
 }
 
-/// This build's compact-glass offset: the footprint is fixed on Linux only
-/// (X11's non-atomic move+resize is the reason — see `set_panel_expanded`).
+/// This build's compact-glass offset: the footprint is fixed on Linux and
+/// Windows (a native resize under the glass shows a stale surface at the
+/// wrong spot for a frame or more on both — see `set_panel_expanded`).
 fn compact_glass_offset_x(scale: f64) -> i32 {
-    glass_offset_x(cfg!(target_os = "linux"), scale)
+    glass_offset_x(cfg!(any(target_os = "linux", windows)), scale)
 }
 
 /// The compact glass rect's physical size at `scale`.
@@ -486,20 +487,122 @@ fn panel_work_area(app: &AppHandle) -> Option<(i32, i32, i32, i32)> {
 /// area's left edge that the expanded surface would not fit (see
 /// `clamp_expanded_into_work_area`).
 ///
-/// Windows: keeps the original native resize path — instant resize with
-/// the min==max constraints moved direction-aware, re-anchored so the
-/// TOP-RIGHT corner stays put. DWM applies position+size in one
-/// SetWindowPos, so the Linux failure mode does not exist there, and a
-/// window that always matches the glass needs no input-shape counterpart
-/// (per-pixel hit-testing on Win32 would be its own project).
+/// Windows: the same fixed footprint. The native resize it used to do
+/// (size, then position, then WebView2 catching up with the new bounds)
+/// put the glass on screen at the wrong spot on both ends of the motion,
+/// measured with Desktop Duplication: the compact glass drawn a full
+/// glass-width left of its place at the start of every expand, and the
+/// glass flashing ~460 px right for a frame at the end of every collapse.
+/// The transparent margin of the compact panel is made click-through by
+/// `watch_panel_margin` instead of an input shape. (A window region did
+/// the same job but made Windows draw a classic frame — caption buttons
+/// and white borders — around the panel.)
+///
+/// macOS keeps the native resize path — instant resize with the min==max
+/// constraints moved direction-aware, re-anchored so the TOP-RIGHT corner
+/// stays put.
 pub fn set_panel_expanded(app: &AppHandle, on: bool) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         #[cfg(target_os = "linux")]
         set_panel_expanded_linux(&app, on);
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(windows)]
+        set_panel_expanded_windows(&app, on);
+        #[cfg(target_os = "macos")]
         set_panel_expanded_native(&app, on);
     });
+}
+
+/// Windows body of `set_panel_expanded`: bookkeeping and the work-area
+/// clamp (shared with Linux). The margin watcher reads `expanded`. Main
+/// thread only.
+#[cfg(windows)]
+fn set_panel_expanded_windows(app: &AppHandle, on: bool) {
+    let was = state(app).expanded.swap(on, Ordering::SeqCst);
+    if on && !was {
+        clamp_expanded_into_work_area(app);
+    }
+}
+
+/// Whether the screen point (x, y) is on the transparent margin of a
+/// compact panel window with rect (left, top, right, bottom): inside the
+/// window, left of the glass, which fills the window's right half
+/// (400 of 800 logical px). Pure, extracted for tests.
+#[cfg(any(windows, test))]
+fn on_compact_margin(x: i32, y: i32, rect: (i32, i32, i32, i32)) -> bool {
+    let (left, top, right, bottom) = rect;
+    let glass_left = right - (right - left) / 2;
+    x >= left && x < glass_left && y >= top && y < bottom
+}
+
+/// Windows: while the panel is compact, its window is still 800 px wide
+/// and the left half is transparent. Clicks there must reach whatever is
+/// behind, so while the pointer is over that margin the window carries
+/// WS_EX_TRANSPARENT | WS_EX_LAYERED (the hit-test-transparent pair) and
+/// at all other times it does not — the window is only ever in that state
+/// while the pointer is somewhere it shows nothing.
+///
+/// The bits are flipped directly rather than through
+/// `set_ignore_cursor_events`: tao applies that by rewriting every window
+/// style and calling ShowWindow(SW_SHOW), which can activate the panel and
+/// take focus from the app being typed in. tao may also rewrite the
+/// extended style itself (pin, summon); the watcher re-asserts each tick.
+///
+/// A polling thread rather than mouse messages: a click-through window
+/// receives none. All calls are thread-safe Win32 queries plus one
+/// SetWindowLongPtr on change; ~40 cheap ticks a second while the panel is
+/// visible, 4 while hidden.
+#[cfg(windows)]
+pub fn watch_panel_margin(app: &tauri::App) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowLongPtrW, GetWindowRect, IsWindowVisible, SetWindowLongPtrW,
+        GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    let Some(panel) = app.webview_windows().get("panel").cloned() else {
+        return;
+    };
+    let Ok(hwnd) = panel.hwnd() else {
+        return;
+    };
+    // HWND is a raw pointer (not Send); the handle value is what crosses
+    let hwnd_value = hwnd.0 as isize;
+    let handle = app.handle().clone();
+    let spawned = std::thread::Builder::new()
+        .name("panel-margin".into())
+        .spawn(move || {
+            let hwnd = hwnd_value as windows_sys::Win32::Foundation::HWND;
+            let bits = (WS_EX_TRANSPARENT | WS_EX_LAYERED) as isize;
+            loop {
+                // SAFETY: plain Win32 queries on a window that lives as
+                // long as the app; failures read as "not on the margin".
+                let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+                let want = visible && !state(&handle).expanded.load(Ordering::SeqCst) && {
+                    let mut pt = POINT { x: 0, y: 0 };
+                    let mut r = RECT {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    };
+                    let known =
+                        unsafe { GetCursorPos(&mut pt) != 0 && GetWindowRect(hwnd, &mut r) != 0 };
+                    known && on_compact_margin(pt.x, pt.y, (r.left, r.top, r.right, r.bottom))
+                };
+                // SAFETY: only the two click-through bits change.
+                unsafe {
+                    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                    let next = if want { ex | bits } else { ex & !bits };
+                    if next != ex {
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(if visible { 25 } else { 250 }));
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!("panel margin watcher unavailable: {e}");
+    }
 }
 
 /// Linux body of `set_panel_expanded`: bookkeeping, the work-area clamp,
@@ -529,8 +632,9 @@ fn set_panel_expanded_linux(app: &AppHandle, on: bool) {
 /// an expand-clamp cycle the compact glass keeps the new right edge.
 /// Here the window simply never moves on collapse, which lands the
 /// glass in exactly that spot; `panel_pos` is updated at the slide so
-/// config and the reposition burst agree.
-#[cfg(target_os = "linux")]
+/// config and the reposition burst agree. Windows shares this as is: one
+/// SetWindowPos move, no resize.
+#[cfg(any(target_os = "linux", windows))]
 fn clamp_expanded_into_work_area(app: &AppHandle) {
     let Some(w) = app.get_webview_window("panel") else {
         return;
@@ -568,7 +672,7 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
     }
 }
 
-/// Windows/macOS body of `set_panel_expanded`: native window resizing.
+/// macOS body of `set_panel_expanded`: native window resizing.
 /// The resize is deliberately INSTANT in both directions; the 520 ms
 /// motion the eye tracks is the CSS width transition on the glass, which
 /// app.js orders around this call so the window never moves mid-animation.
@@ -576,7 +680,7 @@ fn clamp_expanded_into_work_area(app: &AppHandle) {
 /// is what keeps a `resizable: true` frameless window fixed); the
 /// constraints move with the size, direction-aware so min never exceeds
 /// max in between. Main thread only.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn set_panel_expanded_native(app: &AppHandle, on: bool) {
     let Some(w) = app.get_webview_window("panel") else {
         return;
@@ -1083,6 +1187,24 @@ mod tests {
                 (0, 0, 800 * scale, 560 * scale)
             );
         }
+    }
+
+    #[test]
+    fn compact_margin_is_the_left_half_only() {
+        // an 800x560 window at (406, 275): glass from x=806
+        let r = (406, 275, 1206, 835);
+        assert!(on_compact_margin(406, 275, r)); // top-left corner
+        assert!(on_compact_margin(805, 834, r)); // last margin pixel
+        assert!(!on_compact_margin(806, 500, r)); // first glass column
+        assert!(!on_compact_margin(1205, 500, r));
+        // outside the window entirely: never click-through
+        assert!(!on_compact_margin(405, 500, r));
+        assert!(!on_compact_margin(600, 274, r));
+        assert!(!on_compact_margin(600, 835, r));
+        // 150% scale, odd physical width: the glass keeps the larger half
+        let r = (0, 0, 1201, 840);
+        assert!(on_compact_margin(599, 10, r));
+        assert!(!on_compact_margin(601, 10, r));
     }
 
     #[test]
