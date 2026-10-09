@@ -254,23 +254,24 @@ mod windows_impl {
     fn wait_for_clipboard(expected: &str) -> Option<String> {
         let deadline = Instant::now() + Duration::from_millis(CLIPBOARD_WAIT_MS);
         let mut recopied = false;
-        let mut last = String::from("not read");
         loop {
-            match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            let note = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                 Ok(text) if text == expected => return None,
                 Ok(text) => {
-                    last = format!("holds {} chars, expected {}", text.len(), expected.len());
+                    let mut note =
+                        format!("holds {} chars, expected {}", text.len(), expected.len());
                     if !recopied {
                         recopied = true;
                         if let Err(e) = crate::clipboard::copy(expected) {
-                            last = format!("re-copy failed: {e}");
+                            note = format!("re-copy failed: {e}");
                         }
                     }
+                    note
                 }
-                Err(e) => last = format!("read failed: {e}"),
-            }
+                Err(e) => format!("read failed: {e}"),
+            };
             if Instant::now() >= deadline {
-                return Some(last);
+                return Some(note);
             }
             std::thread::sleep(Duration::from_millis(CLIPBOARD_POLL_MS));
         }
