@@ -24,6 +24,9 @@ pub const MIN_TAKE_SECS: f64 = 0.3;
 /// The original tried the device's native rate first, then this chain.
 const FALLBACK_RATES: [u32; 3] = [48_000, 44_100, 16_000];
 
+/// Pause before the single retry when no device would open.
+const OPEN_RETRY_MS: u64 = 400;
+
 // There is deliberately NO ceiling on take length. A 10-minute cap once
 // silently discarded the back half of a 20-minute journal entry — the
 // recording UI kept running while the mic was effectively dead, which is
@@ -42,6 +45,27 @@ const FALLBACK_RATES: [u32; 3] = [48_000, 44_100, 16_000];
 /// neither occurs on other hosts, so this is a no-op on Windows/WASAPI.
 fn is_null_device(name: &str, driver: Option<&str>) -> bool {
     driver == Some("null") || name.starts_with("Discard all samples")
+}
+
+/// A device name lowercased with Windows' instance numbers removed. When
+/// two endpoints would share a name, or a USB device comes back on another
+/// port, Windows numbers it inside the parentheses — "Microphone (3-
+/// MIC_TEST)" can return as "Microphone (4- MIC_TEST)" — so a saved name
+/// would stop matching the very same mic. Pure, extracted for tests.
+pub(crate) fn without_instance_number(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut rest = lower.as_str();
+    while let Some(i) = rest.find('(') {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && rest[digits..].starts_with("- ") {
+            rest = &rest[digits + 2..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn default_rate(device: &Device) -> u32 {
@@ -370,6 +394,14 @@ fn candidates(name_substr: &str) -> Vec<(Device, String, u32)> {
         if !matched.is_empty() {
             return matched;
         }
+        // the same mic under a new Windows instance number
+        let needle = without_instance_number(name_substr);
+        let (matched, rest): (Vec<_>, Vec<_>) = rest
+            .into_iter()
+            .partition(|(_, name, _)| without_instance_number(name).contains(&needle));
+        if !matched.is_empty() {
+            return matched;
+        }
         all = rest;
     }
     default_first(all)
@@ -607,7 +639,23 @@ impl Recording {
     pub fn start(mic_name_substr: &str) -> Result<Self, AudioError> {
         #[cfg(target_os = "macos")]
         crate::macos::ensure_microphone_access().map_err(AudioError)?;
-        let mut last_err = String::from("no input devices");
+        match Self::try_candidates(mic_name_substr) {
+            Ok(recording) => Ok(recording),
+            Err(first) => {
+                // A device that has only just arrived (a USB mic replugged)
+                // can refuse every format for a moment; one more walk after
+                // a short pause costs nothing when it was a real failure.
+                eprintln!("mic open failed ({first}); retrying once");
+                std::thread::sleep(std::time::Duration::from_millis(OPEN_RETRY_MS));
+                Self::try_candidates(mic_name_substr)
+            }
+        }
+    }
+
+    /// One walk over the candidate devices and the rate chain. The error
+    /// names each device that failed and why.
+    fn try_candidates(mic_name_substr: &str) -> Result<Self, AudioError> {
+        let mut failures: Vec<String> = Vec::new();
         for (device, name, native) in candidates(mic_name_substr) {
             let mut rates = vec![native];
             for rate in FALLBACK_RATES {
@@ -615,17 +663,28 @@ impl Recording {
                     rates.push(rate);
                 }
             }
+            let mut errors: Vec<String> = Vec::new();
             for rate in rates {
                 match Self::open(&device, &name, rate) {
                     Ok(recording) => {
                         eprintln!("Recording on '{name}' @ {rate} Hz ({})", recording.format);
                         return Ok(recording);
                     }
-                    Err(err) => last_err = err.0,
+                    Err(err) => {
+                        for e in err.0.split(" | ") {
+                            if !errors.iter().any(|x| x == e) {
+                                errors.push(e.to_string());
+                            }
+                        }
+                    }
                 }
             }
+            failures.push(format!("'{name}': {}", errors.join(" | ")));
         }
-        Err(AudioError(last_err))
+        if failures.is_empty() {
+            return Err(AudioError("no input devices".to_string()));
+        }
+        Err(AudioError(failures.join("; ")))
     }
 
     fn open(device: &Device, name: &str, rate: u32) -> Result<Self, AudioError> {
@@ -661,7 +720,9 @@ impl Recording {
         let frames = Arc::new(Mutex::new(Vec::<f32>::new()));
         let recording = Arc::new(AtomicBool::new(true));
         let level = Arc::new(LevelMeter::new());
-        let mut last_err = String::new();
+        // every distinct failure, not just the last: the last attempt is a
+        // format the host may not even express, which hid the real reason
+        let mut errors: Vec<String> = Vec::new();
         for channels in channel_counts {
             for &format in &formats {
                 let config = StreamConfig {
@@ -696,11 +757,15 @@ impl Recording {
                             format: format_label(format),
                         })
                     }
-                    Err(err) => last_err = err,
+                    Err(err) => {
+                        if !errors.contains(&err) {
+                            errors.push(err);
+                        }
+                    }
                 }
             }
         }
-        Err(AudioError(last_err))
+        Err(AudioError(errors.join(" | ")))
     }
 
     /// Build one typed input stream converting samples to f32 in the
@@ -833,6 +898,30 @@ pub fn record_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_numbers_do_not_change_a_mic_name() {
+        let saved = without_instance_number("Microphone (3- MIC_TEST)");
+        assert_eq!(saved, "microphone (mic_test)");
+        assert_eq!(without_instance_number("Microphone (4- MIC_TEST)"), saved);
+        assert_eq!(without_instance_number("Microphone (MIC_TEST)"), saved);
+        assert_eq!(without_instance_number("Microphone (12- MIC_TEST)"), saved);
+        // other parentheses and digits are left alone
+        assert_eq!(
+            without_instance_number("Microphone Array (AMD Audio Device)"),
+            "microphone array (amd audio device)"
+        );
+        assert_eq!(
+            without_instance_number("Headset (2 channels) (7- USB Audio)"),
+            "headset (2 channels) (usb audio)"
+        );
+        assert_eq!(
+            without_instance_number("Mic (3-band EQ)"),
+            "mic (3-band eq)"
+        );
+        assert_eq!(without_instance_number("Mic (5- "), "mic (");
+        assert_eq!(without_instance_number(""), "");
+    }
 
     #[test]
     fn silence_gate_trims_only_the_ends() {
