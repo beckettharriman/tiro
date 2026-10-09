@@ -293,7 +293,7 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 }
 .showmore:hover{ color:rgba(var(--ink),.85); }
 .entry.clampable .showmore{ display:inline-block; }
-.entry.expanded .txt{ max-height:none; -webkit-mask-image:none; mask-image:none; }
+.entry.expanded .txt.clamped{ max-height:none; -webkit-mask-image:none; mask-image:none; }
 
 @keyframes land{
   0%{ opacity:0; transform:translateY(-10px) scale(.985); }
