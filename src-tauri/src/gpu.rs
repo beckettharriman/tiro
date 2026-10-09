@@ -166,6 +166,16 @@ fn read_frame(stdout: &mut impl Read) -> Result<Value, String> {
     serde_json::from_slice(&payload).map_err(|e| format!("bad worker frame: {e}"))
 }
 
+/// `gpu_worker.err` beside the models folder, i.e. in the app directory
+/// (the worker's own gpu_worker.log is anchored the same way).
+fn worker_stderr_path(models_dir: &Path) -> std::path::PathBuf {
+    models_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+        .join("gpu_worker.err")
+}
+
 impl GpuWorker {
     /// Spawn the worker and wait for its readiness line. `device` is "gpu"
     /// in production; "cpu" lets the protocol be exercised without waking
@@ -195,8 +205,23 @@ impl GpuWorker {
             &gpu_device.to_string(),
         ])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped());
+        // whisper.cpp and ggml narrate the load on stderr (device list,
+        // backend chosen, each buffer allocated). Keep it in gpu_worker.err
+        // next to gpu_worker.log so a worker that never reports ready can
+        // be diagnosed from the files alone; a null stderr hid all of it.
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(worker_stderr_path(models_dir))
+        {
+            Ok(f) => {
+                cmd.stderr(f);
+            }
+            Err(_) => {
+                cmd.stderr(Stdio::null());
+            }
+        }
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("worker spawn failed: {e}"))?;
