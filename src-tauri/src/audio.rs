@@ -423,6 +423,11 @@ fn format_label(format: SampleFormat) -> &'static str {
 /// it to `buf`. Unbounded by design — see the note where a take cap used
 /// to live, above `MIN_TAKE_SECS`. Called from the realtime callback: no
 /// allocation beyond amortized `Vec` growth.
+/// Public twin of `append_mono` for other capture sources.
+pub fn append_mono_frames(buf: &mut Vec<f32>, data: &[f32], channels: u16) {
+    append_mono(buf, data, channels);
+}
+
 fn append_mono(buf: &mut Vec<f32>, data: &[f32], channels: u16) {
     if channels <= 1 {
         buf.extend_from_slice(data);

@@ -151,6 +151,12 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--loopback-test") {
+        // 3 s of system audio -> peak/RMS, the loopback twin of --record-test.
+        let output = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+        tiro_lib::capture::loopback_test(output.as_deref().unwrap_or(""));
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--transcribe-file") {
         // Any audio/video file -> decoder -> the engine -> text on stdout.
         tiro_lib::import::transcribe_file_cli(&args, i);
