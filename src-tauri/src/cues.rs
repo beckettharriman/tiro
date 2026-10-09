@@ -119,9 +119,12 @@ fn cues() -> &'static HashMap<&'static str, Vec<f32>> {
 /// are silently ignored, cues are best-effort.
 fn play_samples(samples: Vec<f32>) {
     std::thread::spawn(move || {
-        let Ok(sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
+        let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
             return;
         };
+        // the drop below is the intended end of every cue, not a warning
+        // worth a tiro.log line per beep
+        sink.log_on_drop(false);
         let secs = samples.len() as f64 / SR_OUT as f64;
         let (Some(channels), Some(rate)) = (NonZero::new(1u16), NonZero::new(SR_OUT)) else {
             return;
