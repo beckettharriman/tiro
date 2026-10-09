@@ -1066,9 +1066,10 @@ pub fn paste_take(app: &AppHandle) {
 /// The portal restore token is read and persisted by the injection layer
 /// itself, through these closures, under its paste lock: two overlapping
 /// finishes must never interleave reads/writes of the single-use token.
-fn inject_paste(app: &AppHandle, ctx: &AppCtx) -> bool {
+fn inject_paste(app: &AppHandle, ctx: &AppCtx, text: &str) -> bool {
     let _ = app; // signature symmetry; the injection needs no window handle
     let result = crate::inject::paste_at_cursor(
+        text,
         || lock(&ctx.cfg).get("portal_restore_token"),
         |t| lock(&ctx.cfg).set("portal_restore_token", t),
     );
@@ -1502,7 +1503,7 @@ fn finish(
         if stale {
             return; // a newer recording owns the pill now
         }
-        if wants_paste && !inject_paste(app, ctx) {
+        if wants_paste && !inject_paste(app, ctx, clean) {
             // Injection failed — the text is safely on the clipboard; say so
             // instead of the normal done pill, then hide on the done timing.
             show_pill(app, ctx, "error", Some("On clipboard"));

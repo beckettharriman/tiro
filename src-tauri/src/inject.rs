@@ -45,6 +45,10 @@ const SETTLE_MS: u64 = 120;
 
 /// Inject a Ctrl+V paste chord at the current cursor/focus position.
 ///
+/// `expected` is the text that was just copied; the Windows backend reads
+/// the clipboard back and waits for it to hold exactly that before sending
+/// the chord (see `windows_impl::paste`). The other backends ignore it.
+///
 /// `load_token`/`save_token` read and persist the RemoteDesktop-portal
 /// restore token ("" = none). Only the Wayland portal backend uses them, and
 /// it calls both under its own paste lock — restore tokens are single-use,
@@ -52,15 +56,17 @@ const SETTLE_MS: u64 = 120;
 /// other backends ignore them.
 #[cfg(windows)]
 pub fn paste_at_cursor(
+    expected: &str,
     _load_token: impl FnOnce() -> String,
     _save_token: impl FnOnce(&str),
 ) -> Result<(), String> {
-    windows_impl::paste()
+    windows_impl::paste(expected)
 }
 
 /// See the Windows variant for the contract.
 #[cfg(target_os = "linux")]
 pub fn paste_at_cursor(
+    _expected: &str,
     load_token: impl FnOnce() -> String,
     save_token: impl FnOnce(&str),
 ) -> Result<(), String> {
@@ -92,6 +98,7 @@ pub fn close_portal_session() {}
 
 #[cfg(target_os = "macos")]
 pub fn paste_at_cursor(
+    _expected: &str,
     _load_token: impl FnOnce() -> String,
     _save_token: impl FnOnce(&str),
 ) -> Result<(), String> {
@@ -103,8 +110,20 @@ mod windows_impl {
     use std::mem::size_of;
     use std::time::{Duration, Instant};
 
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
     };
 
     const VK_SHIFT: u16 = 0x10;
@@ -114,18 +133,30 @@ mod windows_impl {
     const VK_RWIN: u16 = 0x5C;
     const VK_V: u16 = 0x56;
 
+    /// How long to wait for the clipboard to read back the copied text
+    /// before pasting anyway. Clipboard viewers (history, cloud clipboard,
+    /// password managers, chat apps) open the clipboard the moment it
+    /// changes; a Ctrl+V that lands while one of them holds it pastes
+    /// nothing, which is the "empty paste" users see.
+    const CLIPBOARD_WAIT_MS: u64 = 700;
+    const CLIPBOARD_POLL_MS: u64 = 25;
+
     fn key_down(vk: u16) -> bool {
         // High bit set = key is currently down.
         (unsafe { GetAsyncKeyState(i32::from(vk)) } as u16) & 0x8000 != 0
     }
 
+    /// A key event carrying both the virtual key and its scan code: some
+    /// targets (terminals, games, anything on raw input) read the scan
+    /// code from the message and ignore an event that has none.
     fn key_event(vk: u16, up: bool) -> INPUT {
+        let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) } as u16;
         INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: vk,
-                    wScan: 0,
+                    wScan: scan,
                     dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
                     time: 0,
                     dwExtraInfo: 0,
@@ -149,7 +180,103 @@ mod windows_impl {
         }
     }
 
-    pub fn paste() -> Result<(), String> {
+    /// The window that will receive the chord: title, executable name and
+    /// whether it runs elevated. Elevation matters because UIPI silently
+    /// drops synthetic input sent from a normal process to an elevated
+    /// window; knowing it up front turns a silent non-paste into an
+    /// honest "On clipboard" pill and a log line that names the app.
+    struct Target {
+        title: String,
+        exe: String,
+        elevated: bool,
+    }
+
+    fn foreground_target() -> Option<Target> {
+        let hwnd: HWND = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut title_buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
+        let title = String::from_utf16_lossy(&title_buf[..n.max(0) as usize]);
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        let mut exe = String::new();
+        let mut elevated = false;
+        if pid != 0 {
+            let process: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if !process.is_null() {
+                let mut path = [0u16; 1024];
+                let mut len = path.len() as u32;
+                let ok = unsafe {
+                    QueryFullProcessImageNameW(
+                        process,
+                        PROCESS_NAME_WIN32,
+                        path.as_mut_ptr(),
+                        &mut len,
+                    )
+                };
+                if ok != 0 {
+                    let full = String::from_utf16_lossy(&path[..len as usize]);
+                    exe = full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
+                }
+                let mut token: HANDLE = std::ptr::null_mut();
+                if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } != 0 {
+                    let mut info = TOKEN_ELEVATION { TokenIsElevated: 0 };
+                    let mut got = 0u32;
+                    let ok = unsafe {
+                        GetTokenInformation(
+                            token,
+                            TokenElevation,
+                            (&mut info as *mut TOKEN_ELEVATION).cast(),
+                            size_of::<TOKEN_ELEVATION>() as u32,
+                            &mut got,
+                        )
+                    };
+                    elevated = ok != 0 && info.TokenIsElevated != 0;
+                    unsafe { CloseHandle(token) };
+                }
+                unsafe { CloseHandle(process) };
+            }
+        }
+        Some(Target {
+            title,
+            exe,
+            elevated,
+        })
+    }
+
+    /// Wait until the clipboard reads back as `expected`. A read that
+    /// fails means another process holds the clipboard open; a read that
+    /// returns something else means a clipboard tool rewrote it (or the
+    /// copy has not landed yet). The text is re-copied once on a mismatch.
+    /// Returns a note for the log when the wait ran out.
+    fn wait_for_clipboard(expected: &str) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_millis(CLIPBOARD_WAIT_MS);
+        let mut recopied = false;
+        let mut last = String::from("not read");
+        loop {
+            match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                Ok(text) if text == expected => return None,
+                Ok(text) => {
+                    last = format!("holds {} chars, expected {}", text.len(), expected.len());
+                    if !recopied {
+                        recopied = true;
+                        if let Err(e) = crate::clipboard::copy(expected) {
+                            last = format!("re-copy failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => last = format!("read failed: {e}"),
+            }
+            if Instant::now() >= deadline {
+                return Some(last);
+            }
+            std::thread::sleep(Duration::from_millis(CLIPBOARD_POLL_MS));
+        }
+    }
+
+    pub fn paste(expected: &str) -> Result<(), String> {
         // Wait for the user's physical hotkey chord (Ctrl+Alt+V and any
         // other modifiers) to be released, otherwise the target receives
         // Ctrl+Alt+V again.
@@ -170,13 +297,30 @@ mod windows_impl {
             }
             std::thread::sleep(Duration::from_millis(super::RELEASE_POLL_MS));
         }
+        let target = foreground_target();
+        if let Some(t) = &target {
+            if t.elevated {
+                return Err(format!(
+                    "'{}' ({}) runs elevated; Windows drops synthetic input sent to it",
+                    t.title, t.exe
+                ));
+            }
+        }
+        if let Some(note) = wait_for_clipboard(expected) {
+            eprintln!("inject: clipboard not settled after {CLIPBOARD_WAIT_MS} ms ({note}); pasting anyway");
+        }
         std::thread::sleep(Duration::from_millis(super::SETTLE_MS));
         send(&[
             key_event(VK_CONTROL, false),
             key_event(VK_V, false),
             key_event(VK_V, true),
             key_event(VK_CONTROL, true),
-        ])
+        ])?;
+        match target {
+            Some(t) => eprintln!("inject: Ctrl+V sent to '{}' ({})", t.title, t.exe),
+            None => eprintln!("inject: Ctrl+V sent (no foreground window reported)"),
+        }
+        Ok(())
     }
 }
 
