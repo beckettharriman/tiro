@@ -25,8 +25,15 @@ use serde_json::{json, Value};
 use crate::audio;
 use crate::flow::lock;
 
-pub const READY_TIMEOUT_CACHED: Duration = Duration::from_secs(30);
-pub const READY_TIMEOUT_DOWNLOAD: Duration = Duration::from_secs(120);
+/// How long a worker may take to report ready when the model is already on
+/// disk. This has to cover a cold Vulkan start: on an NVIDIA laptop whose
+/// driver shader cache is cold, bringing large-v3-turbo up took 42 s
+/// measured end to end (model upload plus pipeline compilation), and the
+/// old 30 s limit killed the worker every time, leaving the app on the CPU
+/// model without saying why.
+pub const READY_TIMEOUT_CACHED: Duration = Duration::from_secs(120);
+/// The same wait when the model may still have to be downloaded first.
+pub const READY_TIMEOUT_DOWNLOAD: Duration = Duration::from_secs(300);
 
 /// File name of the worker executable (`.exe` on Windows).
 pub const WORKER_EXE: &str = "tiro-gpu-worker";

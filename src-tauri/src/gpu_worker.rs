@@ -45,7 +45,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -53,12 +53,32 @@ use crate::transcribe::{self, Transcriber};
 
 const LOG_FILE: &str = "gpu_worker.log";
 
+/// Where gpu_worker.log lives: next to the models folder, i.e. the app
+/// directory, whatever the working directory of the process is. The log
+/// used to be opened relative to the CWD, so a worker spawned by an app
+/// that was launched from a shortcut or the autostart entry wrote its log
+/// into System32 (where the write fails silently) and the file next to
+/// config.ini stopped moving.
+static LOG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn set_log_dir(models_dir: Option<&Path>) {
+    let dir = models_dir
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let _ = LOG_PATH.set(dir.join(LOG_FILE));
+}
+
 /// Timestamped line to gpu_worker.log; failure-safe (logging must never
 /// take the worker down — the parent treats our death as GPU-unavailable).
 fn log(msg: &str) {
     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let line = format!("{stamp} [pid {}] {msg}\n", std::process::id());
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(LOG_FILE) {
+    let path = LOG_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(LOG_FILE));
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -171,6 +191,7 @@ fn load(opts: &Opts) -> Result<Transcriber, String> {
 /// exit code.
 pub fn run(argv: &[String]) -> i32 {
     let opts = parse_args(argv);
+    set_log_dir(opts.models_dir.as_deref());
     log(&format!(
         "starting: model={:?} device={:?} gpu_device={} models_dir={:?} gpu_built={}",
         opts.model,
