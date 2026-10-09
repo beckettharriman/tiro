@@ -404,6 +404,19 @@ pub fn gpu_test(wav: &str, device: &str) {
         }
     };
     let audio16 = audio::resample_to_16k(&samples, rate);
+    // The app's silence gate (flow::transcribe_worker); TIRO_TEST_NO_GATE=1
+    // skips it so a clip can be compared with and without.
+    let audio16 = if std::env::var_os("TIRO_TEST_NO_GATE").is_some() {
+        audio16
+    } else {
+        let (start, end) = audio::silence_bounds(&audio16);
+        eprintln!(
+            "silence gate: kept {:.2}s of {:.2}s",
+            (end - start) as f64 / f64::from(audio::SAMPLE_RATE),
+            audio16.len() as f64 / f64::from(audio::SAMPLE_RATE)
+        );
+        audio16[start..end].to_vec()
+    };
     // Same default the app uses (prefer discrete, then VRAM) — on a
     // two-device machine (iGPU + dGPU) testing device 0 would silently
     // exercise the wrong card.
@@ -417,9 +430,13 @@ pub fn gpu_test(wav: &str, device: &str) {
         audio16.len()
     );
     let t0 = Instant::now();
+    // TIRO_TEST_MODEL / TIRO_TEST_MODELS_DIR pick the model and folder so
+    // the test can exercise the exact model a user runs.
+    let model = std::env::var("TIRO_TEST_MODEL").unwrap_or_else(|_| "base.en".to_string());
+    let models_dir = std::env::var("TIRO_TEST_MODELS_DIR").unwrap_or_else(|_| "models".to_string());
     let worker = match GpuWorker::spawn(
-        "base.en",
-        Path::new("models"),
+        &model,
+        Path::new(&models_dir),
         "int8",
         device,
         gpu_device,
