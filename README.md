@@ -54,6 +54,8 @@ All four are rebindable.
 | <img src="docs/vocabulary.png" alt="Vocabulary"> | <img src="docs/models.png" alt="Models"> |
 | **Vocabulary.** Hot words prime Whisper so it spells your names right. Corrections fix what it still misses, and only touch the copy you paste. | **Models.** Manage the transcription models installed on device, tiny through large-v3-turbo from Hugging Face. |
 
+**Files too.** The file button next to the record button (or a file dropped on the panel) transcribes a recording: mp3, m4a, wav, flac, ogg, or the audio track of a video. It runs through the same engine and lands in the list like a take, tagged with the file name. A half-hour call takes about a minute on a GPU. Nothing to install, the decoder is built in.
+
 There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit. On a Mac it lives in the menu bar.
 
 ## Engine and GPU

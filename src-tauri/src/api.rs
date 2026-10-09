@@ -468,13 +468,9 @@ pub fn get_state(app: &AppHandle) -> Value {
         "settings": settings,
         "engine": flow::engine_dict(&ctx),
         "hardware": hardware,
-        // Whether the Import (file) path can work at all: ffmpeg does the
-        // decoding, so without it the button explains itself instead of
-        // failing on every click.
-        "import": match crate::import::ffmpeg_status() {
-            Ok(v) => json!({ "available": true, "ffmpeg": v }),
-            Err(e) => json!({ "available": false, "reason": e }),
-        },
+        // The file import decodes in-process (symphonia), so it is always
+        // available; the key stays so the panel's state shape is stable.
+        "import": json!({ "available": true }),
         "mics": audio::list_mic_names(),
         "shortcuts": shortcuts,
         "theme": theme,
@@ -799,7 +795,7 @@ pub fn pick_folder(app: &AppHandle) -> Option<Value> {
 }
 
 /// `transcribe_file`: the panel's Import button. Without a path, open the
-/// native file picker (audio and video first, any file allowed — ffmpeg
+/// native file picker (audio and video first, any file allowed — the decoder
 /// decides what it can decode); then hand the file to the take pipeline
 /// (`flow::transcribe_file`). Replies `{ok, name, path}`, `{ok: false,
 /// cancelled: true}` for a dismissed picker, or `{ok: false, error}`.

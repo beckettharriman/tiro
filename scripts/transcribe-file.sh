@@ -8,7 +8,7 @@
 # What happens:
 #   1. A URL is fetched with yt-dlp as an mp3 (ffmpeg does the conversion).
 #      A local file of any format is used as-is.
-#   2. `tiro --transcribe-file` decodes it with ffmpeg to the 16 kHz mono
+#   2. `tiro --transcribe-file` decodes it in-process to the 16 kHz mono
 #      buffer a live take uses and runs it through the same engine code as
 #      dictation (CPU in-process, or the tiro-gpu-worker child on GPU).
 #   3. The verbatim transcript lands in <out>/<stem>.txt, the run log in

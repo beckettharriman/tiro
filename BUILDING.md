@@ -127,15 +127,16 @@ to `tiro --toggle`.
 ## Transcribing a file headless
 
 `tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]`
-decodes any file ffmpeg can read (mp3, m4a, ogg, flac, wav, a video's
-audio track, ...) to the 16 kHz mono buffer a live take uses and runs it
+decodes the file in-process (mp3, m4a/aac, ogg, flac, wav, alac, aiff,
+the audio track of an mp4/mkv/webm) to the 16 kHz mono buffer a live
+take uses and runs it
 through the same engine code the app serves dictation with: the CPU
 model in-process, or the `tiro-gpu-worker` child on `gpu`. The verbatim
 transcript goes to stdout; everything else goes to stderr (which a
 release build sends to `tiro.log` in the app dir, like the other test
 flags). The model defaults to the config's, beam to the live policy (GPU
-5, CPU 1); a model that is not installed downloads first. Needs `ffmpeg`
-on PATH (or `FFMPEG=/path/to/ffmpeg`).
+5, CPU 1); a model that is not installed downloads first. Nothing to
+install: the decoder is part of the binary.
 
 `scripts/transcribe-file.sh <file-or-url> [--model NAME] [--device gpu|cpu] [--out DIR]`
 wraps it: a YouTube (or any yt-dlp) URL is fetched as an mp3 first, and

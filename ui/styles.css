@@ -293,6 +293,7 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 }
 .meta .dot{ font-weight:400; color:rgba(var(--ink),.28); }
 .meta .dur{ font-weight:500; color:rgba(var(--ink),.38); }
+.meta .file{ font-weight:500; color:rgba(var(--ink),.38); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .copied-chip{
   margin-left:auto;
   display:inline-flex; align-items:center; gap:5px;

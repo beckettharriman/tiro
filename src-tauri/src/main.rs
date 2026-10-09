@@ -152,7 +152,7 @@ fn main() {
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--transcribe-file") {
-        // Any audio/video file -> ffmpeg -> the engine -> text on stdout.
+        // Any audio/video file -> decoder -> the engine -> text on stdout.
         tiro_lib::import::transcribe_file_cli(&args, i);
         return;
     }

@@ -27,3 +27,4 @@ transcripts/
 .DS_Store
 Thumbs.db
 .vibe-wave.md
+src-tauri/gpu_worker.err

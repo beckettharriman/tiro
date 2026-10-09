@@ -1,134 +1,182 @@
-//! File input for the take pipeline (the "transcribe an audio file" idea).
+//! File input for the take pipeline: transcribe an audio (or video) file.
 //!
 //! A microphone take reaches `flow::transcribe_worker` as f32 mono samples
 //! plus a rate, and is resampled to 16 kHz before whisper sees it. A file
 //! take reaches the very same function the very same way — the only
-//! difference is who produced the samples: cpal from a mic, or ffmpeg
-//! from a file. ffmpeg decodes any container/codec it knows (mp3, m4a,
-//! ogg, flac, wav, opus, the audio track of a video, ...) straight to raw
-//! 16 kHz mono f32 on its stdout, so nothing downstream — engine choice,
-//! vocab prompt, cleanup, corrections, clipboard, transcript log, panel
-//! entry — knows or cares which source it came from.
-//!
-//! ffmpeg is an external tool on purpose: bundling a decoder stack for an
-//! idea branch is out of scope, and it is a one-line install everywhere
-//! (`dnf`/`apt install ffmpeg`, `brew install ffmpeg`, `winget install
-//! ffmpeg`). `FFMPEG` in the environment names a specific binary.
+//! difference is who produced the samples: cpal from a mic, or the
+//! decoder below from a file. Decoding is in-process and pure Rust
+//! (symphonia): mp3, m4a/aac, flac, wav, ogg/vorbis, alac, aiff, and the
+//! audio track of an mp4/mkv/webm, with nothing to install. Nothing
+//! downstream — engine choice, vocab prompt, cleanup, corrections,
+//! clipboard, transcript log, panel entry — knows or cares which source
+//! it came from.
 //!
 //! Also home to `tiro --transcribe-file`, the headless form of the same
 //! path (any file -> engine -> text on stdout), which is what
 //! `scripts/transcribe-file.sh` drives.
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::fs::File;
+use std::path::Path;
 use std::time::Instant;
+
+use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::errors::Error as DecodeFailure;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::meta::MetadataOptions;
 
 use crate::audio::SAMPLE_RATE;
 
-/// The ffmpeg binary: `$FFMPEG` when set, otherwise `ffmpeg` on PATH.
-pub fn ffmpeg_exe() -> PathBuf {
-    std::env::var_os("FFMPEG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+/// Streaming linear resampler to 16 kHz: the same interpolation as
+/// `audio::resample_to_16k`, fed one decoded chunk at a time so a long
+/// file never has to sit in memory at its native rate (an hour of 48 kHz
+/// stereo would be 1.4 GB as f32; at 16 kHz mono it is 230 MB). The
+/// phase and the last input sample carry across chunks, so the output is
+/// identical to resampling the whole file in one go.
+struct Resampler {
+    step: f64,
+    /// Position of the next output sample, in input samples, relative to
+    /// `prev` (which sits at position -1).
+    pos: f64,
+    prev: Option<f32>,
 }
 
-fn ffmpeg_command() -> Command {
-    #[allow(unused_mut)]
-    let mut cmd = Command::new(ffmpeg_exe());
-    #[cfg(target_os = "windows")]
-    {
-        // CREATE_NO_WINDOW: no console flashing behind the panel.
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+impl Resampler {
+    fn new(rate: u32) -> Self {
+        Self {
+            step: f64::from(rate) / f64::from(SAMPLE_RATE),
+            pos: 0.0,
+            prev: None,
+        }
     }
-    cmd
-}
 
-/// Is ffmpeg runnable? `Ok(version line)` or why not — the panel shows
-/// the reason instead of a dead Import button.
-pub fn ffmpeg_available() -> Result<String, String> {
-    let out = ffmpeg_command()
-        .args(["-hide_banner", "-version"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("ffmpeg not found ({}): {e}", ffmpeg_exe().display()))?;
-    if !out.status.success() {
-        return Err(format!("ffmpeg -version failed: {}", out.status));
+    fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if input.is_empty() {
+            return;
+        }
+        if self.step == 1.0 && self.prev.is_none() {
+            out.extend_from_slice(input);
+            return;
+        }
+        // Virtual input: prev (if any) at index 0, then `input`.
+        let at = |i: usize| -> f32 {
+            match self.prev {
+                Some(p) => {
+                    if i == 0 {
+                        p
+                    } else {
+                        input[i - 1]
+                    }
+                }
+                None => input[i],
+            }
+        };
+        let len = input.len() + usize::from(self.prev.is_some());
+        let mut pos = self.pos;
+        while pos + 1.0 < len as f64 {
+            let i = pos.floor() as usize;
+            let frac = (pos - i as f64) as f32;
+            out.push(at(i) * (1.0 - frac) + at(i + 1) * frac);
+            pos += self.step;
+        }
+        // Carry the last input sample and the phase past it.
+        self.prev = Some(input[input.len() - 1]);
+        self.pos = pos - (len as f64 - 1.0);
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("ffmpeg")
-        .to_string())
-}
 
-/// `ffmpeg_available`, probed once per process (the panel asks on every
-/// `get_state`; spawning ffmpeg each time would be silly). Installing
-/// ffmpeg while Tiro runs needs a restart to be noticed — acceptable.
-pub fn ffmpeg_status() -> Result<String, String> {
-    static STATUS: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
-    STATUS.get_or_init(ffmpeg_available).clone()
+    /// The final output sample, clamped at the last input (matches the
+    /// one-shot resampler's clamp at the end of the buffer).
+    fn finish(self, out: &mut Vec<f32>) {
+        if let Some(p) = self.prev {
+            if self.pos < 1.0 && self.step != 1.0 {
+                out.push(p);
+            }
+        }
+    }
 }
 
 /// Decode `path` to 16 kHz mono f32 — the buffer a live take is resampled
-/// to. Video files work too (`-vn` drops the picture). Errors carry
-/// ffmpeg's own stderr so a corrupt or unsupported file says why.
+/// to. Multi-channel audio is averaged down to mono. A video file works
+/// too: only its default audio track is read. Errors say what went
+/// wrong in the decoder's own words so a corrupt or unsupported file
+/// explains itself.
 pub fn decode_to_16k(path: &Path) -> Result<Vec<f32>, String> {
     if !path.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
-    let mut child = ffmpeg_command()
-        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(path)
-        .args([
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            &SAMPLE_RATE.to_string(),
-            "-f",
-            "f32le",
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("cannot run ffmpeg ({}): {e}", ffmpeg_exe().display()))?;
-    // stderr drains on its own thread so a chatty failure can never fill
-    // its pipe while this thread is blocked on stdout.
-    let mut stderr = child.stderr.take().ok_or("ffmpeg stderr missing")?;
-    let err_reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
-    });
-    let mut stdout = child.stdout.take().ok_or("ffmpeg stdout missing")?;
-    let mut bytes = Vec::new();
-    stdout
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("reading ffmpeg output: {e}"))?;
-    let status = child
-        .wait()
-        .map_err(|e| format!("waiting for ffmpeg: {e}"))?;
-    let err_text = err_reader.join().unwrap_or_default();
-    if !status.success() {
-        let why = err_text.trim();
-        return Err(if why.is_empty() {
-            format!("ffmpeg failed ({status})")
-        } else {
-            format!("ffmpeg: {why}")
-        });
+    let file = File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
-    let samples: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-    if samples.is_empty() {
-        return Err(format!("{} has no audio stream", path.display()));
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            stream,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| format!("unsupported or unreadable file: {e}"))?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| format!("{} has no audio track", path.display()))?;
+    let track_id = track.id;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or_else(|| format!("{} has no decodable audio", path.display()))?
+        .clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .map_err(|e| format!("no decoder for this audio: {e}"))?;
+
+    let mut out: Vec<f32> = Vec::new();
+    let mut interleaved: Vec<f32> = Vec::new();
+    let mut mono: Vec<f32> = Vec::new();
+    let mut resampler: Option<Resampler> = None;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
+            Err(DecodeFailure::ResetRequired) => {
+                decoder.reset();
+                continue;
+            }
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(buf) => buf,
+            // A damaged frame is skipped, like every player does; the
+            // rest of the file still transcribes.
+            Err(DecodeFailure::DecodeError(_)) => continue,
+            Err(e) => return Err(format!("decoding {}: {e}", path.display())),
+        };
+        let spec = decoded.spec();
+        let channels = spec.channels().count().max(1);
+        let rs = resampler.get_or_insert_with(|| Resampler::new(spec.rate()));
+        interleaved.clear();
+        decoded.copy_to_vec_interleaved::<f32>(&mut interleaved);
+        mono.clear();
+        mono.extend(
+            interleaved
+                .chunks_exact(channels)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+        );
+        rs.push(&mono, &mut out);
     }
-    Ok(samples)
+    if let Some(rs) = resampler {
+        rs.finish(&mut out);
+    }
+    if out.is_empty() {
+        return Err(format!("{} has no audio", path.display()));
+    }
+    Ok(out)
 }
 
 /// What the history shows in the mic column for a file take.
@@ -140,7 +188,7 @@ pub fn file_label(path: &Path) -> String {
 
 /// `tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]`
 ///
-/// The headless twin of the panel's Import: decode with ffmpeg, run the
+/// The headless twin of the panel's Import: decode in-process, run the
 /// configured (or named) model on the chosen device through the SAME
 /// engine code the app serves takes with — `Transcriber` in-process on
 /// CPU, the `tiro-gpu-worker` child on GPU — and print the verbatim
@@ -275,14 +323,10 @@ mod tests {
         assert_eq!(file_label(Path::new("/a/b/talk.mp3")), "talk.mp3");
     }
 
-    /// Round-trip a generated WAV through ffmpeg (skipped when ffmpeg is
-    /// not installed on the test machine).
+    /// A generated stereo 48 kHz WAV decodes to 1 s of 16 kHz mono with
+    /// the tone intact.
     #[test]
     fn decodes_a_wav_to_16k_mono() {
-        if ffmpeg_available().is_err() {
-            eprintln!("ffmpeg missing; skipping");
-            return;
-        }
         let dir = tempfile::TempDir::new().unwrap();
         let wav = dir.path().join("tone.wav");
         let spec = hound::WavSpec {
@@ -301,11 +345,42 @@ mod tests {
         let samples = decode_to_16k(&wav).unwrap();
         // 1 s at 16 kHz, give or take the resampler's edge.
         assert!(
-            (15_900..=16_100).contains(&samples.len()),
+            (15_990..=16_010).contains(&samples.len()),
             "{}",
             samples.len()
         );
         assert!(samples.iter().any(|s| s.abs() > 0.1));
         assert!(decode_to_16k(&dir.path().join("missing.mp3")).is_err());
+        // not audio at all
+        std::fs::write(dir.path().join("notes.txt"), "hello").unwrap();
+        assert!(decode_to_16k(&dir.path().join("notes.txt")).is_err());
+    }
+
+    #[test]
+    fn streaming_resampler_matches_the_one_shot_resampler() {
+        let input: Vec<f32> = (0..48_000).map(|i| ((i as f32) * 0.01).sin()).collect();
+        let whole = crate::audio::resample_to_16k(&input, 48_000);
+        let mut streamed = Vec::new();
+        let mut rs = Resampler::new(48_000);
+        for chunk in input.chunks(1_000) {
+            rs.push(chunk, &mut streamed);
+        }
+        rs.finish(&mut streamed);
+        assert_eq!(whole.len(), streamed.len(), "same length");
+        for (a, b) in whole.iter().zip(&streamed) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn streaming_resampler_passes_16k_through() {
+        let input: Vec<f32> = (0..1_000).map(|i| i as f32).collect();
+        let mut out = Vec::new();
+        let mut rs = Resampler::new(16_000);
+        rs.push(&input[..500], &mut out);
+        rs.push(&input[500..], &mut out);
+        rs.finish(&mut out);
+        assert_eq!(out.len(), 1_000);
+        assert_eq!(out[999], 999.0);
     }
 }

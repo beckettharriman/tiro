@@ -266,6 +266,7 @@
             clock: hh + ":" + String(now.getMinutes()).padStart(2, "0") + " " + ap,
             dur: "12:04",
             mic: name,
+            file: name,
             text: "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers."
           });
         }
@@ -347,7 +348,7 @@
     shortcuts: {},
     theme: "dark",
     recording: false,
-    /* file import: can it work (ffmpeg present), and what is in flight */
+    /* file import: whether it can work, and what is in flight */
     importer: { available: true, reason: "" },
     import: { phase: "idle", name: "", secs: 0, error: "" },
     pinned: false,
@@ -395,12 +396,14 @@
     el.innerHTML =
       '<div class="meta">' + (showDay && e.dayIso ? '<span class="day"></span><span class="dot">·</span>' : "") +
       '<span class="time"></span><span class="dot">·</span><span class="dur"></span>' +
+      (e.file ? '<span class="dot">·</span><span class="file"></span>' : "") +
       '<span class="copied-chip">' + checkSvg + "Copied</span></div>" +
       '<div class="txt clamped"></div>' +
       '<button class="showmore">Show more</button>';
     if (showDay && e.dayIso) el.querySelector(".day").textContent = dayLabel(e.dayIso);
     el.querySelector(".time").textContent = e.clock;
     el.querySelector(".dur").textContent = e.dur;
+    if (e.file) el.querySelector(".file").textContent = e.file;
     el.querySelector(".txt").textContent = e.text;
     const more = el.querySelector(".showmore");
     more.addEventListener("click", (ev) => {
@@ -1523,7 +1526,7 @@
   /* ════════════════════════════════════════════════════════════════════
      IMPORT (transcribe a file)
      The file button opens the native picker (a drop on the panel skips
-     it); the backend decodes with ffmpeg and runs the take pipeline, and
+     it); the backend decodes the file and runs the take pipeline, and
      pushes progress into window.tiroSetImport. The strip above the list
      shows the phase — a long file sits in "transcribing" for minutes, so
      the pill alone is not enough — and the reason when an import fails.
@@ -1557,7 +1560,7 @@
       b.disabled = busy || !App.importer.available;
       b.title = App.importer.available
         ? "Transcribe an audio file"
-        : "Install ffmpeg to transcribe files" + (App.importer.reason ? " — " + App.importer.reason : "");
+        : "File import is unavailable" + (App.importer.reason ? " — " + App.importer.reason : "");
     });
     clearTimeout(importClear);
     if (err) importClear = setTimeout(() => { App.import = { phase: "idle" }; renderImport(); }, 8000);

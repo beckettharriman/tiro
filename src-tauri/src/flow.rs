@@ -121,6 +121,11 @@ pub struct AppCtx {
     session: AtomicU64,
     cancel_xscribe: AtomicBool,
     xscribing: AtomicBool,
+    /// A file import owns the engine right now (`transcribe_file`). A
+    /// dictation press while this is set is refused with a pill instead of
+    /// superseding the import's session, so a 20-minute file can never be
+    /// thrown away by a reflex tap of the hotkey; Ctrl+Alt+X cancels it.
+    pub importing: AtomicBool,
     active_mic: Mutex<String>,
     active_rate: AtomicU64,
     /// Bumping this cancels every pending pill hide timer.
@@ -403,6 +408,7 @@ impl AppCtx {
             session: AtomicU64::new(0),
             cancel_xscribe: AtomicBool::new(false),
             xscribing: AtomicBool::new(false),
+            importing: AtomicBool::new(false),
             active_mic: Mutex::new(String::new()),
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
@@ -999,6 +1005,14 @@ fn inject_paste(app: &AppHandle, ctx: &AppCtx, text: &str) -> bool {
 }
 
 fn start_recording(app: &AppHandle, ctx: &AppCtx) {
+    if ctx.importing.load(Ordering::SeqCst) {
+        // The engine is busy with a file. Say so rather than letting the
+        // new session discard the import at its end.
+        play(ctx, "error");
+        show_pill(app, ctx, "error", Some("Importing a file"));
+        arm_pill_hide(app, ctx, 2000);
+        return;
+    }
     // Recording wins the mic: preempt any settings-meter monitor before
     // opening the take's stream (the monitor thread exits within one poll
     // tick and notifies the panel; PipeWire tolerates the brief overlap).
@@ -1079,7 +1093,7 @@ fn push_import(app: &AppHandle, payload: serde_json::Value) {
 }
 
 /// Import an audio (or video) file as a take — the "transcribe a file"
-/// idea. ffmpeg decodes it to the 16 kHz f32 mono a mic take is resampled
+/// idea. The decoder turns it into the 16 kHz f32 mono a mic take is resampled
 /// to, and from that point it IS a take: the same session/cancel
 /// semantics, the same engine (GPU worker or CPU model, whichever serves),
 /// the same vocab prompt, cleanup, corrections, clipboard copy, transcript
@@ -1102,7 +1116,6 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
-    crate::import::ffmpeg_status()?;
     let name = crate::import::file_label(&path);
     // A fresh session like `stop_recording`: never pastes, clears a stale
     // cancel, and marks a transcription in flight.
@@ -1110,6 +1123,7 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
     ctx.paste_session.store(0, Ordering::SeqCst);
     ctx.cancel_xscribe.store(false, Ordering::SeqCst);
     ctx.xscribing.store(true, Ordering::SeqCst);
+    ctx.importing.store(true, Ordering::SeqCst);
     show_pill(app, &ctx, "transcribing", None);
     crate::set_tray_state(app, "transcribing");
     push_import(app, json!({ "phase": "decoding", "name": name }));
@@ -1128,6 +1142,7 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("import failed: {e}");
+                ctx.importing.store(false, Ordering::SeqCst);
                 if ctx.session.load(Ordering::SeqCst) == session {
                     ctx.xscribing.store(false, Ordering::SeqCst);
                     crate::set_tray_state(&app, "idle");
@@ -1150,7 +1165,10 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
             rate: audio::SAMPLE_RATE,
             mic_name: name.clone(),
         };
-        let outcome = transcribe_worker(app.clone(), take, secs, name.clone(), session);
+        // The log's mic column carries the file name behind a "file:"
+        // marker, which is also how the panel knows to show the file tag.
+        let outcome = transcribe_worker(app.clone(), take, secs, format!("file:{name}"), session);
+        ctx.importing.store(false, Ordering::SeqCst);
         let (phase, error) = match outcome {
             Outcome::Done => ("done", None),
             Outcome::Empty => ("error", Some("No speech found")),
