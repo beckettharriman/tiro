@@ -238,8 +238,10 @@ pub fn entry_from_rec(rec: &Rec, cfg: &ConfigStore) -> Value {
         "id": format!("{}|{}", rec.ts, id_hash),
         "clock": fmt_clock(&rec.ts),
         "dur": fmt_dur(rec.secs),
-        // A file take: the name behind the "file:" marker in the mic column.
+        // A file take: the name behind the "file:" marker in the mic column;
+        // a system-audio capture: the device behind "capture:".
         "file": rec.mic.strip_prefix("file:").unwrap_or_default(),
+        "source": rec.mic.strip_prefix("capture:").unwrap_or_default(),
         "text": shown,
         "device": device,
         "model": model,

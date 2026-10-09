@@ -56,6 +56,8 @@ All four are rebindable.
 
 **Files too.** The file button next to the record button (or a file dropped on the panel) transcribes a recording: mp3, m4a, wav, flac, ogg, or the audio track of a video. It runs through the same engine and lands in the list like a take, tagged with the file name. A half-hour call takes about a minute on a GPU. Nothing to install, the decoder is built in.
 
+**And what the computer is playing.** The speaker button in the expanded Transcribe view records system audio, a call or a video, with your microphone mixed in if you want, and transcribes it when you press Stop. Windows captures the playback device directly; Linux reads the PipeWire monitor. On a Mac this needs a virtual audio device, so the button does not appear there yet.
+
 There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit. On a Mac it lives in the menu bar.
 
 ## Engine and GPU

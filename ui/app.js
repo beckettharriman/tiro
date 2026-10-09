@@ -164,6 +164,8 @@
       storageFallback: false, storagePath: ""
     },
     engine: { model: "small.en", device: "GPU" },
+    outputs: ["MacBook Pro Speakers (system default)", "AirPods Pro"],
+    capture: { active: false },
     mics: ["MacBook Pro Microphone", "AirPods Pro", "Shure MV7"],
     shortcuts: {
       dictate: { ctrl: true, alt: true, shift: false, meta: false, code: "Space", keys: ["Ctrl", "Alt", "Space"] },
@@ -250,6 +252,27 @@
       return Promise.resolve(null);
     },
     cancel_record() { return Promise.resolve(null); },
+    list_outputs() { return Promise.resolve(this._state.outputs.slice()); },
+    start_capture(output, mic) {
+      this._state.capture = { active: true, source: String(output || "").replace(/ \(system default\)$/, ""), mic: !!mic, secs: 0 };
+      if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
+      return Promise.resolve({ ok: true });
+    },
+    stop_capture() {
+      const src = (this._state.capture || {}).source || "Speakers";
+      this._state.capture = { active: false };
+      if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
+      const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
+      push({ phase: "transcribing", name: src, secs: 95 });
+      setTimeout(() => {
+        if (window.tiroAddEntry) {
+          window.tiroAddEntry({ id: "c" + Date.now(), clock: "4:20 PM", dur: "1:35", source: src,
+            text: "Yeah so the plan is we ship the import path first and then look at the call capture, because the two share the whole pipeline after the audio comes in." });
+        }
+        push({ phase: "done", name: src, secs: 95 });
+      }, 1800);
+      return Promise.resolve({ ok: true });
+    },
     transcribe_file(path) {
       // preview: a "picked" file walks the same phases the backend pushes
       const name = path ? String(path).split(/[\\/]/).pop() : "standup-2026-09-23.m4a";
@@ -351,6 +374,9 @@
     /* file import: whether it can work, and what is in flight */
     importer: { available: true, reason: "" },
     import: { phase: "idle", name: "", secs: 0, error: "" },
+    /* system audio capture: devices that can be captured, live state */
+    outputs: [],
+    capture: { active: false },
     pinned: false,
     adv: false,
     view: "settings",
@@ -397,6 +423,7 @@
       '<div class="meta">' + (showDay && e.dayIso ? '<span class="day"></span><span class="dot">·</span>' : "") +
       '<span class="time"></span><span class="dot">·</span><span class="dur"></span>' +
       (e.file ? '<span class="dot">·</span><span class="file"></span>' : "") +
+      (e.source ? '<span class="dot">·</span><span class="source">System audio</span>' : "") +
       '<span class="copied-chip">' + checkSvg + "Copied</span></div>" +
       '<div class="txt clamped"></div>' +
       '<button class="showmore">Show more</button>';
@@ -1535,6 +1562,7 @@
   function importBusy() {
     return App.import.phase === "decoding" || App.import.phase === "transcribing";
   }
+  function capturing() { return !!(App.capture && App.capture.active); }
   function fmtSecs(s) {
     s = Math.round(Number(s) || 0);
     const m = Math.floor(s / 60), r = String(s % 60).padStart(2, "0");
@@ -1543,6 +1571,7 @@
   let importClear;
   function renderImport() {
     const p = App.import, busy = importBusy(), err = p.phase === "error";
+    if (capturing()) { renderCapture(); return; }
     panel.classList.toggle("importing", busy || err);
     let sub = "";
     if (p.phase === "decoding") sub = "Decoding…";
@@ -1580,10 +1609,81 @@
   $("importBtn").addEventListener("click", onImport);
   $("importBtn2").addEventListener("click", onImport);
   importStrips.forEach((strip) => strip.querySelector(".import-dismiss").addEventListener("click", () => {
+    if (capturing()) { stopCapture(); return; }
     if (importBusy()) return;
     App.import = { phase: "idle" };
     renderImport();
   }));
+
+  /* ── system audio capture: the speaker button in the advanced toolbar
+     opens a sheet (output device, include microphone, Start); while a
+     capture runs the import strip shows it with a Stop button, and the
+     backend refuses the dictation keys until it stops. ── */
+  const captureSheet = $("captureSheet");
+  let capTimer = null, capMicOn = true, capStamp = 0;
+  function syncOutputs() {
+    const outs = App.outputs || [];
+    panel.classList.toggle("has-outputs", outs.length > 0);
+    const cur = $("selOutput").value;
+    fillSelect($("selOutput"), outs.length ? outs : ["No output device"], cur || (outs[0] || ""));
+  }
+  function openCaptureSheet(open) {
+    captureSheet.classList.toggle("open", open);
+    $("sysBtn").classList.toggle("on", open);
+    if (open) { syncOutputs(); setSw($("swCapMic"), capMicOn); }
+  }
+  function renderCapture() {
+    const c = App.capture || {};
+    const on = !!c.active;
+    panel.classList.toggle("capturing", on);
+    if (on) {
+      openCaptureSheet(false);
+      panel.classList.add("importing");
+      const sub = () => "Recording system audio" + (c.mic ? " + microphone" : "") + " · " +
+        fmtSecs((Number(c.secs) || 0) + (performance.now() - capStamp) / 1000);
+      importStrips.forEach((strip) => {
+        strip.classList.remove("err");
+        strip.querySelector(".import-name").textContent = c.source || "";
+        strip.querySelector(".import-sub").textContent = sub();
+        strip.querySelector(".import-dismiss").style.display = "";
+        strip.querySelector(".import-dismiss").title = "Stop and transcribe";
+      });
+      clearInterval(capTimer);
+      capTimer = setInterval(() => {
+        importStrips.forEach((strip) => { strip.querySelector(".import-sub").textContent = sub(); });
+      }, 1000);
+    } else {
+      clearInterval(capTimer); capTimer = null;
+      importStrips.forEach((strip) => { strip.querySelector(".import-dismiss").title = "Dismiss"; });
+      if (!importBusy() && App.import.phase !== "error") panel.classList.remove("importing");
+    }
+    ["recBtn", "recBtn2"].forEach((id) => { $(id).disabled = on; });
+  }
+  function startCapture() {
+    const output = $("selOutput").value;
+    capMicOn = swOn($("swCapMic"));
+    Promise.resolve(api.start_capture(output, capMicOn)).then((r) => {
+      if (r && r.ok === false) {
+        App.import = { phase: "error", name: output, error: r.error || "Capture failed" };
+        openCaptureSheet(false);
+        renderImport();
+      }
+    }).catch((e) => {
+      App.import = { phase: "error", name: output, error: String(e) };
+      renderImport();
+    });
+  }
+  function stopCapture() {
+    Promise.resolve(api.stop_capture()).catch(() => {});
+  }
+  $("sysBtn").addEventListener("click", () => openCaptureSheet(!captureSheet.classList.contains("open")));
+  $("capStart").addEventListener("click", startCapture);
+  $("swCapMic").addEventListener("click", () => { const on = !swOn($("swCapMic")); setSw($("swCapMic"), on); capMicOn = on; });
+  window.tiroSetCapture = function (c) {
+    App.capture = c || { active: false };
+    capStamp = performance.now();
+    renderCapture();
+  };
 
   /* ════════════════════════════════════════════════════════════════════
      INPUT LEVEL + TEST
@@ -1824,6 +1924,8 @@
     if (state.shortcuts) App.shortcuts = state.shortcuts;
     if (state.theme) App.theme = state.theme;
     if (state.import) App.importer = state.import;
+    if (Array.isArray(state.outputs)) App.outputs = state.outputs;
+    if (state.capture) App.capture = state.capture;
     if (state.effectiveTheme) applyTheme(state.effectiveTheme);
     else applyTheme(App.theme === "light" ? "light" : "dark");
     if (App.settings && typeof App.settings.transparency === "number") {
@@ -1838,7 +1940,9 @@
     renderShortcuts();
     syncSettings();
     updateEngine();
+    syncOutputs();
     renderImport();
+    renderCapture();
     if (App.adv && App.view === "history") afterSettle(renderAdv);
   }
 

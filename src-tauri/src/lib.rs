@@ -121,6 +121,27 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<Value> {
     api::pick_folder(&app)
 }
 
+#[tauri::command]
+fn list_outputs() -> Value {
+    api::list_outputs()
+}
+
+// Opening a loopback stream (or spawning the capture tool) blocks for a
+// moment; keep it off the event loop like the other device commands.
+#[tauri::command]
+async fn start_capture(app: tauri::AppHandle, output: String, mic: bool) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::start_capture(&app, &output, mic))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_capture(app: tauri::AppHandle) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || api::stop_capture(&app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // Import a file as a take. The native picker blocks and the file check
 // touches disk, so it runs off the event loop like the other dialog/disk
 // commands.
@@ -603,7 +624,10 @@ pub fn run() {
             list_models,
             download_model,
             cancel_download,
-            transcribe_file
+            transcribe_file,
+            list_outputs,
+            start_capture,
+            stop_capture
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

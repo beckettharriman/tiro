@@ -471,6 +471,10 @@ pub fn get_state(app: &AppHandle) -> Value {
         // The file import decodes in-process (symphonia), so it is always
         // available; the key stays so the panel's state shape is stable.
         "import": json!({ "available": true }),
+        // System-audio capture: the playback devices that can be captured
+        // (empty where the feature is unavailable) and the live state.
+        "outputs": crate::capture::list_outputs(),
+        "capture": flow::capture_dict(&ctx),
         "mics": audio::list_mic_names(),
         "shortcuts": shortcuts,
         "theme": theme,
@@ -827,6 +831,28 @@ pub fn transcribe_file(app: &AppHandle, path: Option<&str>) -> Value {
     match flow::transcribe_file(app, path.clone()) {
         Ok(()) => json!({ "ok": true, "name": name, "path": path.to_string_lossy() }),
         Err(e) => json!({ "ok": false, "name": name, "error": e }),
+    }
+}
+
+/// `list_outputs`: playback devices whose output can be captured.
+pub fn list_outputs() -> Value {
+    json!(crate::capture::list_outputs())
+}
+
+/// `start_capture`: begin recording system audio from `output`, with the
+/// microphone mixed in when `mic`.
+pub fn start_capture(app: &AppHandle, output: &str, mic: bool) -> Value {
+    match flow::start_system_capture(app, output, mic) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+/// `stop_capture`: stop and transcribe the running capture.
+pub fn stop_capture(app: &AppHandle) -> Value {
+    match flow::stop_system_capture(app) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 

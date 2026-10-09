@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, TryLockError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{AppHandle, Manager};
@@ -126,6 +126,11 @@ pub struct AppCtx {
     /// superseding the import's session, so a 20-minute file can never be
     /// thrown away by a reflex tap of the hotkey; Ctrl+Alt+X cancels it.
     pub importing: AtomicBool,
+    /// A system-audio capture is running (`start_system_capture`); the
+    /// dictation keys are refused with a pill while it is, and Ctrl+Alt+X
+    /// discards it. The session itself lives in `capture`.
+    pub capturing: AtomicBool,
+    pub capture: Mutex<Option<CaptureSession>>,
     active_mic: Mutex<String>,
     active_rate: AtomicU64,
     /// Bumping this cancels every pending pill hide timer.
@@ -409,6 +414,8 @@ impl AppCtx {
             cancel_xscribe: AtomicBool::new(false),
             xscribing: AtomicBool::new(false),
             importing: AtomicBool::new(false),
+            capturing: AtomicBool::new(false),
+            capture: Mutex::new(None),
             active_mic: Mutex::new(String::new()),
             active_rate: AtomicU64::new(audio::SAMPLE_RATE as u64),
             pill_gen: AtomicU64::new(0),
@@ -1013,6 +1020,12 @@ fn start_recording(app: &AppHandle, ctx: &AppCtx) {
         arm_pill_hide(app, ctx, 2000);
         return;
     }
+    if ctx.capturing.load(Ordering::SeqCst) {
+        play(ctx, "error");
+        show_pill(app, ctx, "error", Some("Capturing system audio"));
+        arm_pill_hide(app, ctx, 2000);
+        return;
+    }
     // Recording wins the mic: preempt any settings-meter monitor before
     // opening the take's stream (the monitor thread exits within one poll
     // tick and notifies the panel; PipeWire tolerates the brief overlap).
@@ -1093,96 +1106,268 @@ fn push_import(app: &AppHandle, payload: serde_json::Value) {
 }
 
 /// Import an audio (or video) file as a take — the "transcribe a file"
-/// idea. The decoder turns it into the 16 kHz f32 mono a mic take is resampled
-/// to, and from that point it IS a take: the same session/cancel
-/// semantics, the same engine (GPU worker or CPU model, whichever serves),
-/// the same vocab prompt, cleanup, corrections, clipboard copy, transcript
-/// log and panel entry, all through `transcribe_worker`. The file name
-/// rides in the mic column of the log.
+/// idea. The decoder turns it into the 16 kHz f32 mono a mic take is
+/// resampled to, and from that point it IS a take: the same engine (GPU
+/// worker or CPU model, whichever serves), the same vocab prompt,
+/// cleanup, corrections, clipboard copy, transcript log and panel entry,
+/// all through `transcribe_worker`. The file name rides in the mic column
+/// of the log behind a "file:" marker.
 ///
-/// Refused while a recording or a transcription is in flight: the session
-/// bump would supersede the live take and its worker would discard it
-/// (STATE-2 in `transcribe_worker`), and a file must never cost a take.
-/// Decoding runs on the spawned thread (a long file takes a second or
-/// two); the panel follows along through `push_import`.
+/// Refused while a recording, a transcription or a capture is in flight:
+/// a file must never cost a live take. Decoding runs on the spawned
+/// thread (a long file takes a second or two); the panel follows along
+/// through `push_import`.
 pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
-    if ctx.recording.load(Ordering::SeqCst) || ctx.busy.load(Ordering::SeqCst) {
-        return Err("Stop the recording first".into());
-    }
-    if ctx.xscribing.load(Ordering::SeqCst) {
-        return Err("Still transcribing the last take".into());
-    }
+    refuse_if_busy(&ctx)?;
     if !path.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
     let name = crate::import::file_label(&path);
-    // A fresh session like `stop_recording`: never pastes, clears a stale
-    // cancel, and marks a transcription in flight.
+    let session = begin_import(app, &ctx);
+    push_import(app, json!({ "phase": "decoding", "name": name }));
+    eprintln!("import: decoding {}", path.display());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let decoded = crate::import::decode_to_16k(&path);
+        run_import_take(&app, session, decoded, &name, "file", "Import failed");
+    });
+    Ok(())
+}
+
+/// Why a file import or a capture cannot start right now.
+fn refuse_if_busy(ctx: &AppCtx) -> Result<(), String> {
+    if ctx.recording.load(Ordering::SeqCst) || ctx.busy.load(Ordering::SeqCst) {
+        return Err("Stop the recording first".into());
+    }
+    if ctx.capturing.load(Ordering::SeqCst) {
+        return Err("A system audio capture is running".into());
+    }
+    if ctx.xscribing.load(Ordering::SeqCst) {
+        return Err("Still transcribing the last take".into());
+    }
+    Ok(())
+}
+
+/// Open the import lane: a fresh session like `stop_recording` (never
+/// pastes, clears a stale cancel, marks a transcription in flight),
+/// `importing` set so the dictation keys are refused, pill and tray on
+/// "transcribing". Returns the session id the take must finish under.
+fn begin_import(app: &AppHandle, ctx: &AppCtx) -> u64 {
     let session = ctx.session.fetch_add(1, Ordering::SeqCst) + 1;
     ctx.paste_session.store(0, Ordering::SeqCst);
     ctx.cancel_xscribe.store(false, Ordering::SeqCst);
     ctx.xscribing.store(true, Ordering::SeqCst);
     ctx.importing.store(true, Ordering::SeqCst);
-    show_pill(app, &ctx, "transcribing", None);
+    show_pill(app, ctx, "transcribing", None);
     crate::set_tray_state(app, "transcribing");
+    session
+}
+
+/// Finish the import lane: run `samples` (16 kHz mono, or the reason
+/// there are none) through `transcribe_worker` under `session`, report
+/// every phase to the panel, and release the lane. `marker` is the mic
+/// column prefix ("file" or "capture"); `fail_label` the pill text when
+/// there is nothing to transcribe.
+fn run_import_take(
+    app: &AppHandle,
+    session: u64,
+    samples: Result<Vec<f32>, String>,
+    name: &str,
+    marker: &str,
+    fail_label: &str,
+) {
+    let ctx = app.state::<AppCtx>();
+    let samples = samples.and_then(|s| {
+        if audio::too_short(s.len(), audio::SAMPLE_RATE) {
+            Err("no audio to transcribe (shorter than 0.3 s)".to_string())
+        } else {
+            Ok(s)
+        }
+    });
+    let samples = match samples {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("import failed: {e}");
+            ctx.importing.store(false, Ordering::SeqCst);
+            if ctx.session.load(Ordering::SeqCst) == session {
+                ctx.xscribing.store(false, Ordering::SeqCst);
+                crate::set_tray_state(app, "idle");
+                play(&ctx, "error");
+                show_pill(app, &ctx, "error", Some(fail_label));
+                arm_pill_hide(app, &ctx, 2000);
+            }
+            push_import(app, json!({ "phase": "error", "name": name, "error": e }));
+            return;
+        }
+    };
+    let secs = samples.len() as f64 / f64::from(audio::SAMPLE_RATE);
+    eprintln!("import: {name}, {secs:.1} s of audio");
+    push_import(
+        app,
+        json!({ "phase": "transcribing", "name": name, "secs": secs }),
+    );
+    let take = Take {
+        samples,
+        rate: audio::SAMPLE_RATE,
+        mic_name: name.to_string(),
+    };
+    // The log's mic column carries the source behind a marker, which is
+    // also how the panel knows to tag the entry.
+    let outcome = transcribe_worker(app.clone(), take, secs, format!("{marker}:{name}"), session);
+    ctx.importing.store(false, Ordering::SeqCst);
+    let (phase, error) = match outcome {
+        Outcome::Done => ("done", None),
+        Outcome::Empty => ("error", Some("No speech found")),
+        Outcome::Error => ("error", Some("Transcription failed")),
+        Outcome::Model => ("error", Some("Model not ready")),
+        Outcome::CopyFail => ("error", Some("Transcribed, but the clipboard copy failed")),
+        Outcome::Noop => ("error", Some("Cancelled")),
+    };
+    push_import(
+        app,
+        json!({ "phase": phase, "name": name, "secs": secs, "error": error }),
+    );
+}
+
+/// A running system-audio capture: the loopback/monitor stream, the
+/// microphone track when the user asked for it (owned by the recorder
+/// thread like any mic take), and when it started.
+pub struct CaptureSession {
+    sys: crate::capture::SystemCapture,
+    with_mic: bool,
+    started: Instant,
+}
+
+/// Panel-side capture state (`window.tiroSetCapture`).
+fn push_capture(app: &AppHandle, ctx: &AppCtx) {
+    push_panel(app, "tiroSetCapture", capture_dict(ctx));
+}
+
+pub fn capture_dict(ctx: &AppCtx) -> serde_json::Value {
+    let cap = lock(&ctx.capture);
+    match cap.as_ref() {
+        Some(c) => json!({
+            "active": true,
+            "source": c.sys.source,
+            "mic": c.with_mic,
+            "secs": c.started.elapsed().as_secs_f64(),
+        }),
+        None => json!({ "active": false }),
+    }
+}
+
+/// Start recording what the machine plays through `output` (a row of
+/// `capture::list_outputs`, empty = the default device), plus the
+/// configured microphone when `with_mic`. The pill shows "recording" with
+/// the system level; the dictation keys are refused meanwhile; Stop in
+/// the panel (`stop_system_capture`) transcribes it like an imported file,
+/// Ctrl+Alt+X (`cancel_record`) throws it away.
+pub fn start_system_capture(app: &AppHandle, output: &str, with_mic: bool) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    refuse_if_busy(&ctx)?;
+    let sys = crate::capture::SystemCapture::start(output)?;
+    let mut mic_ok = false;
+    if with_mic {
+        ctx.monitor_gen.fetch_add(1, Ordering::SeqCst);
+        let mic = lock(&ctx.cfg).get("mic_name");
+        let (reply_tx, reply_rx) = channel();
+        let _ = lock(&ctx.rec_tx).send(RecCmd::Start {
+            mic,
+            reply: reply_tx,
+        });
+        match reply_rx
+            .recv()
+            .unwrap_or_else(|_| Err("recorder thread unavailable".to_string()))
+        {
+            Ok((name, rate, _meter)) => {
+                mic_ok = true;
+                eprintln!("capture: microphone '{name}' @ {rate} Hz joins the capture");
+            }
+            Err(e) => eprintln!("capture: microphone unavailable ({e}); system audio only"),
+        }
+    }
+    let meter = sys.level_meter();
+    let source = sys.source.clone();
+    *lock(&ctx.capture) = Some(CaptureSession {
+        sys,
+        with_mic: mic_ok,
+        started: Instant::now(),
+    });
+    ctx.capturing.store(true, Ordering::SeqCst);
+    play(&ctx, "start");
+    show_pill(app, &ctx, "recording", None);
+    start_level_pusher(app, &ctx, meter);
+    crate::set_tray_state(app, "recording");
+    push_capture(app, &ctx);
+    eprintln!("● Capturing system audio from '{source}' (mic: {mic_ok})");
+    Ok(())
+}
+
+/// Stop the capture and transcribe it through the import lane. The system
+/// track and the microphone track are mixed into one take.
+pub fn stop_system_capture(app: &AppHandle) -> Result<(), String> {
+    let ctx = app.state::<AppCtx>();
+    let Some(session) = lock(&ctx.capture).take() else {
+        return Err("No capture is running".into());
+    };
+    ctx.capturing.store(false, Ordering::SeqCst);
+    ctx.level_gen.fetch_add(1, Ordering::SeqCst);
+    play(&ctx, "stop");
+    let name = session.sys.source.clone();
+    let mic_take = if session.with_mic {
+        let (reply_tx, reply_rx) = channel();
+        let _ = lock(&ctx.rec_tx).send(RecCmd::Stop { reply: reply_tx });
+        reply_rx.recv().ok().flatten()
+    } else {
+        None
+    };
+    let secs = session.started.elapsed().as_secs_f64();
+    push_capture(app, &ctx);
+    let import_session = begin_import(app, &ctx);
     push_import(app, json!({ "phase": "decoding", "name": name }));
-    eprintln!("import: decoding {}", path.display());
     let app = app.clone();
     std::thread::spawn(move || {
-        let ctx = app.state::<AppCtx>();
-        let decoded = crate::import::decode_to_16k(&path).and_then(|s| {
-            if audio::too_short(s.len(), audio::SAMPLE_RATE) {
-                Err("no audio to transcribe (shorter than 0.3 s)".to_string())
-            } else {
-                Ok(s)
+        let sys = session.sys.stop();
+        let mixed = match mic_take {
+            Some(mic) => {
+                let mic16 = audio::resample_to_16k(&mic.samples, mic.rate);
+                crate::capture::mix(&sys, &mic16)
             }
-        });
-        let samples = match decoded {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("import failed: {e}");
-                ctx.importing.store(false, Ordering::SeqCst);
-                if ctx.session.load(Ordering::SeqCst) == session {
-                    ctx.xscribing.store(false, Ordering::SeqCst);
-                    crate::set_tray_state(&app, "idle");
-                    play(&ctx, "error");
-                    show_pill(&app, &ctx, "error", Some("Import failed"));
-                    arm_pill_hide(&app, &ctx, 2000);
-                }
-                push_import(&app, json!({ "phase": "error", "name": name, "error": e }));
-                return;
-            }
+            None => sys,
         };
-        let secs = samples.len() as f64 / f64::from(audio::SAMPLE_RATE);
-        eprintln!("import: {name} decoded, {secs:.1} s of audio");
-        push_import(
-            &app,
-            json!({ "phase": "transcribing", "name": name, "secs": secs }),
+        eprintln!(
+            "capture: stopped after {secs:.1} s, {} samples",
+            mixed.len()
         );
-        let take = Take {
-            samples,
-            rate: audio::SAMPLE_RATE,
-            mic_name: name.clone(),
-        };
-        // The log's mic column carries the file name behind a "file:"
-        // marker, which is also how the panel knows to show the file tag.
-        let outcome = transcribe_worker(app.clone(), take, secs, format!("file:{name}"), session);
-        ctx.importing.store(false, Ordering::SeqCst);
-        let (phase, error) = match outcome {
-            Outcome::Done => ("done", None),
-            Outcome::Empty => ("error", Some("No speech found")),
-            Outcome::Error => ("error", Some("Transcription failed")),
-            Outcome::Model => ("error", Some("Model not ready")),
-            Outcome::CopyFail => ("error", Some("Transcribed, but the clipboard copy failed")),
-            Outcome::Noop => ("error", Some("Cancelled")),
-        };
-        push_import(
+        run_import_take(
             &app,
-            json!({ "phase": phase, "name": name, "secs": secs, "error": error }),
+            import_session,
+            Ok(mixed),
+            &name,
+            "capture",
+            "Capture failed",
         );
     });
     Ok(())
+}
+
+/// Throw a running capture away (Ctrl+Alt+X).
+fn cancel_system_capture(app: &AppHandle, ctx: &AppCtx) {
+    let Some(session) = lock(&ctx.capture).take() else {
+        return;
+    };
+    ctx.capturing.store(false, Ordering::SeqCst);
+    ctx.level_gen.fetch_add(1, Ordering::SeqCst);
+    if session.with_mic {
+        let _ = lock(&ctx.rec_tx).send(RecCmd::Cancel);
+    }
+    std::thread::spawn(move || drop(session.sys.stop()));
+    crate::set_tray_state(app, "idle");
+    hide_pill(app, ctx);
+    play(ctx, "cancel");
+    push_capture(app, ctx);
+    eprintln!("capture cancelled");
 }
 
 #[derive(Clone, Copy)]
@@ -1598,6 +1783,10 @@ fn finish(
 pub fn cancel_record(app: &AppHandle) {
     let ctx = app.state::<AppCtx>();
     if ctx.busy.load(Ordering::SeqCst) {
+        return;
+    }
+    if ctx.capturing.load(Ordering::SeqCst) {
+        cancel_system_capture(app, &ctx);
         return;
     }
     if !ctx.recording.load(Ordering::SeqCst) {

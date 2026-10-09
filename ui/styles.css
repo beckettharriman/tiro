@@ -225,6 +225,16 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 .import.err .import-sub{ white-space:normal; }
 .import .ghost{ width:22px; height:22px; flex:none; }
 .import .ghost svg{ width:11px; height:11px; }
+.import .import-dismiss .i-stop{ display:none; }
+.panel.capturing .import .import-dismiss .i-x{ display:none; }
+.panel.capturing .import .import-dismiss .i-stop{ display:block; width:12px; height:12px; }
+.panel.capturing .import .spin{ animation:none; opacity:1; color:#ff453a; }
+/* capture sheet: the system-audio controls, folded under the toolbar */
+.capture-sheet{ display:none; margin: 0 var(--s-1) var(--s-4); }
+.capture-sheet.open{ display:block; animation: land var(--t-med) var(--ease) both; }
+.sysbtn{ display:none; }
+.has-outputs .sysbtn{ display:inline-flex; }
+.sysbtn.on{ background:rgba(var(--ink),.10); }
 @keyframes importSpin{ to{ transform:rotate(360deg); } }
 @media (prefers-reduced-motion: reduce){ .import .spin{ animation:none; } }
 .empty .drophint{ font-size:12px; color:rgba(var(--ink),.40); margin-top:calc(-1 * var(--s-3)); }
@@ -293,6 +303,7 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 }
 .meta .dot{ font-weight:400; color:rgba(var(--ink),.28); }
 .meta .dur{ font-weight:500; color:rgba(var(--ink),.38); }
+.meta .source{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; }
 .meta .file{ font-weight:500; color:rgba(var(--ink),.38); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .copied-chip{
   margin-left:auto;

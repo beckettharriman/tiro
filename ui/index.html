@@ -48,7 +48,8 @@
       <span class="import-name"></span>
       <span class="import-sub"></span>
       <button class="ghost import-dismiss" title="Dismiss">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <svg class="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
     </div>
 
@@ -103,6 +104,9 @@
             </button>
           </span>
           <span class="selwrap"><select class="sel" id="selMicT"></select></span>
+          <button class="ghost sysbtn" id="sysBtn" title="Capture system audio">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+          </button>
           <button class="ghost filebtn" id="importBtn2" title="Transcribe an audio file">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 19a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0v-4a6 6 0 0 1 12 0v4a2 2 0 1 1-4 0v-1a2 2 0 1 1 4 0"/></svg>
           </button>
@@ -111,13 +115,32 @@
             <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
           </button>
         </div>
+        <!-- system audio capture: what the machine plays, optionally with the mic -->
+        <div class="capture-sheet card" id="captureSheet">
+          <div class="row">
+            <div class="lbl"><div class="name">Capture system audio</div><div class="sub">Record what this computer is playing, a call or a video, and transcribe it.</div></div>
+          </div>
+          <div class="row">
+            <div class="lbl"><div class="name">Output</div></div>
+            <span class="selwrap"><select class="sel" id="selOutput"></select></span>
+          </div>
+          <div class="row">
+            <div class="lbl"><div class="name">Include microphone</div><div class="sub">Mix your own voice in, for a call.</div></div>
+            <button class="sw" id="swCapMic" role="switch" aria-checked="true" aria-label="Include microphone"></button>
+          </div>
+          <div class="row">
+            <div class="lbl"><div class="sub">Ctrl+Alt+X throws a capture away. The dictation keys wait until it stops.</div></div>
+            <button class="mini" id="capStart">Start capture</button>
+          </div>
+        </div>
         <!-- same import strip as the compact surface (renderImport drives both) -->
         <div class="import" role="status" aria-live="polite">
           <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
           <span class="import-name"></span>
           <span class="import-sub"></span>
           <button class="ghost import-dismiss" title="Dismiss">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <svg class="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
         </div>
         <div id="advList"></div>

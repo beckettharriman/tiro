@@ -179,11 +179,23 @@ mod linux {
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    /// Sinks + default, cached briefly: the panel's get_state asks on
+    /// every view switch and two pactl spawns per call would add up.
     fn sinks() -> (Vec<Sink>, Option<String>) {
+        use std::time::{Duration, Instant};
+        type Snapshot = (Vec<Sink>, Option<String>);
+        static CACHE: Mutex<Option<(Instant, Snapshot)>> = Mutex::new(None);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, data)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(3) {
+                return data.clone();
+            }
+        }
         let sinks = pactl(&["--format=json", "list", "sinks"])
             .map(|j| parse_sinks(&j))
             .unwrap_or_default();
         let default = pactl(&["get-default-sink"]).filter(|s| !s.is_empty());
+        *cache = Some((Instant::now(), (sinks.clone(), default.clone())));
         (sinks, default)
     }
 
@@ -321,13 +333,21 @@ mod windows {
     fn outputs() -> Vec<(cpal::Device, String)> {
         let host = cpal::default_host();
         let mut out = Vec::new();
+        let label = |d: &cpal::Device| -> String {
+            d.description()
+                .map(|desc| desc.name().to_string())
+                .unwrap_or_default()
+        };
         if let Some(d) = host.default_output_device() {
-            let name = d.name().unwrap_or_else(|_| "Default Output".into());
+            let mut name = label(&d);
+            if name.is_empty() {
+                name = "Default Output".into();
+            }
             out.push((d, format!("{name}{DEFAULT_SUFFIX}")));
         }
         if let Ok(devs) = host.output_devices() {
             for d in devs {
-                let name = d.name().unwrap_or_default();
+                let name = label(&d);
                 if name.is_empty() || out.iter().any(|(_, n)| n.starts_with(&name)) {
                     continue;
                 }
@@ -377,7 +397,7 @@ mod windows {
         // reports otherwise.
         let stream = match cfg.sample_format() {
             SampleFormat::I16 => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[i16], _| {
                     if !running_cb.load(Ordering::Relaxed) {
                         return;
@@ -392,7 +412,7 @@ mod windows {
                 None,
             ),
             _ => device.build_input_stream(
-                &config,
+                config,
                 move |data: &[f32], _| {
                     if !running_cb.load(Ordering::Relaxed) {
                         return;
