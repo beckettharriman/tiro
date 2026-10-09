@@ -461,6 +461,57 @@ pub fn resample_to_16k(audio: &[f32], sr: u32) -> Vec<f32> {
         .collect()
 }
 
+/// Frame length of the silence gate, in samples at 16 kHz (20 ms).
+const GATE_FRAME: usize = (SAMPLE_RATE / 50) as usize;
+/// Audio kept on each side of the detected speech (300 ms at 16 kHz) so a
+/// soft onset or a trailing consonant is never shaved off.
+const GATE_PAD: usize = (SAMPLE_RATE * 3 / 10) as usize;
+/// Absolute floor of the gate threshold (about -54 dBFS): a mic that is
+/// quieter than this at rest still trims against a sensible level.
+const GATE_MIN_THRESHOLD: f32 = 0.002;
+/// Speech must stand this many times above the noise floor to count.
+const GATE_FLOOR_RATIO: f32 = 3.0;
+
+/// Trim leading and trailing silence off a 16 kHz take before it reaches
+/// whisper. Trailing silence is where whisper hallucinates ("Thank you.",
+/// "you you you"): the user stops talking, reaches for the hotkey, and the
+/// model is handed seconds of room tone it is compelled to caption. The gate
+/// is energy based and noise adaptive: 20 ms frame RMS, the 10th percentile
+/// as the noise floor, speech = frames above max(floor * ratio, absolute
+/// floor). Only the ends are cut, with a 300 ms pad kept on each side; the
+/// middle is never touched. If no frame crosses the threshold the take is
+/// returned unchanged so a quiet mic can never lose words to the gate.
+pub fn trim_silence(audio: &[f32]) -> &[f32] {
+    let (start, end) = silence_bounds(audio);
+    &audio[start..end]
+}
+
+/// `[start, end)` of the kept region for `trim_silence`; the whole slice
+/// when there is nothing to trim or nothing to keep.
+pub fn silence_bounds(audio: &[f32]) -> (usize, usize) {
+    let n = audio.len();
+    if n < GATE_FRAME * 10 {
+        return (0, n);
+    }
+    let (frames, _) = audio.as_chunks::<GATE_FRAME>();
+    let rms: Vec<f32> = frames
+        .iter()
+        .map(|f| (f.iter().map(|s| s * s).sum::<f32>() / f.len() as f32).sqrt())
+        .collect();
+    let mut sorted = rms.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let floor = sorted[sorted.len() / 10];
+    let threshold = (floor * GATE_FLOOR_RATIO).max(GATE_MIN_THRESHOLD);
+    let first = rms.iter().position(|&r| r > threshold);
+    let last = rms.iter().rposition(|&r| r > threshold);
+    let (Some(first), Some(last)) = (first, last) else {
+        return (0, n);
+    };
+    let start = (first * GATE_FRAME).saturating_sub(GATE_PAD);
+    let end = ((last + 1) * GATE_FRAME + GATE_PAD).min(n);
+    (start, end)
+}
+
 /// The <0.3 s guard: too little audio at `rate` to be a real take. f64
 /// arithmetic so the boundary behaves exactly like the original's Python
 /// comparison (`audio.size < rate * 0.3`).
@@ -782,6 +833,59 @@ pub fn record_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_gate_trims_only_the_ends() {
+        let sr = SAMPLE_RATE as usize;
+        let mut a = vec![0.0f32; sr]; // 1 s silence
+        let tone: Vec<f32> = (0..sr * 2).map(|i| (i as f32 * 0.05).sin() * 0.1).collect(); // 2 s "speech"
+        a.extend_from_slice(&tone);
+        a.extend(std::iter::repeat_n(0.0f32, sr * 3)); // 3 s silence
+        let (start, end) = silence_bounds(&a);
+        // Speech spans [1 s, 3 s); the pad keeps 300 ms on each side.
+        assert!(
+            start <= sr && start >= sr - GATE_PAD - GATE_FRAME,
+            "start {start}"
+        );
+        assert!(
+            end >= sr * 3 && end <= sr * 3 + GATE_PAD + GATE_FRAME,
+            "end {end}"
+        );
+    }
+
+    #[test]
+    fn silence_gate_keeps_a_quiet_take_whole() {
+        let a = vec![0.0005f32; SAMPLE_RATE as usize * 2];
+        assert_eq!(silence_bounds(&a), (0, a.len()));
+        let short = vec![0.5f32; 100];
+        assert_eq!(silence_bounds(&short), (0, 100));
+    }
+
+    #[test]
+    fn silence_gate_adapts_to_a_noisy_floor() {
+        // Room tone at 0.01 RMS everywhere, speech at 0.1 in the middle:
+        // the floor-relative threshold must still find the speech.
+        let sr = SAMPLE_RATE as usize;
+        let noise = |i: usize| {
+            if i.is_multiple_of(2) {
+                0.01f32
+            } else {
+                -0.01f32
+            }
+        };
+        let mut a: Vec<f32> = (0..sr).map(noise).collect();
+        a.extend((0..sr).map(|i| (i as f32 * 0.05).sin() * 0.1));
+        a.extend((0..sr * 2).map(noise));
+        let (start, end) = silence_bounds(&a);
+        assert!(
+            start >= sr - GATE_PAD - GATE_FRAME && start < sr + GATE_FRAME,
+            "start {start}"
+        );
+        assert!(
+            end > sr * 2 - GATE_FRAME && end <= sr * 2 + GATE_PAD + GATE_FRAME,
+            "end {end}"
+        );
+    }
 
     #[test]
     fn resample_identity_at_16k() {

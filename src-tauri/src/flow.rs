@@ -1280,6 +1280,21 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
         // pill, tray and exit path included).
         let _serial = lock(&ctx.xscribe);
         let audio16 = audio::resample_to_16k(&take.samples, take.rate);
+        // Cut the room tone off both ends before whisper sees it: trailing
+        // silence is where it invents a closing "Thank you." (see
+        // audio::trim_silence). The 0.3 s guard above already ran on the
+        // raw take, so an all-quiet take still reaches the engine whole.
+        let audio16 = {
+            let (start, end) = audio::silence_bounds(&audio16);
+            if start > 0 || end < audio16.len() {
+                eprintln!(
+                    "silence gate: kept {:.2}s of {:.2}s",
+                    (end - start) as f64 / f64::from(audio::SAMPLE_RATE),
+                    audio16.len() as f64 / f64::from(audio::SAMPLE_RATE)
+                );
+            }
+            audio16[start..end].to_vec()
+        };
         let (cleanup_mode, vocab) = {
             let cfg = lock(&ctx.cfg);
             (

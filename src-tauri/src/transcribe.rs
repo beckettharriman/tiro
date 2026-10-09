@@ -560,6 +560,102 @@ pub fn collapse_non_speech(text: &str) -> &str {
     ""
 }
 
+/// One whisper segment as the tail guard sees it: text, timestamps in
+/// centiseconds, and the mean token probability.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Segment {
+    pub text: String,
+    pub t0: i64,
+    pub t1: i64,
+    pub avg_p: f32,
+}
+
+/// Phrases whisper invents for audio with no speech in it (the tail of a
+/// take after the user stopped talking, or a window of room tone). Lower
+/// case, no punctuation. A segment is only ever dropped on top of timing
+/// evidence, never on the phrase alone — see `drop_tail_hallucinations`.
+const TAIL_HALLUCINATIONS: &[&str] = &[
+    "thank you",
+    "thank you very much",
+    "thanks",
+    "thanks for watching",
+    "thank you for watching",
+    "thanks for listening",
+    "thank you for listening",
+    "bye",
+    "goodbye",
+    "you",
+    "okay",
+    "so",
+    "the end",
+    "please subscribe",
+    "subs by www zeoranger co uk",
+    "subtitles by the amara org community",
+];
+
+/// A whole decode window of silence that follows real speech is captioned
+/// by whisper as a sign-off: the user's "Thank you." that was never said.
+/// A trailing segment is dropped when both of these hold: its text,
+/// lower-cased with punctuation removed, is one of the known invented
+/// phrases (or that phrase repeated, "you you you"); and it is separated
+/// from the previous kept segment by at least `TAIL_GAP_CS` of audio (a
+/// real closing "thank you" follows the sentence within a second), or it
+/// is the only segment of the take. The check repeats for the segment
+/// before it, so "Thank you. Thank you. Thank you." collapses entirely.
+/// Returns the kept texts in order.
+const TAIL_GAP_CS: i64 = 100;
+
+pub fn drop_tail_hallucinations(mut segments: Vec<Segment>) -> Vec<String> {
+    while let Some(last) = segments.last() {
+        let phrase = normalize_phrase(&last.text);
+        let invented = !phrase.is_empty() && is_tail_hallucination(&phrase);
+        if !invented {
+            break;
+        }
+        let isolated = match segments.len().checked_sub(2).map(|i| &segments[i]) {
+            None => true,
+            Some(prev) => last.t0 - prev.t1 >= TAIL_GAP_CS,
+        };
+        if !isolated {
+            break;
+        }
+        segments.pop();
+    }
+    segments.into_iter().map(|s| s.text).collect()
+}
+
+/// `phrase` is one of the invented sign-offs, or one of them repeated
+/// ("thank you thank you", "you you you you").
+fn is_tail_hallucination(phrase: &str) -> bool {
+    TAIL_HALLUCINATIONS.iter().any(|h| {
+        let h_words = h.split(' ').count();
+        let words: Vec<&str> = phrase.split(' ').collect();
+        !words.is_empty()
+            && words.len().is_multiple_of(h_words)
+            && words.chunks(h_words).all(|c| c.join(" ") == *h)
+    })
+}
+
+/// Lower-case, keep letters and digits, collapse everything else to single
+/// spaces: "Thank you!" -> "thank you", "www.zeoranger.co.uk" -> "www
+/// zeoranger co uk".
+fn normalize_phrase(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut space = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() {
+            if space && !out.is_empty() {
+                out.push(' ');
+            }
+            space = false;
+            out.extend(c.to_lowercase());
+        } else {
+            space = true;
+        }
+    }
+    out
+}
+
 /// A loaded CPU whisper model.
 pub struct Transcriber {
     ctx: WhisperContext,
@@ -634,21 +730,59 @@ impl Transcriber {
             .full(params, samples)
             .map_err(|e| format!("transcribe failed: {e}"))?;
         let n = state.full_n_segments();
-        let mut parts = Vec::new();
+        // TIRO_SEGMENT_DEBUG=<file>: append one line per segment (timestamps,
+        // mean token probability) for tuning the hallucination guards; a
+        // file because the worker's stderr is null.
+        let debug = std::env::var_os("TIRO_SEGMENT_DEBUG").map(std::path::PathBuf::from);
+        let mut segments = Vec::new();
         for i in 0..n {
             if let Some(segment) = state.get_segment(i) {
                 if let Ok(text) = segment.to_str_lossy() {
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        parts.push(trimmed);
+                    let n_tok = segment.n_tokens();
+                    let mut sum = 0.0f32;
+                    let mut cnt = 0usize;
+                    for t in 0..n_tok {
+                        if let Some(tok) = segment.get_token(t) {
+                            sum += tok.token_probability();
+                            cnt += 1;
+                        }
+                    }
+                    let seg = Segment {
+                        text: text.trim().to_string(),
+                        t0: segment.start_timestamp(),
+                        t1: segment.end_timestamp(),
+                        avg_p: if cnt > 0 { sum / cnt as f32 } else { 0.0 },
+                    };
+                    if let Some(debug) = &debug {
+                        use std::io::Write as _;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(debug)
+                        {
+                            let _ = writeln!(
+                                f,
+                                "seg {i}: t0={} t1={} avg_p={:.3} toks={} text={:?}",
+                                seg.t0, seg.t1, seg.avg_p, n_tok, seg.text
+                            );
+                        }
+                    }
+                    if !seg.text.is_empty() {
+                        segments.push(seg);
                     }
                 }
             }
         }
+        let parts = drop_tail_hallucinations(segments);
         let joined = parts.join(" ");
         // A take that is nothing but non-speech markers ([BLANK_AUDIO], …)
-        // becomes "" so silence follows the original's empty-result path.
-        Ok(collapse_non_speech(joined.trim()).to_string())
+        // or stray punctuation (".") becomes "" so silence follows the
+        // original's empty-result path.
+        let text = collapse_non_speech(joined.trim());
+        if text.chars().all(|c| !c.is_alphanumeric()) {
+            return Ok(String::new());
+        }
+        Ok(text.to_string())
     }
 
     /// The original's warm-up: transcribe 1 s of silence to page the model in
@@ -783,6 +917,76 @@ pub fn transcribe_test(wav_path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seg(text: &str, t0: i64, t1: i64) -> Segment {
+        Segment {
+            text: text.to_string(),
+            t0,
+            t1,
+            avg_p: 0.9,
+        }
+    }
+
+    #[test]
+    fn tail_guard_drops_an_isolated_thank_you() {
+        let kept = drop_tail_hallucinations(vec![
+            seg("and to be finally a blessed soul in heaven.", 1944, 2394),
+            seg("Thank you.", 3000, 3034),
+        ]);
+        assert_eq!(kept, vec!["and to be finally a blessed soul in heaven."]);
+    }
+
+    #[test]
+    fn tail_guard_keeps_a_spoken_thank_you() {
+        // Within a second of the sentence: the user said it.
+        let kept = drop_tail_hallucinations(vec![
+            seg("That covers everything for today.", 100, 300),
+            seg("Thank you.", 320, 380),
+        ]);
+        assert_eq!(kept.len(), 2);
+        // Inside a segment with other words: never touched.
+        let kept = drop_tail_hallucinations(vec![seg("Okay thank you so much, bye.", 0, 300)]);
+        assert_eq!(kept, vec!["Okay thank you so much, bye."]);
+    }
+
+    #[test]
+    fn tail_guard_collapses_repeats_and_lone_signoffs() {
+        let kept = drop_tail_hallucinations(vec![
+            seg("I don't like the way this UI looks.", 0, 500),
+            seg("Thank you.", 700, 720),
+            seg("Thank you.", 1000, 1020),
+            seg("Thank you. Thank you.", 1300, 1340),
+        ]);
+        assert_eq!(kept, vec!["I don't like the way this UI looks."]);
+        assert!(drop_tail_hallucinations(vec![seg("you you you you", 0, 100)]).is_empty());
+        assert!(drop_tail_hallucinations(vec![seg("Thank you.", 0, 100)]).is_empty());
+        assert!(
+            drop_tail_hallucinations(vec![seg("Subs by www.zeoranger.co.uk", 0, 100)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn tail_guard_leaves_real_words_alone() {
+        let kept = drop_tail_hallucinations(vec![
+            seg("Remind me to call the dentist.", 0, 300),
+            seg("Tomorrow.", 500, 560),
+        ]);
+        assert_eq!(kept.len(), 2);
+        // A real "no no no" is not in the list and survives any gap.
+        let kept = drop_tail_hallucinations(vec![seg("Wait.", 0, 50), seg("No no no.", 400, 460)]);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn phrase_normalization() {
+        assert_eq!(normalize_phrase("Thank you!"), "thank you");
+        assert_eq!(
+            normalize_phrase("  Subs by www.zeoranger.co.uk "),
+            "subs by www zeoranger co uk"
+        );
+        assert!(is_tail_hallucination("thank you thank you"));
+        assert!(!is_tail_hallucination("thank you kindly"));
+    }
     use tempfile::TempDir;
 
     #[test]
