@@ -252,6 +252,7 @@
     cancel_record() { return Promise.resolve(null); },
     set_pin() { return Promise.resolve(null); },
     set_expanded() { return Promise.resolve(null); },
+    ui_log() { return Promise.resolve(null); },
     close_panel() { return Promise.resolve(null); },
     begin_drag() { return Promise.resolve(null); },
     pick_folder() { return Promise.resolve(null); },
@@ -801,6 +802,30 @@
   const expandBtn = $("expandBtn");
   let advTimer = null;
   let advGen = 0;
+  /* Windows and macOS resize the OS window to the glass (Linux keeps a
+     fixed footprint and only retargets its input shape). On those the
+     native resize must land BEFORE the width transition starts: a window
+     that grows under a running animation forces the webview to rebuild
+     its surface and re-lay out mid-transition, which is what made the
+     expand look choppy. The window grows leftward with its top-right
+     corner pinned and the glass hugs the right edge, so the resize alone
+     changes nothing the eye can see; the glass then animates inside a
+     window that is already its final size. */
+  const nativeResize = bridgeReady() && !/Linux/.test(navigator.platform);
+  function afterNativeResize(fn) {
+    if (!nativeResize) { fn(); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("resize", onResize);
+      clearTimeout(tm);
+      requestAnimationFrame(fn);
+    };
+    const onResize = () => finish();
+    window.addEventListener("resize", onResize);
+    const tm = setTimeout(finish, 120);
+  }
   const SWAP_MS = 160; /* --t-fast: the content cross-fade beat */
   /* the glass width is settling until this timestamp; entries-list
      rebuilds wait for it so the 520 ms transition never competes with an
@@ -834,17 +859,20 @@
     if (on) {
       expandBtn.title = "Collapse";
       panel.classList.remove("advout");
-      /* width starts now; .swap fades the compact body out first beat */
-      panel.classList.add("adv", "swap");
-      markSettle();
-      advTimer = setTimeout(() => {
-        if (gen !== advGen) return;
-        panel.classList.remove("swap");
-      }, motionReduced() ? 0 : SWAP_MS);
       Promise.resolve(api.set_expanded && api.set_expanded(true)).catch(() => {});
-      afterSettle(() => { if (gen === advGen) renderAdv(); });
-      ensureMic();
-      kickWave();
+      afterNativeResize(() => {
+        if (gen !== advGen) return;
+        /* width starts now; .swap fades the compact body out first beat */
+        panel.classList.add("adv", "swap");
+        markSettle();
+        advTimer = setTimeout(() => {
+          if (gen !== advGen) return;
+          panel.classList.remove("swap");
+        }, motionReduced() ? 0 : SWAP_MS);
+        afterSettle(() => { if (gen === advGen) renderAdv(); });
+        ensureMic();
+        kickWave();
+      });
     } else {
       expandBtn.title = "Expand";
       panel.classList.remove("swap");
@@ -863,6 +891,10 @@
   }
   expandBtn.addEventListener("click", () => {
     const opening = !App.adv;
+    /* diagnostics for the "the button sometimes does nothing" report:
+       whether the click reached the page at all, and whether the window
+       was focused when it did */
+    Promise.resolve(api.ui_log && api.ui_log("expand click: " + (opening ? "open" : "close") + ", focused=" + document.hasFocus())).catch(() => {});
     if (opening) setView("history");
     setAdv(opening);
   });
@@ -1819,13 +1851,19 @@
      to a machine with no text scaling. Measure unzoomed, and ignore
      implausible ratios so a transient bad measurement can't wreck the UI. */
   const DESIGN_H = 560;
+  let fittedH = 0;
   function fitDesignScale() {
     const root = document.documentElement;
+    /* expand/collapse resizes the window's WIDTH only; re-fitting then
+       would reset the root zoom mid-transition for nothing */
+    if (window.innerHeight === fittedH) return;
     root.style.zoom = "";
     const h = window.innerHeight;
     if (!h) return;
     const z = h / DESIGN_H;
     if (z > 0.5 && z < 1.5 && Math.abs(z - 1) > 0.005) root.style.zoom = String(z);
+    /* the height as the page sees it under the zoom just applied */
+    fittedH = window.innerHeight;
   }
 
   let _booted = false;

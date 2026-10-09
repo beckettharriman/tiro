@@ -72,6 +72,10 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   color:rgba(var(--ink),.92);
   display:flex; flex-direction:column;
   overflow:hidden;
+  /* the width transition repaints the whole glass every frame; keep that
+     paint inside its own layer and never let it invalidate the body */
+  will-change: width;
+  contain: paint;
   transition: width var(--t-settle) var(--ease);
 }
 .panel.adv{ width:800px; }

@@ -85,6 +85,14 @@ fn set_expanded(on: bool, app: tauri::AppHandle) {
     placement::set_panel_expanded(&app, on);
 }
 
+/// One line from the panel into tiro.log, for UI diagnostics that a
+/// release build has no console for (expand clicks, focus state).
+#[tauri::command]
+fn ui_log(line: String) {
+    let line: String = line.chars().take(300).collect();
+    eprintln!("ui: {line}");
+}
+
 #[tauri::command]
 fn close_panel(window: WebviewWindow) -> Result<(), String> {
     // Capture the panel's spot while it is still mapped (mirrors the hotkey
@@ -543,6 +551,7 @@ pub fn run() {
             cancel_record,
             set_pin,
             set_expanded,
+            ui_log,
             close_panel,
             begin_drag,
             pick_folder,

@@ -27,6 +27,7 @@
       cancel_record: function () { return invoke("cancel_record"); },
       set_pin: function (on) { return invoke("set_pin", { on: on }); },
       set_expanded: function (on) { return invoke("set_expanded", { on: on }); },
+      ui_log: function (line) { return invoke("ui_log", { line: String(line) }); },
       close_panel: function () { return invoke("close_panel"); },
       begin_drag: function () { return invoke("begin_drag"); },
       pick_folder: function () { return invoke("pick_folder"); },
