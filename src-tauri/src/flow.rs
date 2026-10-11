@@ -31,7 +31,7 @@ use crate::cues;
 use crate::gpu::{GpuWorker, READY_TIMEOUT_CACHED, READY_TIMEOUT_DOWNLOAD};
 use crate::hw;
 use crate::store;
-use crate::transcribe::{self, Transcriber};
+use crate::transcribe::{self, Transcriber, Transcript};
 
 /// How long to leave `gpu_ok` latched false before allowing one re-probe.
 /// A GPU load can fail for transient reasons (driver waking the dGPU, a
@@ -1095,14 +1095,25 @@ fn stop_recording(app: &AppHandle, ctx: &AppCtx, paste: bool) {
     ctx.cancel_xscribe.store(false, Ordering::SeqCst);
     ctx.xscribing.store(true, Ordering::SeqCst);
     let app = app.clone();
-    std::thread::spawn(move || transcribe_worker(app, take, secs, mic, session));
+    std::thread::spawn(move || transcribe_worker(app, take, secs, mic, session, None));
 }
 
 /// Panel-side import progress (`window.tiroSetImport`): `phase` is
 /// "decoding" | "transcribing" | "done" | "error", with the file `name`,
-/// `secs` once the length is known, and `error` text on failure.
+/// `secs` once the length is known, and `error` text on failure. While
+/// speakers are being separated the "transcribing" phase also carries a
+/// `step` ("downloading speaker models" | "separating speakers") and its
+/// `pct` (0-100).
 fn push_import(app: &AppHandle, payload: serde_json::Value) {
     push_panel(app, "tiroSetImport", payload);
+}
+
+/// Speaker separation asked for on an import take: the panel name the
+/// progress is reported under, and the speaker count when known (`None`
+/// lets the clustering decide).
+pub struct Separate {
+    pub name: String,
+    pub speakers: Option<usize>,
 }
 
 /// Import an audio (or video) file as a take — the "transcribe a file"
@@ -1116,8 +1127,9 @@ fn push_import(app: &AppHandle, payload: serde_json::Value) {
 /// Refused while a recording, a transcription or a capture is in flight:
 /// a file must never cost a live take. Decoding runs on the spawned
 /// thread (a long file takes a second or two); the panel follows along
-/// through `push_import`.
-pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
+/// through `push_import`. With `diarize` the take is separated into
+/// speakers after Whisper (see `diarize.rs`).
+pub fn transcribe_file(app: &AppHandle, path: PathBuf, diarize: bool) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     refuse_if_busy(&ctx)?;
     if !path.is_file() {
@@ -1130,7 +1142,15 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf) -> Result<(), String> {
     let app = app.clone();
     std::thread::spawn(move || {
         let decoded = crate::import::decode_to_16k(&path);
-        run_import_take(&app, session, decoded, &name, "file", "Import failed");
+        run_import_take(
+            &app,
+            session,
+            decoded,
+            &name,
+            "file",
+            "Import failed",
+            diarize,
+        );
     });
     Ok(())
 }
@@ -1168,7 +1188,7 @@ fn begin_import(app: &AppHandle, ctx: &AppCtx) -> u64 {
 /// there are none) through `transcribe_worker` under `session`, report
 /// every phase to the panel, and release the lane. `marker` is the mic
 /// column prefix ("file" or "capture"); `fail_label` the pill text when
-/// there is nothing to transcribe.
+/// there is nothing to transcribe; `diarize` asks for speaker separation.
 fn run_import_take(
     app: &AppHandle,
     session: u64,
@@ -1176,6 +1196,7 @@ fn run_import_take(
     name: &str,
     marker: &str,
     fail_label: &str,
+    diarize: bool,
 ) {
     let ctx = app.state::<AppCtx>();
     let samples = samples.and_then(|s| {
@@ -1212,9 +1233,20 @@ fn run_import_take(
         rate: audio::SAMPLE_RATE,
         mic_name: name.to_string(),
     };
+    let separate = diarize.then(|| Separate {
+        name: name.to_string(),
+        speakers: None,
+    });
     // The log's mic column carries the source behind a marker, which is
     // also how the panel knows to tag the entry.
-    let outcome = transcribe_worker(app.clone(), take, secs, format!("{marker}:{name}"), session);
+    let outcome = transcribe_worker(
+        app.clone(),
+        take,
+        secs,
+        format!("{marker}:{name}"),
+        session,
+        separate,
+    );
     ctx.importing.store(false, Ordering::SeqCst);
     let (phase, error) = match outcome {
         Outcome::Done => ("done", None),
@@ -1237,6 +1269,8 @@ pub struct CaptureSession {
     sys: crate::capture::SystemCapture,
     with_mic: bool,
     started: Instant,
+    /// Separate the speakers when the capture is transcribed.
+    diarize: bool,
 }
 
 /// Panel-side capture state (`window.tiroSetCapture`).
@@ -1261,9 +1295,15 @@ pub fn capture_dict(ctx: &AppCtx) -> serde_json::Value {
 /// `capture::list_outputs`, empty = the default device), plus the
 /// configured microphone when `with_mic`. The pill shows "recording" with
 /// the system level; the dictation keys are refused meanwhile; Stop in
-/// the panel (`stop_system_capture`) transcribes it like an imported file,
-/// Ctrl+Alt+X (`cancel_record`) throws it away.
-pub fn start_system_capture(app: &AppHandle, output: &str, with_mic: bool) -> Result<(), String> {
+/// the panel (`stop_system_capture`) transcribes it like an imported file
+/// (separating the speakers when `diarize`), Ctrl+Alt+X (`cancel_record`)
+/// throws it away.
+pub fn start_system_capture(
+    app: &AppHandle,
+    output: &str,
+    with_mic: bool,
+    diarize: bool,
+) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     refuse_if_busy(&ctx)?;
     let sys = crate::capture::SystemCapture::start(output)?;
@@ -1293,6 +1333,7 @@ pub fn start_system_capture(app: &AppHandle, output: &str, with_mic: bool) -> Re
         sys,
         with_mic: mic_ok,
         started: Instant::now(),
+        diarize,
     });
     ctx.capturing.store(true, Ordering::SeqCst);
     play(&ctx, "start");
@@ -1323,6 +1364,7 @@ pub fn stop_system_capture(app: &AppHandle) -> Result<(), String> {
         None
     };
     let secs = session.started.elapsed().as_secs_f64();
+    let diarize = session.diarize;
     push_capture(app, &ctx);
     let import_session = begin_import(app, &ctx);
     push_import(app, json!({ "phase": "decoding", "name": name }));
@@ -1347,6 +1389,7 @@ pub fn stop_system_capture(app: &AppHandle) -> Result<(), String> {
             &name,
             "capture",
             "Capture failed",
+            diarize,
         );
     });
     Ok(())
@@ -1484,7 +1527,20 @@ fn fallback_target(
 /// from the closure maps to an `Outcome`, and a panic anywhere inside it
 /// (whisper bindings, clipboard, log IO) is caught and treated as an error
 /// rather than killing the thread with the pill still showing.
-fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session: u64) -> Outcome {
+///
+/// `separate` (import takes only) adds the speaker-separation step after
+/// Whisper: the take is decoded with word timestamps, `diarize::diarize`
+/// finds the turns, and the merged "Speaker N:" text becomes the verbatim
+/// text, the clipboard copy and the log entry. A separation failure never
+/// costs the take — the plain transcript goes through instead.
+fn transcribe_worker(
+    app: AppHandle,
+    take: Take,
+    secs: f64,
+    mic: String,
+    session: u64,
+    separate: Option<Separate>,
+) -> Outcome {
     let ctx = app.state::<AppCtx>();
     let mut clean: Option<String> = None;
     let mut rec: Option<store::Rec> = None;
@@ -1538,14 +1594,32 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             };
             (serving, engine.model_name.clone())
         };
-        // GPU can afford accuracy (beam 5); CPU stays fast (beam 1).
+        // GPU can afford accuracy (beam 5); CPU stays fast (beam 1). A
+        // take headed for speaker separation asks for word timestamps.
+        let words = separate.is_some();
+        let on_cpu = |t: &Transcriber| -> Result<Transcript, String> {
+            if words {
+                t.transcribe_words(&audio16, 1, vocab.as_deref())
+            } else {
+                t.transcribe(&audio16, 1, vocab.as_deref())
+                    .map(Transcript::plain)
+            }
+        };
+        let on_gpu = |w: &GpuWorker| -> Result<Transcript, String> {
+            if words {
+                w.transcribe_words(&audio16, 5, vocab.as_deref())
+            } else {
+                w.transcribe(&audio16, 5, vocab.as_deref())
+                    .map(Transcript::plain)
+            }
+        };
         let mut engine_flipped = false;
-        let (verbatim, device) = match serving {
+        let (transcript, device) = match serving {
             Serving::Cpu(None) => {
                 eprintln!("transcribe skipped: model not ready");
                 return Outcome::Model;
             }
-            Serving::Cpu(Some(t)) => match t.transcribe(&audio16, 1, vocab.as_deref()) {
+            Serving::Cpu(Some(t)) => match on_cpu(&t) {
                 Ok(text) => (text, "cpu".to_string()),
                 Err(e) => {
                     eprintln!("transcribe failed: {e}");
@@ -1556,7 +1630,7 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
                 let result = gpu
                     .as_deref()
                     .ok_or_else(|| "GPU worker already gone".to_string())
-                    .and_then(|w| w.transcribe(&audio16, 5, vocab.as_deref()));
+                    .and_then(on_gpu);
                 match result {
                     Ok(text) => (text, "gpu".to_string()),
                     Err(e) => {
@@ -1607,17 +1681,15 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
                                     eprintln!("no engine available for the retry");
                                     return Outcome::Error;
                                 }
-                                Some(Retry::Cpu(t)) => {
-                                    match t.transcribe(&audio16, 1, vocab.as_deref()) {
-                                        Ok(text) => break (text, "cpu".to_string()),
-                                        Err(e) => {
-                                            eprintln!("transcribe failed: {e}");
-                                            return Outcome::Error;
-                                        }
+                                Some(Retry::Cpu(t)) => match on_cpu(&t) {
+                                    Ok(text) => break (text, "cpu".to_string()),
+                                    Err(e) => {
+                                        eprintln!("transcribe failed: {e}");
+                                        return Outcome::Error;
                                     }
-                                }
+                                },
                                 Some(Retry::Gpu(w)) => {
-                                    match w.transcribe(&audio16, 5, vocab.as_deref()) {
+                                    match on_gpu(&w) {
                                         Ok(text) => break (text, "gpu".to_string()),
                                         Err(e) => {
                                             // One GPU retry per take; the
@@ -1645,16 +1717,104 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
             eprintln!("transcription discarded (cancelled / superseded)");
             return Outcome::Noop;
         }
+        let Transcript {
+            text: mut verbatim,
+            words: timed,
+        } = transcript;
         if verbatim.is_empty() {
             return Outcome::Empty;
         }
+        // Speaker separation: turns from the audio, merged onto the timed
+        // words. Progress rides the import panel's "transcribing" phase as
+        // a step + percentage. Any failure keeps the plain transcript.
+        let mut speakers = 0usize;
+        if let Some(sep) = separate.as_ref().filter(|_| !timed.is_empty()) {
+            let step = |step: &str, pct: i64| {
+                push_import(
+                    &app,
+                    json!({
+                        "phase": "transcribing", "name": sep.name, "secs": secs,
+                        "step": step, "pct": pct,
+                    }),
+                );
+            };
+            let models_dir = app_dir().join("models");
+            let mut last_pct: i64 = -1;
+            let models = if crate::diarize::models_installed(&models_dir) {
+                Ok(())
+            } else {
+                step("downloading speaker models", 0);
+                crate::diarize::ensure_models(&models_dir, &mut |done, total| {
+                    if let Some(total) = total.filter(|t| *t > 0) {
+                        let pct = (done * 100 / total) as i64;
+                        if pct > last_pct {
+                            last_pct = pct;
+                            step("downloading speaker models", pct);
+                        }
+                    }
+                    !ctx.cancel_xscribe.load(Ordering::SeqCst)
+                })
+                .map(|_| ())
+            };
+            let turns = models.and_then(|()| {
+                step("separating speakers", 0);
+                last_pct = -1;
+                let started = Instant::now();
+                let turns = crate::diarize::diarize_in(&models_dir, &audio16, sep.speakers, |p| {
+                    let pct = (p * 100.0) as i64;
+                    if pct > last_pct {
+                        last_pct = pct;
+                        step("separating speakers", pct);
+                    }
+                });
+                if let Ok(t) = &turns {
+                    eprintln!(
+                        "speakers: {} turns in {:.1}s for {secs:.1}s of audio",
+                        t.len(),
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+                turns
+            });
+            match turns {
+                Ok(turns) => {
+                    let labelled = crate::diarize::speaker_text(&timed, &turns);
+                    if labelled.speakers > 0 {
+                        verbatim = labelled.text;
+                        speakers = labelled.speakers;
+                    } else {
+                        eprintln!("speakers: no turns found; keeping the plain transcript");
+                    }
+                }
+                Err(e) if e == transcribe::DOWNLOAD_CANCELLED => {}
+                Err(e) => {
+                    eprintln!("speaker separation failed ({e}); keeping the plain transcript")
+                }
+            }
+            // A cancel during the separation phase still discards the take.
+            if ctx.cancel_xscribe.load(Ordering::SeqCst)
+                || ctx.session.load(Ordering::SeqCst) != session
+            {
+                eprintln!("transcription discarded (cancelled / superseded)");
+                return Outcome::Noop;
+            }
+        }
         // STATE-3: never copy "" — all-fillers falls back to verbatim.
         // Vocabulary corrections apply to the clipboard/clean layer only;
-        // the verbatim transcript below is logged unchanged.
-        let text = crate::vocab::apply_corrections(
-            &clipboard::clipboard_text(&verbatim, &cleanup_mode),
-            &corrections,
-        );
+        // the verbatim transcript below is logged unchanged. A separated
+        // take is cleaned paragraph by paragraph so the "Speaker N:"
+        // labels and the blank lines between speakers survive.
+        let clean_body = |body: &str| {
+            crate::vocab::apply_corrections(
+                &clipboard::clipboard_text(body, &cleanup_mode),
+                &corrections,
+            )
+        };
+        let text = if speakers > 0 {
+            crate::diarize::map_paragraphs(&verbatim, clean_body)
+        } else {
+            clean_body(&verbatim)
+        };
         if let Err(e) = clipboard::copy(&text) {
             eprintln!("clipboard copy failed: {e}");
             return Outcome::CopyFail;
@@ -1666,7 +1826,16 @@ fn transcribe_worker(app: AppHandle, take: Take, secs: f64, mic: String, session
         } else {
             model_name
         };
-        match store::write_log(&cfg, &verbatim, &text, &mic, &model_for_log, &device, secs) {
+        match store::write_log(
+            &cfg,
+            &verbatim,
+            &text,
+            &mic,
+            &model_for_log,
+            &device,
+            secs,
+            speakers,
+        ) {
             Ok((vault, r)) => {
                 is_vault = vault;
                 rec = Some(r);
