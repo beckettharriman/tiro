@@ -1,5 +1,5 @@
 /* app.js — TIRO panel: compact surface + advanced area (Transcribe /
-   Settings / Vocabulary / Models). Vanilla JS over the static DOM in
+   Record / Import / Settings / Vocabulary / Models). Vanilla JS over the static DOM in
    index.html; visual mechanics mirror the design source exactly, data
    flows through the pywebview-shaped bridge (or the built-in mock when
    previewing over file:// with no backend). */
@@ -92,6 +92,10 @@
     };
   })();
   const MOCK_ENTRIES = [
+    /* a speaker-separated capture: paragraphs split by blank lines, each
+       opening with its speaker label (rendered pre-line, tagged "2 speakers") */
+    { id: "m0", day: MOCK_DAYS.today, clock: "10:55 PM", dur: "1:35", source: "Speakers", speakers: 2,
+      text: "Speaker 1: Okay, so the plan is we ship the import path first and then look at the call capture.\n\nSpeaker 2: Right, because the two share the whole pipeline after the audio comes in.\n\nSpeaker 1: Exactly. Let's get the file side in this week and the capture the week after." },
     { id: "m1", day: MOCK_DAYS.today, clock: "10:42 PM", dur: "0:11", text: "Remind me to swap the joycon shells on the OLED before I list it, and check whether the back plate screws are stripped." },
     { id: "m2", day: MOCK_DAYS.today, clock: "10:31 PM", dur: "0:29", text: "Okay so for the vault entry tonight: I spent most of the day on the Tiro redesign, mostly arguing with myself about whether the advanced panel should slide or grow in place. Growing in place feels right because the panel never loses its anchor point, and the whole identity of the app is that it stays where you put it and never surprises you. Also need to remember to file the receipt from Micro Center." },
     { id: "m3", day: MOCK_DAYS.today, clock: "9:58 PM", dur: "0:05", text: "Add vulkan headers to the build docs." },
@@ -151,8 +155,17 @@
   }
   const MOCK_HW = mockHardware();
 
+  /* the shape the backend sends for one take (the day is implied by the
+     file it came from) */
+  function mockTake(e) {
+    const t = { id: e.id, clock: e.clock, dur: e.dur, text: e.text };
+    if (e.file) t.file = e.file;
+    if (e.source) t.source = e.source;
+    if (e.speakers) t.speakers = e.speakers;
+    return t;
+  }
   const MOCK_STATE = {
-    entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })),
+    entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map(mockTake),
     hardware: MOCK_HW.hw,
     settings: {
       powerMode: "auto", model: "small.en",
@@ -253,27 +266,39 @@
     },
     cancel_record() { return Promise.resolve(null); },
     list_outputs() { return Promise.resolve(this._state.outputs.slice()); },
-    start_capture(output, mic) {
-      this._state.capture = { active: true, source: String(output || "").replace(/ \(system default\)$/, ""), mic: !!mic, secs: 0 };
+    /* speaker-labelled paragraphs, the shape the backend produces when
+       diarize was asked for */
+    _diarized(plain) {
+      return {
+        speakers: 2,
+        text: "Speaker 1: " + plain.split(". ")[0] + ".\n\nSpeaker 2: " + plain.split(". ").slice(1).join(". ")
+      };
+    },
+    start_capture(output, mic, diarize) {
+      this._state.capture = { active: true, source: String(output || "").replace(/ \(system default\)$/, ""), mic: !!mic, diarize: !!diarize, secs: 0 };
       if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
       return Promise.resolve({ ok: true });
     },
     stop_capture() {
-      const src = (this._state.capture || {}).source || "Speakers";
+      const cap = this._state.capture || {};
+      const src = cap.source || "Speakers";
+      const diarize = !!cap.diarize;
       this._state.capture = { active: false };
       if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
       const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
       push({ phase: "transcribing", name: src, secs: 95 });
       setTimeout(() => {
         if (window.tiroAddEntry) {
-          window.tiroAddEntry({ id: "c" + Date.now(), clock: "4:20 PM", dur: "1:35", source: src,
-            text: "Yeah so the plan is we ship the import path first and then look at the call capture, because the two share the whole pipeline after the audio comes in." });
+          const plain = "Yeah so the plan is we ship the import path first and then look at the call capture. The two share the whole pipeline after the audio comes in, so the second one is mostly plumbing.";
+          const entry = { id: "c" + Date.now(), clock: "4:20 PM", dur: "1:35", source: src, text: plain };
+          if (diarize) Object.assign(entry, this._diarized(plain));
+          window.tiroAddEntry(entry);
         }
         push({ phase: "done", name: src, secs: 95 });
       }, 1800);
       return Promise.resolve({ ok: true });
     },
-    transcribe_file(path) {
+    transcribe_file(path, diarize) {
       // preview: a "picked" file walks the same phases the backend pushes
       const name = path ? String(path).split(/[\\/]/).pop() : "standup-2026-09-23.m4a";
       const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
@@ -284,14 +309,17 @@
         let hh = now.getHours();
         const ap = hh >= 12 ? "PM" : "AM"; hh = hh % 12 || 12;
         if (window.tiroAddEntry) {
-          window.tiroAddEntry({
+          const plain = "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers.";
+          const entry = {
             id: "f" + Date.now(),
             clock: hh + ":" + String(now.getMinutes()).padStart(2, "0") + " " + ap,
             dur: "12:04",
             mic: name,
             file: name,
-            text: "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers."
-          });
+            text: plain
+          };
+          if (diarize) Object.assign(entry, this._diarized(plain));
+          window.tiroAddEntry(entry);
         }
         push({ phase: "done", name: name, secs: 724 });
       }, 2600);
@@ -319,8 +347,7 @@
       return Promise.resolve(days);
     },
     history_entries(day) {
-      return Promise.resolve(MOCK_ENTRIES.filter((e) => e.day === day)
-        .map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })));
+      return Promise.resolve(MOCK_ENTRIES.filter((e) => e.day === day).map(mockTake));
     },
     list_vocab() { return Promise.resolve(clone(this._state.vocab)); },
     set_vocab(hotwords, corrections) {
@@ -419,18 +446,23 @@
     const el = document.createElement("div");
     el.className = "entry" + (landing ? " landing" : "");
     el.dataset.id = e.id;
+    /* speaker-separated takes: text is "Speaker N: …" paragraphs split by
+       blank lines — keep the breaks and say how many voices were found */
+    const speakers = Number(e.speakers) || 0;
     el.innerHTML =
       '<div class="meta">' + (showDay && e.dayIso ? '<span class="day"></span><span class="dot">·</span>' : "") +
       '<span class="time"></span><span class="dot">·</span><span class="dur"></span>' +
       (e.file ? '<span class="dot">·</span><span class="file"></span>' : "") +
       (e.source ? '<span class="dot">·</span><span class="source">System audio</span>' : "") +
+      (speakers > 0 ? '<span class="dot">·</span><span class="speakers"></span>' : "") +
       '<span class="copied-chip">' + checkSvg + "Copied</span></div>" +
-      '<div class="txt clamped"></div>' +
+      '<div class="txt clamped' + (speakers > 0 ? " speakers" : "") + '"></div>' +
       '<button class="showmore">Show more</button>';
     if (showDay && e.dayIso) el.querySelector(".day").textContent = dayLabel(e.dayIso);
     el.querySelector(".time").textContent = e.clock;
     el.querySelector(".dur").textContent = e.dur;
     if (e.file) el.querySelector(".file").textContent = e.file;
+    if (speakers > 0) el.querySelector(".speakers").textContent = speakers + (speakers === 1 ? " speaker" : " speakers");
     el.querySelector(".txt").textContent = e.text;
     const more = el.querySelector(".showmore");
     more.addEventListener("click", (ev) => {
@@ -780,7 +812,7 @@
      MICS — compact dropdown + the two settings selects, one source
      ════════════════════════════════════════════════════════════════════ */
   const micCap = $("micCap"), micMenu = $("micMenu"), micName = $("micName");
-  const selMic = $("selMic"), selMicT = $("selMicT");
+  const selMic = $("selMic"), selMicT = $("selMicT"), selMicR = $("selMicR");
 
   function micList() {
     const names = App.mics.length ? App.mics.slice() : [];
@@ -805,6 +837,7 @@
     });
     fillSelect(selMic, names, cur);
     fillSelect(selMicT, names, cur);
+    fillSelect(selMicR, names, cur);
     const sub = $("levelSub");
     if (sub) sub.textContent = cur ? "Live from " + cur + "." : "Live from the selected microphone.";
   }
@@ -826,7 +859,7 @@
   }
   window.addEventListener("focus", refreshMics);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshMics(); });
-  [selMic, selMicT].forEach((sel) => {
+  [selMic, selMicT, selMicR].forEach((sel) => {
     sel.addEventListener("mousedown", refreshMics);
     sel.addEventListener("focus", refreshMics);
   });
@@ -1002,6 +1035,8 @@
       loadDays().then(() => afterSettle(renderAdv));
     }
     if (v === "settings") refreshMics();
+    if (v === "record") { refreshMics(); syncOutputs(); renderRecordPage(); }
+    if (v === "import") renderImport();
     if (v === "vocab") loadVocab();
     if (v === "models") refreshModels();
     kickWave();
@@ -1085,6 +1120,7 @@
       if (seg.dataset.seg === "power") { setSetting("powerMode", v); syncEngineRows(); updateEngine(); }
       if (seg.dataset.seg === "pillpos") setSetting("pillPosition", v);
       if (seg.dataset.seg === "cleanup") { setSetting("clipboardCleanup", v); setCleanupCopy(v); }
+      if (seg.dataset.seg === "recsrc") setRecSrc(v);
       if (seg.dataset.seg === "theme") {
         setSetting("theme", v);
         if (v === "light" || v === "dark") applyTheme(v);
@@ -1206,6 +1242,7 @@
 
   selMic.addEventListener("change", () => setMic(selMic.options[selMic.selectedIndex].text, false));
   selMicT.addEventListener("change", () => setMic(selMicT.options[selMicT.selectedIndex].text, false));
+  selMicR.addEventListener("change", () => setMic(selMicR.options[selMicR.selectedIndex].text, false));
   $("selModel").addEventListener("change", function () {
     setSetting("model", this.options[this.selectedIndex].text);
     updateEngine();
@@ -1580,12 +1617,37 @@
   $("recBtn2").addEventListener("click", onRecord);
 
   /* ════════════════════════════════════════════════════════════════════
+     SPEAKER SEPARATION — one preference shared by the Record and Import
+     pages (and a dropped file), kept in the webview's localStorage; off
+     until the user turns it on.
+     ════════════════════════════════════════════════════════════════════ */
+  const DIARIZE_KEY = "tiro.diarize";
+  function diarizePref() {
+    try { return window.localStorage.getItem(DIARIZE_KEY) === "1"; } catch (_) { return false; }
+  }
+  function setDiarize(on) {
+    try { window.localStorage.setItem(DIARIZE_KEY, on ? "1" : "0"); } catch (_) { /* preview without storage */ }
+    syncDiarize();
+  }
+  function syncDiarize() {
+    const on = diarizePref();
+    setSw($("swDiarizeR"), on);
+    setSw($("swDiarizeI"), on);
+  }
+  ["swDiarizeR", "swDiarizeI"].forEach((id) => {
+    $(id).addEventListener("click", () => setDiarize(!diarizePref()));
+  });
+  syncDiarize();
+
+  /* ════════════════════════════════════════════════════════════════════
      IMPORT (transcribe a file)
-     The file button opens the native picker (a drop on the panel skips
-     it); the backend decodes the file and runs the take pipeline, and
-     pushes progress into window.tiroSetImport. The strip above the list
-     shows the phase — a long file sits in "transcribing" for minutes, so
-     the pill alone is not enough — and the reason when an import fails.
+     The Import page's Choose file… opens the native picker (a drop on the
+     panel skips it); the backend decodes the file and runs the take
+     pipeline, and pushes progress into window.tiroSetImport. The strips
+     (above the compact list, above the Transcribe list, on the Import
+     page) show the phase — a long file sits in "transcribing" for
+     minutes, so the pill alone is not enough — and the reason when an
+     import fails.
      ════════════════════════════════════════════════════════════════════ */
   const importStrips = Array.from(document.querySelectorAll(".import"));
   function importBusy() {
@@ -1613,19 +1675,22 @@
       strip.querySelector(".import-sub").textContent = sub;
       strip.querySelector(".import-dismiss").style.display = busy ? "none" : "";
     });
-    ["importBtn", "importBtn2"].forEach((id) => {
-      const b = $(id);
-      b.disabled = busy || !App.importer.available;
-      b.title = App.importer.available
-        ? "Transcribe an audio file"
-        : "File import is unavailable" + (App.importer.reason ? " — " + App.importer.reason : "");
-    });
+    const pick = $("importPick");
+    pick.disabled = busy || !App.importer.available;
+    pick.title = App.importer.available
+      ? "Transcribe an audio file"
+      : "File import is unavailable" + (App.importer.reason ? " — " + App.importer.reason : "");
+    if (!App.importer.available) {
+      $("importHelp").textContent = "File import is unavailable" + (App.importer.reason ? " — " + App.importer.reason : ".");
+    }
     clearTimeout(importClear);
     if (err) importClear = setTimeout(() => { App.import = { phase: "idle" }; renderImport(); }, 8000);
+    renderRecordPage();
   }
-  function onImport() {
-    if (importBusy() || App.recording) return;
-    Promise.resolve(api.transcribe_file(null)).then((r) => {
+  /* one take from a file: null path = the native picker; a path = a drop */
+  function importFile(path) {
+    if (importBusy() || App.recording || capturing()) return;
+    Promise.resolve(api.transcribe_file(path, diarizePref())).then((r) => {
       if (r && r.ok === false && !r.cancelled) {
         App.import = { phase: "error", name: r.name || "", error: r.error || "Import failed" };
         renderImport();
@@ -1635,8 +1700,7 @@
       renderImport();
     });
   }
-  $("importBtn").addEventListener("click", onImport);
-  $("importBtn2").addEventListener("click", onImport);
+  $("importPick").addEventListener("click", () => importFile(null));
   importStrips.forEach((strip) => strip.querySelector(".import-dismiss").addEventListener("click", () => {
     if (capturing()) { stopCapture(); return; }
     if (importBusy()) return;
@@ -1644,29 +1708,43 @@
     renderImport();
   }));
 
-  /* ── system audio capture: the speaker button in the advanced toolbar
-     opens a sheet (output device, include microphone, Start); while a
-     capture runs the import strip shows it with a Stop button, and the
-     backend refuses the dictation keys until it stops. ── */
-  const captureSheet = $("captureSheet");
-  let capTimer = null, capMicOn = true, capStamp = 0;
+  /* ════════════════════════════════════════════════════════════════════
+     RECORD PAGE — microphone, system audio, or both
+     Source=Microphone is the ordinary dictation take (toggle_record, as
+     the hotkey and the record buttons do). System audio and Both run a
+     capture of the chosen output, the mic mixed in for Both; while one
+     runs the import strips show it with a Stop button and the backend
+     refuses the dictation keys until it stops. The page's Start/Stop
+     control and status line follow all three live states — a mic take,
+     a capture, and the transcription that follows either.
+     ════════════════════════════════════════════════════════════════════ */
+  const REC_SRC_KEY = "tiro.recsrc";
+  const recSrcCopy = {
+    mic: "Your voice, from the microphone below.",
+    system: "What this computer is playing — a call, a video, a meeting — from the output below.",
+    both: "What this computer is playing and your own voice, mixed into one recording."
+  };
+  function recSrc() {
+    let v = "mic";
+    try { v = window.localStorage.getItem(REC_SRC_KEY) || "mic"; } catch (_) { /* default */ }
+    return recSrcCopy[v] ? v : "mic";
+  }
+  function setRecSrc(v) {
+    if (!recSrcCopy[v]) v = "mic";
+    try { window.localStorage.setItem(REC_SRC_KEY, v); } catch (_) { /* preview without storage */ }
+    renderRecordPage();
+  }
+  let capTimer = null, capStamp = 0, recStamp = 0, recTimer = null;
   function syncOutputs() {
     const outs = App.outputs || [];
-    panel.classList.toggle("has-outputs", outs.length > 0);
     const cur = $("selOutput").value;
     fillSelect($("selOutput"), outs.length ? outs : ["No output device"], cur || (outs[0] || ""));
-  }
-  function openCaptureSheet(open) {
-    captureSheet.classList.toggle("open", open);
-    $("sysBtn").classList.toggle("on", open);
-    if (open) { syncOutputs(); setSw($("swCapMic"), capMicOn); }
   }
   function renderCapture() {
     const c = App.capture || {};
     const on = !!c.active;
     panel.classList.toggle("capturing", on);
     if (on) {
-      openCaptureSheet(false);
       panel.classList.add("importing");
       const sub = () => "Recording system audio" + (c.mic ? " + microphone" : "") + " · " +
         fmtSecs((Number(c.secs) || 0) + (performance.now() - capStamp) / 1000);
@@ -1687,14 +1765,13 @@
       if (!importBusy() && App.import.phase !== "error") panel.classList.remove("importing");
     }
     ["recBtn", "recBtn2"].forEach((id) => { $(id).disabled = on; });
+    renderRecordPage();
   }
-  function startCapture() {
+  function startCapture(withMic) {
     const output = $("selOutput").value;
-    capMicOn = swOn($("swCapMic"));
-    Promise.resolve(api.start_capture(output, capMicOn)).then((r) => {
+    Promise.resolve(api.start_capture(output, withMic, diarizePref())).then((r) => {
       if (r && r.ok === false) {
         App.import = { phase: "error", name: output, error: r.error || "Capture failed" };
-        openCaptureSheet(false);
         renderImport();
       }
     }).catch((e) => {
@@ -1705,14 +1782,80 @@
   function stopCapture() {
     Promise.resolve(api.stop_capture()).catch(() => {});
   }
-  $("sysBtn").addEventListener("click", () => openCaptureSheet(!captureSheet.classList.contains("open")));
-  $("capStart").addEventListener("click", startCapture);
-  $("swCapMic").addEventListener("click", () => { const on = !swOn($("swCapMic")); setSw($("swCapMic"), on); capMicOn = on; });
   window.tiroSetCapture = function (c) {
     App.capture = c || { active: false };
     capStamp = performance.now();
     renderCapture();
   };
+
+  /* the Start/Stop control, the rows that apply to the chosen source,
+     and the status line */
+  const recGo = $("recGo"), recRow = document.querySelector(".recrow");
+  function renderRecordPage() {
+    const src = recSrc();
+    segSet($("recSrcSeg"), src);
+    $("recSrcSub").textContent = recSrcCopy[src];
+    const wantsMic = src !== "system", wantsOut = src !== "mic";
+    $("rowRecMic").style.display = wantsMic ? "" : "none";
+    $("rowRecOut").style.display = wantsOut ? "" : "none";
+    const outs = App.outputs || [];
+    const noOut = wantsOut && !outs.length;
+    $("rowRecOut").classList.toggle("disabled", noOut);
+
+    const c = App.capture || {};
+    const cap = !!c.active, rec = App.recording, busy = importBusy();
+    const live = cap || rec;
+    const p = App.import;
+    let stat = "Ready", sub = "", label = "Start recording", disabled = false;
+    if (cap) {
+      stat = "Recording system audio" + (c.mic ? " and microphone" : "") + " · " +
+        fmtSecs((Number(c.secs) || 0) + (performance.now() - capStamp) / 1000);
+      sub = (c.source ? "From " + c.source + ". " : "") + "Stop to transcribe.";
+      label = "Stop";
+    } else if (rec) {
+      stat = "Recording microphone · " + fmtSecs((performance.now() - recStamp) / 1000);
+      sub = (App.settings.micName ? "From " + App.settings.micName + ". " : "") + "Stop to transcribe.";
+      label = "Stop";
+    } else if (busy) {
+      stat = p.phase === "decoding" ? "Decoding…" : "Transcribing…";
+      sub = (p.name ? p.name + (p.secs ? " · " + fmtSecs(p.secs) : "") + " · " : "") +
+        "on " + (App.engine.device || "CPU") + ". The result lands in Transcribe.";
+      disabled = true;
+    } else if (p.phase === "error") {
+      stat = "Couldn’t record";
+      sub = p.error || "Recording failed.";
+    } else if (noOut) {
+      stat = "No output to capture";
+      sub = "No playback device can be captured on this computer. Microphone recording still works.";
+      disabled = true;
+    } else {
+      const mic = App.settings.micName || "the default microphone";
+      const out = $("selOutput").value || outs[0] || "";
+      if (src === "mic") sub = "Records " + mic + " until you press Stop" + (diarizePref() ? ", then labels the speakers." : ".");
+      else if (src === "system") sub = "Records what " + out + " plays until you press Stop" + (diarizePref() ? ", then labels the speakers." : ".");
+      else sub = "Records " + out + " and " + mic + " together until you press Stop" + (diarizePref() ? ", then labels the speakers." : ".");
+    }
+    $("recStat").textContent = stat;
+    $("recStatSub").textContent = sub || " ";
+    $("recGoLabel").textContent = label;
+    recGo.title = label === "Stop" ? "Stop and transcribe" : "Start recording";
+    recGo.classList.toggle("on", live);
+    recGo.disabled = disabled;
+    recRow.classList.toggle("live", live);
+    /* the elapsed time ticks only while something is being recorded */
+    if (live && recTimer === null) recTimer = setInterval(renderRecordPage, 1000);
+    if (!live && recTimer !== null) { clearInterval(recTimer); recTimer = null; }
+  }
+  recGo.addEventListener("click", () => {
+    if (capturing()) { stopCapture(); return; }
+    if (App.recording) { onRecord(); return; }
+    if (importBusy()) return;
+    const src = recSrc();
+    if (src === "mic") onRecord();
+    else startCapture(src === "both");
+  });
+  $("selOutput").addEventListener("change", renderRecordPage);
+  ["swDiarizeR", "swDiarizeI"].forEach((id) => $(id).addEventListener("click", renderRecordPage));
 
   /* ════════════════════════════════════════════════════════════════════
      INPUT LEVEL + TEST
@@ -1888,6 +2031,7 @@
   }
   selMic.addEventListener("change", retapMonitor);
   selMicT.addEventListener("change", retapMonitor);
+  selMicR.addEventListener("change", retapMonitor);
   if (bridgeReady()) levelSub.textContent = LEVEL_IDLE_COPY;
 
   /* ════════════════════════════════════════════════════════════════════
@@ -2018,10 +2162,21 @@
   };
 
   window.tiroSetRecording = function (on) {
+    const was = App.recording;
     App.recording = !!on;
+    if (App.recording && !was) recStamp = performance.now();
     panel.classList.toggle("recording", App.recording);
     $("recBtn").title = App.recording ? "Stop" : "Record";
     $("recBtn2").title = App.recording ? "Stop" : "Record";
+    renderRecordPage();
+  };
+
+  /* a file dropped on the panel: the backend hands the path here so the
+     take honours the Speaker separation switch (shared by Record and
+     Import) — the same call the Choose file… button makes, minus the picker */
+  window.tiroDropFile = function (path) {
+    if (!path) return;
+    importFile(String(path));
   };
 
   /* file import progress from the backend (see IMPORT above) */

@@ -376,6 +376,45 @@ body.fallback .banner{ display:flex; animation: land var(--t-med) var(--ease) bo
 /* mic waveform preview */
 .wave{ width:160px; height:28px; flex:none; }
 
+/* ============ RECORD PAGE ============ */
+/* the start/stop control: a pill the size of the record button, filled
+   ink while something is being recorded (same swap as .recbtn) */
+.recgo{
+  appearance:none; cursor:pointer; flex:none;
+  display:inline-flex; align-items:center; gap:var(--s-2);
+  height:36px; padding:0 var(--s-5) 0 var(--s-4);
+  border-radius:var(--r-pill);
+  border:0.5px solid rgba(var(--ink),.35);
+  background:rgba(var(--ink),.07);
+  color:rgba(var(--ink),.92);
+  font-family:inherit; font-size:13px; font-weight:600; letter-spacing:-0.006em;
+  white-space:nowrap;
+  transition: background var(--t-med) var(--ease), border-color var(--t-med) var(--ease), color var(--t-med) var(--ease), transform var(--t-fast) var(--ease);
+}
+.recgo:hover{ background:rgba(var(--ink),.13); }
+.recgo:active{ transform:scale(.96); }
+.recgo:disabled{ opacity:.35; pointer-events:none; }
+.recgo svg{ width:13px; height:13px; flex:none; }
+.recgo .i-rec{ color:#ff453a; }
+.recgo .i-stop{ display:none; }
+.recgo.on{
+  background:rgba(var(--ink),.95);
+  border-color:rgba(var(--ink),.95);
+  color:rgba(var(--ink-inv),1);
+}
+.recgo.on .i-rec{ display:none; }
+.recgo.on .i-stop{ display:block; }
+/* status line: a red dot while recording, hidden otherwise */
+.recstat{ display:inline-flex; align-items:center; gap:var(--s-2); }
+.recdot{
+  display:none; width:7px; height:7px; border-radius:50%; flex:none;
+  background:#ff453a;
+  animation: breathe 1.6s var(--ease) infinite;
+}
+.recrow.live .recdot{ display:inline-block; }
+.recrow.live .recstat{ color:rgba(var(--ink),.95); font-weight:600; }
+.recrow .lbl .sub{ font-variant-numeric:tabular-nums; }
+
 /* day sections — Today renders alone by default with no label of any kind;
    each older day is introduced by a quiet centered date between hairline
    rules that scroll with the content (no box, no background — reads as

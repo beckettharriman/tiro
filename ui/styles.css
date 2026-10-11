@@ -188,22 +188,10 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 .mic-item[aria-selected="true"] svg{ opacity:.9; }
 @media (prefers-reduced-motion: reduce){ .mic-menu{ transition-duration:1ms; } }
 
-/* import (transcribe a file): a round ghost matching the record button's
-   footprint, sitting between the mic capsule and the record button */
-.filebtn{
-  width:36px; height:36px; border-radius:50%;
-  border:0.5px solid var(--hairline);
-  background:rgba(var(--ink),.05);
-  color:rgba(var(--ink),.72);
-}
-.filebtn:hover{ background:rgba(var(--ink),.11); color:rgba(var(--ink),.92); }
-.filebtn svg{ width:15px; height:15px; }
-.filebtn:disabled{ opacity:.4; pointer-events:none; }
-.panel.recording .filebtn{ opacity:.35; pointer-events:none; }
-
 /* import strip: lives above the list while a file is decoding /
    transcribing (a 30-minute file takes minutes — the pill alone is not
-   enough feedback), and carries the reason when an import fails */
+   enough feedback), and carries the reason when an import fails. The
+   Import page carries one too; the Record page has its own status line. */
 .import{
   display:none; align-items:center; gap:var(--s-2);
   margin: 0 var(--s-4) var(--s-3);
@@ -229,12 +217,6 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
 .panel.capturing .import .import-dismiss .i-x{ display:none; }
 .panel.capturing .import .import-dismiss .i-stop{ display:block; width:12px; height:12px; }
 .panel.capturing .import .spin{ animation:none; opacity:1; color:#ff453a; }
-/* capture sheet: the system-audio controls, folded under the toolbar */
-.capture-sheet{ display:none; margin: 0 var(--s-1) var(--s-4); }
-.capture-sheet.open{ display:block; animation: land var(--t-med) var(--ease) both; }
-.sysbtn{ display:none; }
-.has-outputs .sysbtn{ display:inline-flex; }
-.sysbtn.on{ background:rgba(var(--ink),.10); }
 @keyframes importSpin{ to{ transform:rotate(360deg); } }
 @media (prefers-reduced-motion: reduce){ .import .spin{ animation:none; } }
 .empty .drophint{ font-size:12px; color:rgba(var(--ink),.40); margin-top:calc(-1 * var(--s-3)); }
@@ -299,14 +281,18 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   font-variant-numeric: tabular-nums;
   color:rgba(var(--ink),.45);
   margin-bottom:var(--s-1);
-  min-height:16px;
+  /* the row is the Copied chip's height, text 3px down its baseline —
+     the chip sits out of flow (below) so a row full of tags never wraps */
+  min-height:22px; padding-top:3px;
 }
+.meta .time, .meta .dur{ white-space:nowrap; }
 .meta .dot{ font-weight:400; color:rgba(var(--ink),.28); }
 .meta .dur{ font-weight:500; color:rgba(var(--ink),.38); }
-.meta .source{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; }
+.meta .source{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .meta .file{ font-weight:500; color:rgba(var(--ink),.38); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.meta .speakers{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; flex:none; }
 .copied-chip{
-  margin-left:auto;
+  position:absolute; top:var(--s-3); right:var(--s-3);
   display:inline-flex; align-items:center; gap:5px;
   font-size:11px; font-weight:600; letter-spacing:.03em;
   color:rgba(var(--ink),.85);
@@ -336,6 +322,8 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   font-weight:400;
   text-wrap:pretty;
 }
+/* speaker-separated text keeps its paragraph breaks ("Speaker 1: …") */
+.txt.speakers{ white-space:pre-line; }
 .txt.clamped{ max-height: calc(6 * 1.46em); overflow:hidden; }
 .entry.clampable .txt.clamped{
   -webkit-mask-image:linear-gradient(180deg,#000 62%, transparent 98%);

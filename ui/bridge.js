@@ -29,7 +29,11 @@
       set_expanded: function (on) { return invoke("set_expanded", { on: on }); },
       ui_log: function (line) { return invoke("ui_log", { line: String(line) }); },
       list_outputs: function () { return invoke("list_outputs"); },
-      start_capture: function (output, mic) { return invoke("start_capture", { output: String(output || ""), mic: !!mic }); },
+      /* System audio capture from `output`, the microphone mixed in when
+         `mic`; `diarize` asks for speaker-labelled paragraphs. */
+      start_capture: function (output, mic, diarize) {
+        return invoke("start_capture", { output: String(output || ""), mic: !!mic, diarize: !!diarize });
+      },
       stop_capture: function () { return invoke("stop_capture"); },
       close_panel: function () { return invoke("close_panel"); },
       begin_drag: function () { return invoke("begin_drag"); },
@@ -47,9 +51,10 @@
         return invoke("set_vocab", { hotwords: hotwords, corrections: corrections });
       },
       /* Import an audio file as a take. No path = open the native picker;
-         a path (from a drop) skips it. */
-      transcribe_file: function (path) {
-        return invoke("transcribe_file", { path: path == null ? null : String(path) });
+         a path (from a drop) skips it. `diarize` asks for speaker-labelled
+         paragraphs. */
+      transcribe_file: function (path, diarize) {
+        return invoke("transcribe_file", { path: path == null ? null : String(path), diarize: !!diarize });
       }
     }
   };

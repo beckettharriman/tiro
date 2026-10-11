@@ -33,9 +33,6 @@
         <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
       </button>
       <div class="mic-menu" id="micMenu" role="listbox"></div>
-      <button class="ghost filebtn" id="importBtn" title="Transcribe an audio file">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 19a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0v-4a6 6 0 0 1 12 0v4a2 2 0 1 1-4 0v-1a2 2 0 1 1 4 0"/></svg>
-      </button>
       <button class="recbtn" id="recBtn" title="Record">
         <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
         <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
@@ -76,6 +73,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
         Transcribe
       </button>
+      <button class="navitem" data-view="record">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg>
+        Record
+      </button>
+      <button class="navitem" data-view="import">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 19a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0v-4a6 6 0 0 1 12 0v4a2 2 0 1 1-4 0v-1a2 2 0 1 1 4 0"/></svg>
+        Import
+      </button>
       <button class="navitem on" data-view="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
         Settings
@@ -104,34 +109,10 @@
             </button>
           </span>
           <span class="selwrap"><select class="sel" id="selMicT"></select></span>
-          <button class="ghost sysbtn" id="sysBtn" title="Capture system audio">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
-          </button>
-          <button class="ghost filebtn" id="importBtn2" title="Transcribe an audio file">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 22h.5a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 19a2 2 0 1 1 4 0v1a2 2 0 1 1-4 0v-4a6 6 0 0 1 12 0v4a2 2 0 1 1-4 0v-1a2 2 0 1 1 4 0"/></svg>
-          </button>
           <button class="recbtn" id="recBtn2" title="Record">
             <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
             <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
           </button>
-        </div>
-        <!-- system audio capture: what the machine plays, optionally with the mic -->
-        <div class="capture-sheet card" id="captureSheet">
-          <div class="row">
-            <div class="lbl"><div class="name">Capture system audio</div><div class="sub">Record what this computer is playing, a call or a video, and transcribe it.</div></div>
-          </div>
-          <div class="row">
-            <div class="lbl"><div class="name">Output</div></div>
-            <span class="selwrap"><select class="sel" id="selOutput"></select></span>
-          </div>
-          <div class="row">
-            <div class="lbl"><div class="name">Include microphone</div><div class="sub">Mix your own voice in, for a call.</div></div>
-            <button class="sw" id="swCapMic" role="switch" aria-checked="true" aria-label="Include microphone"></button>
-          </div>
-          <div class="row">
-            <div class="lbl"><div class="sub">Ctrl+Alt+X throws a capture away. The dictation keys wait until it stops.</div></div>
-            <button class="mini" id="capStart">Start capture</button>
-          </div>
         </div>
         <!-- same import strip as the compact surface (renderImport drives both) -->
         <div class="import" role="status" aria-live="polite">
@@ -154,6 +135,83 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
           </button>
         </div>
+      </div>
+
+      <!-- RECORD VIEW: microphone, system audio, or both, started from here -->
+      <div class="view" id="view-record">
+
+        <section class="grp">
+          <h2 class="grp-title">Source</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Record</div><div class="sub" id="recSrcSub">Your voice, from the microphone below.</div></div>
+              <div class="seg" data-seg="recsrc" id="recSrcSeg">
+                <button data-value="mic" class="on">Microphone</button><button data-value="system">System audio</button><button data-value="both">Both</button>
+              </div>
+            </div>
+            <div class="row" id="rowRecMic">
+              <div class="lbl"><div class="name">Microphone</div></div>
+              <span class="selwrap"><select class="sel" id="selMicR"></select></span>
+            </div>
+            <div class="row" id="rowRecOut">
+              <div class="lbl"><div class="name">Output</div><div class="sub">The speakers or headphones whose playback is captured.</div></div>
+              <span class="selwrap"><select class="sel" id="selOutput"></select></span>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Speaker separation</div><div class="sub">Label who said what — Speaker 1, Speaker 2 — in the transcript.</div></div>
+              <button class="sw" id="swDiarizeR" role="switch" aria-checked="false" aria-label="Speaker separation"></button>
+            </div>
+          </div>
+          <p class="grp-help" id="recHelp">The dictation keys always record the microphone. Ctrl+Alt+X throws a recording away.</p>
+        </section>
+
+        <section class="grp">
+          <div class="card">
+            <div class="row recrow">
+              <div class="lbl">
+                <div class="name recstat"><span class="recdot"></span><span id="recStat">Ready</span></div>
+                <div class="sub" id="recStatSub">&nbsp;</div>
+              </div>
+              <button class="recgo" id="recGo" title="Start recording">
+                <svg class="i-rec" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+                <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <span id="recGoLabel">Start recording</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- IMPORT VIEW: transcribe a recording from disk -->
+      <div class="view" id="view-import">
+
+        <section class="grp">
+          <h2 class="grp-title">Transcribe a file</h2>
+          <div class="card">
+            <div class="row">
+              <div class="lbl"><div class="name">Transcribe a recording</div><div class="sub">mp3, m4a, wav, flac, ogg, or the audio track of a video.</div></div>
+              <button class="mini" id="importPick">Choose file…</button>
+            </div>
+            <div class="row">
+              <div class="lbl"><div class="name">Speaker separation</div><div class="sub">Label who said what — Speaker 1, Speaker 2 — in the transcript.</div></div>
+              <button class="sw" id="swDiarizeI" role="switch" aria-checked="false" aria-label="Speaker separation"></button>
+            </div>
+          </div>
+          <p class="grp-help" id="importHelp">Or drop a file anywhere on the panel. Long recordings take a few minutes; progress shows here and above the Transcribe list.</p>
+        </section>
+
+        <!-- same import strip as the compact surface (renderImport drives all of them) -->
+        <div class="import" role="status" aria-live="polite">
+          <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>
+          <span class="import-name"></span>
+          <span class="import-sub"></span>
+          <button class="ghost import-dismiss" title="Dismiss">
+            <svg class="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <svg class="i-stop" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+        </div>
+
       </div>
 
       <!-- SETTINGS VIEW -->
