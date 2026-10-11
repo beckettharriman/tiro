@@ -289,6 +289,7 @@ class Pill{
     if (state === 'rec' || state === 'transcribing'){
       this.viz = Viz(state === 'rec' ? 'rec' : 'think');
       frag.appendChild(this.viz.el);
+      this.wake();
     } else if (state === 'done-copy'){
       add('<span class="barecheck">' + SVG.check + '</span>');
     } else if (state === 'error'){
@@ -353,14 +354,33 @@ class Pill{
   exit(){
     this.el.classList.remove('enter');
     this.el.classList.add('exit');
+    /* once the exit has played, a waveform left behind (cancel straight
+       from recording) has nothing to draw: drop it so the frame loop idles */
+    clearTimeout(this._idle);
+    this._idle = setTimeout(() => {
+      if (this.el.classList.contains('exit')) this.viz = null;
+    }, 400);
   }
   frame(){
     this.env += (this.raw - this.env) * (this.raw > this.env ? 0.5 : 0.07);
     if (this.viz) this.viz.frame(Math.max(0.05, this.env)); /* idle floor */
   }
+  /* The frame loop runs only while a waveform is on the pill. The hidden
+     pill window still reports itself visible to the webview, so an
+     always-on loop kept the renderer and the compositor busy around the
+     clock with nothing on screen. */
+  wake(){
+    if (this._raf) return;
+    this.env = this.raw; /* where the envelope would have settled while idle */
+    const tick = () => {
+      this._raf = 0;
+      this.frame();
+      if (this.viz) this._raf = requestAnimationFrame(tick);
+    };
+    this._raf = requestAnimationFrame(tick);
+  }
 }
 const pill = new Pill(document.getElementById('pill'));
-(function loop(){ pill.frame(); requestAnimationFrame(loop); })();
 
 /* ---------- backend contract ---------- */
 /* The pill window receives no settings pushes, so placement direction,

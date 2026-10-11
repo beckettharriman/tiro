@@ -257,9 +257,16 @@ pub fn resolve_mic_name(cfg: &ConfigStore) -> String {
         return cur;
     }
     let cur_low = cur.to_lowercase();
+    let cur_bare = audio::without_instance_number(&cur);
     names
         .iter()
         .find(|n| n.to_lowercase().contains(&cur_low))
+        // the same mic under a new Windows instance number
+        .or_else(|| {
+            names
+                .iter()
+                .find(|n| audio::without_instance_number(n).contains(&cur_bare))
+        })
         .cloned()
         .unwrap_or_else(|| names[0].clone())
 }
