@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::audio;
 use crate::flow::lock;
+use crate::transcribe::{Transcript, Word};
 
 /// How long a worker may take to report ready when the model is already on
 /// disk. This has to cover a cold Vulkan start: on an NVIDIA laptop whose
@@ -319,11 +320,33 @@ impl GpuWorker {
         beam: usize,
         vocab: Option<&str>,
     ) -> Result<String, String> {
+        self.request(audio16, beam, vocab, false).map(|t| t.text)
+    }
+
+    /// `transcribe` with word timestamps in the reply (the worker's
+    /// `words` request flag), for a take that gets its speakers separated.
+    pub fn transcribe_words(
+        &self,
+        audio16: &[f32],
+        beam: usize,
+        vocab: Option<&str>,
+    ) -> Result<Transcript, String> {
+        self.request(audio16, beam, vocab, true)
+    }
+
+    fn request(
+        &self,
+        audio16: &[f32],
+        beam: usize,
+        vocab: Option<&str>,
+        words: bool,
+    ) -> Result<Transcript, String> {
         let header = serde_json::to_vec(&json!({
             "samples": audio16.len(),
             "beam": beam,
             "vocab": vocab,
             "language": "en",
+            "words": words,
         }))
         .map_err(|e| e.to_string())?;
         let mut io = lock(&self.io);
@@ -358,7 +381,16 @@ impl GpuWorker {
                                 .join(" ")
                         })
                         .unwrap_or_default();
-                    Ok(joined.trim().to_string())
+                    let words = if words {
+                        serde_json::from_value::<Vec<Word>>(v["words"].clone())
+                            .map_err(|e| format!("bad words in worker reply: {e}"))?
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(Transcript {
+                        text: joined.trim().to_string(),
+                        words,
+                    })
                 } else {
                     Err(v["error"].as_str().unwrap_or("worker error").to_string())
                 }

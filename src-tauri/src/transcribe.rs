@@ -280,7 +280,7 @@ impl Drop for PartGuard {
 /// success. `dest` only ever appears via this rename, so it is complete —
 /// [`model_status`] additionally re-checks size against the catalog to
 /// repair files truncated by older builds.
-fn download_with(
+pub(crate) fn download_with(
     url: &str,
     dest: &Path,
     label: &str,
@@ -561,13 +561,43 @@ pub fn collapse_non_speech(text: &str) -> &str {
 }
 
 /// One whisper segment as the tail guard sees it: text, timestamps in
-/// centiseconds, and the mean token probability.
+/// centiseconds, the mean token probability, and — in word mode — the
+/// words it is made of.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
     pub text: String,
     pub t0: i64,
     pub t1: i64,
     pub avg_p: f32,
+    pub words: Vec<Word>,
+}
+
+/// One word with whisper's token timestamps, in centiseconds like the
+/// segments (whisper.cpp's energy-based word times, +/-0.2-0.5 s). Only
+/// produced when a take is transcribed for speaker separation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Word {
+    pub text: String,
+    pub t0: i64,
+    pub t1: i64,
+}
+
+/// A transcription: the joined text the take pipeline has always used, and
+/// the words with timing when they were asked for (empty otherwise).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Transcript {
+    pub text: String,
+    pub words: Vec<Word>,
+}
+
+impl Transcript {
+    /// Text only, no word timing.
+    pub fn plain(text: String) -> Self {
+        Self {
+            text,
+            words: Vec::new(),
+        }
+    }
 }
 
 /// Phrases whisper invents for audio with no speech in it (the tail of a
@@ -605,7 +635,15 @@ const TAIL_HALLUCINATIONS: &[&str] = &[
 /// Returns the kept texts in order.
 const TAIL_GAP_CS: i64 = 100;
 
-pub fn drop_tail_hallucinations(mut segments: Vec<Segment>) -> Vec<String> {
+pub fn drop_tail_hallucinations(segments: Vec<Segment>) -> Vec<String> {
+    drop_tail_segments(segments)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// `drop_tail_hallucinations` keeping the whole segments (words included).
+fn drop_tail_segments(mut segments: Vec<Segment>) -> Vec<Segment> {
     while let Some(last) = segments.last() {
         let phrase = normalize_phrase(&last.text);
         let invented = !phrase.is_empty() && is_tail_hallucination(&phrase);
@@ -621,7 +659,7 @@ pub fn drop_tail_hallucinations(mut segments: Vec<Segment>) -> Vec<String> {
         }
         segments.pop();
     }
-    segments.into_iter().map(|s| s.text).collect()
+    segments
 }
 
 /// `phrase` is one of the invented sign-offs, or one of them repeated
@@ -654,6 +692,29 @@ fn normalize_phrase(text: &str) -> String {
         }
     }
     out
+}
+
+/// Group one decoded token into `words`: a token whose text starts with a
+/// space (whisper's word boundary) — or the first token of a segment —
+/// opens a new word; anything else (word pieces, punctuation) extends the
+/// last word and its end time. Tokens that are only whitespace are dropped.
+fn push_token(words: &mut Vec<Word>, piece: &str, t0: i64, t1: i64) {
+    let starts_word = piece.starts_with(' ') || words.is_empty();
+    let text = piece.trim();
+    if text.is_empty() {
+        return;
+    }
+    match words.last_mut() {
+        Some(last) if !starts_word => {
+            last.text.push_str(text);
+            last.t1 = last.t1.max(t1);
+        }
+        _ => words.push(Word {
+            text: text.to_string(),
+            t0,
+            t1: t1.max(t0),
+        }),
+    }
 }
 
 /// A loaded CPU whisper model.
@@ -701,6 +762,30 @@ impl Transcriber {
         beam: usize,
         vocab: Option<&str>,
     ) -> Result<String, String> {
+        self.run(samples, beam, vocab, false).map(|t| t.text)
+    }
+
+    /// `transcribe`, plus every word with its timestamps for speaker
+    /// separation. Same decode, same guards; token timestamps are switched
+    /// on and each kept segment's tokens are grouped into words (a token
+    /// that starts with a space begins a new word, punctuation attaches to
+    /// the word before it).
+    pub fn transcribe_words(
+        &self,
+        samples: &[f32],
+        beam: usize,
+        vocab: Option<&str>,
+    ) -> Result<Transcript, String> {
+        self.run(samples, beam, vocab, true)
+    }
+
+    fn run(
+        &self,
+        samples: &[f32],
+        beam: usize,
+        vocab: Option<&str>,
+        words: bool,
+    ) -> Result<Transcript, String> {
         let mut params = FullParams::new(SamplingStrategy::BeamSearch {
             beam_size: beam as std::ffi::c_int,
             patience: -1.0,
@@ -710,6 +795,9 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        if words {
+            params.set_token_timestamps(true);
+        }
         if let Some(vocab) = vocab {
             params.set_initial_prompt(vocab);
         }
@@ -734,6 +822,7 @@ impl Transcriber {
         // mean token probability) for tuning the hallucination guards; a
         // file because the worker's stderr is null.
         let debug = std::env::var_os("TIRO_SEGMENT_DEBUG").map(std::path::PathBuf::from);
+        let eot = self.ctx.token_eot();
         let mut segments = Vec::new();
         for i in 0..n {
             if let Some(segment) = state.get_segment(i) {
@@ -741,10 +830,19 @@ impl Transcriber {
                     let n_tok = segment.n_tokens();
                     let mut sum = 0.0f32;
                     let mut cnt = 0usize;
+                    let mut seg_words: Vec<Word> = Vec::new();
                     for t in 0..n_tok {
                         if let Some(tok) = segment.get_token(t) {
                             sum += tok.token_probability();
                             cnt += 1;
+                            if !words || tok.token_id() >= eot {
+                                continue; // special tokens carry no text
+                            }
+                            let Ok(piece) = tok.to_str_lossy() else {
+                                continue;
+                            };
+                            let data = tok.token_data();
+                            push_token(&mut seg_words, &piece, data.t0, data.t1);
                         }
                     }
                     let seg = Segment {
@@ -752,6 +850,7 @@ impl Transcriber {
                         t0: segment.start_timestamp(),
                         t1: segment.end_timestamp(),
                         avg_p: if cnt > 0 { sum / cnt as f32 } else { 0.0 },
+                        words: seg_words,
                     };
                     if let Some(debug) = &debug {
                         use std::io::Write as _;
@@ -773,16 +872,23 @@ impl Transcriber {
                 }
             }
         }
-        let parts = drop_tail_hallucinations(segments);
-        let joined = parts.join(" ");
+        let kept = drop_tail_segments(segments);
+        let joined = kept
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         // A take that is nothing but non-speech markers ([BLANK_AUDIO], …)
         // or stray punctuation (".") becomes "" so silence follows the
         // original's empty-result path.
         let text = collapse_non_speech(joined.trim());
         if text.chars().all(|c| !c.is_alphanumeric()) {
-            return Ok(String::new());
+            return Ok(Transcript::default());
         }
-        Ok(text.to_string())
+        Ok(Transcript {
+            text: text.to_string(),
+            words: kept.into_iter().flat_map(|s| s.words).collect(),
+        })
     }
 
     /// The original's warm-up: transcribe 1 s of silence to page the model in
@@ -924,7 +1030,37 @@ mod tests {
             t0,
             t1,
             avg_p: 0.9,
+            words: Vec::new(),
         }
+    }
+
+    #[test]
+    fn tokens_group_into_words_on_leading_spaces() {
+        let mut words = Vec::new();
+        push_token(&mut words, "Hello", 0, 20);
+        push_token(&mut words, ",", 20, 22);
+        push_token(&mut words, " wo", 30, 40);
+        push_token(&mut words, "rld", 40, 55);
+        push_token(&mut words, "!", 55, 56);
+        push_token(&mut words, " ", 60, 60);
+        push_token(&mut words, " ok", 70, 80);
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["Hello,", "world!", "ok"]);
+        assert_eq!((words[1].t0, words[1].t1), (30, 56));
+        assert_eq!((words[2].t0, words[2].t1), (70, 80));
+    }
+
+    #[test]
+    fn tail_guard_keeps_words_of_kept_segments() {
+        let mut first = seg("Hello there.", 0, 100);
+        first.words = vec![Word {
+            text: "Hello".into(),
+            t0: 0,
+            t1: 40,
+        }];
+        let kept = drop_tail_segments(vec![first, seg("Thank you.", 400, 450)]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].words.len(), 1);
     }
 
     #[test]
