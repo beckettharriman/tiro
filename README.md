@@ -58,6 +58,8 @@ All four are rebindable.
 
 **And what the computer is playing.** The speaker button in the expanded Transcribe view records system audio, a call or a video, with your microphone mixed in if you want, and transcribes it when you press Stop. Windows captures the playback device directly; Linux reads the PipeWire monitor. On a Mac this needs a virtual audio device, so the button does not appear there yet.
 
+**Who said what.** A file or a capture can be separated into speakers: the take comes out as "Speaker 1:", "Speaker 2:" paragraphs, in the list, in the transcript log and on the clipboard. It runs after Whisper, on the CPU, with the pyannote segmentation model and a WeSpeaker voice embedding through ONNX Runtime (the sherpa-onnx pipeline), about 31 MB of models that download the first time you ask for it. A half-hour two-person call separates in a couple of minutes on a laptop; expect the occasional short interjection to land on the other speaker. Headless: `tiro --transcribe-file call.m4a --diarize [--speakers 2]`.
+
 There's a tray icon too: left click toggles the panel, right click gives you Open, Start/Stop, Restart, Quit. On a Mac it lives in the menu bar.
 
 ## Engine and GPU

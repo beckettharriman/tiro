@@ -1,6 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "build": {
-    "beforeBundleCommand": "cargo build --release --manifest-path src-tauri/Cargo.toml --bin tiro-gpu-worker --features gpu"
+    "beforeBundleCommand": "cargo build --release --manifest-path src-tauri/Cargo.toml --bin tiro-gpu-worker --no-default-features --features gpu"
+  },
+  "bundle": {
+    "resources": {
+      "target/release/libsherpa-onnx-c-api.so": "libsherpa-onnx-c-api.so",
+      "target/release/libonnxruntime.so": "libonnxruntime.so"
+    }
   }
 }

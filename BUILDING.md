@@ -152,6 +152,51 @@ scripts/transcribe-file.sh "https://www.youtube.com/watch?v=..." --device gpu --
 The panel's file button (and dropping a file on the panel) is the same
 path with the app's serving engine: see `docs/mp3-upload-idea.md`.
 
+`--diarize [--speakers N]` separates the speakers after Whisper and
+prints "Speaker N:" paragraphs (`src/diarize.rs`); `tiro --diarize-test
+<wav> [--speakers N]` runs the separation alone and prints the turns,
+the speaker count, timing and peak memory.
+
+## Speaker separation (the `diarize` feature)
+
+Speaker separation is the `diarize` cargo feature, **on by default**, so
+every installer carries it. It brings in the official
+[`sherpa-onnx`](https://crates.io/crates/sherpa-onnx) crate (1.13.x), whose
+`sherpa-onnx-sys` build script **downloads a prebuilt sherpa-onnx +
+ONNX Runtime archive for the target at build time** (about 30 MB from
+the k2-fsa GitHub release, cached under `target/sherpa-onnx-prebuilt/`);
+nothing else to install, no cmake. The app itself stays offline: the two
+models (pyannote segmentation-3.0 int8, 1.5 MB, MIT; the WeSpeaker
+ResNet34-LM embedder, 26 MB, CC BY 4.0) download into `models/` the
+first time a take asks for separation, with their license texts saved
+beside them. Inference is CPU-only ONNX Runtime, so it runs inside the
+main process without creating a GPU context (design rule 1).
+
+The libraries are linked as **shared objects**, not the crate's default
+static archive: that archive is built with the pre-C++11 libstdc++ ABI
+and instantiates the same `std::regex` template symbols whisper.cpp
+(built here with the current ABI) does; linked statically the two merge
+and ONNX Runtime aborts at start (`free(): invalid pointer`). So the
+build leaves `libsherpa-onnx-c-api.so` and `libonnxruntime.so` (5 MB +
+27 MB; `.dll` on Windows, `.dylib` on macOS) next to the binaries in
+`target/release/`, `build.rs` gives `tiro` a run-time search path of
+its own directory plus `../lib/tiro` (where the deb, rpm and AppImage
+put bundle resources) or `../Resources` (the app bundle), and
+`tauri.linux.conf.json` / `tauri.windows.conf.json` list the two files
+as bundle resources. The Windows and macOS resource entries are written
+from the archive layout and have not been exercised on those systems
+yet; the macOS `.dylib` names still need adding to a
+`tauri.macos.conf.json` resources map once checked.
+
+Offline or reproducible builds point the build script at a pre-fetched
+archive: `SHERPA_ONNX_ARCHIVE_DIR=<dir>` holding
+`sherpa-onnx-v1.13.8-linux-x64-shared-lib.tar.bz2` (or the macOS /
+Windows `-shared-lib` / `-shared-MT-Release-lib` name), or
+`SHERPA_ONNX_LIB_DIR=<dir>` with the extracted libraries. `cargo build
+--no-default-features` drops the feature entirely (the separated-take
+path then reports that the build has no speaker separation) — the GPU
+worker build uses this, since the worker never separates anything.
+
 Rebinding a hotkey in the panel re-runs the portal bind (the portal has
 no unbind, so Tiro closes the old session and binds a fresh one); the
 new combo is offered as the preferred trigger, which KDE accepts without
@@ -169,7 +214,7 @@ initializes a GPU context either way (design rule 1).
 
 ```sh
 cargo build --release
-cargo build --release --bin tiro-gpu-worker --features gpu   # Windows: ..\scripts\build-gpu-worker.cmd
+cargo build --release --bin tiro-gpu-worker --no-default-features --features gpu   # Windows: ..\scripts\build-gpu-worker.cmd
 ./target/release/tiro --gpu-enum
 ```
 
