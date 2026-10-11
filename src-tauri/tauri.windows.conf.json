@@ -2,5 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "build": {
     "beforeBundleCommand": "scripts\\build-gpu-worker.cmd"
+  },
+  "bundle": {
+    "resources": {
+      "target/release/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
+      "target/release/onnxruntime.dll": "onnxruntime.dll"
+    }
   }
 }

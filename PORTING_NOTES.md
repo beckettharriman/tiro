@@ -254,6 +254,15 @@ from the original in these ways:
   stop-and-paste-at-cursor); the finishing key picks the destination. There is
   no replay-last-take action. (Not in the original at all — post-parity
   feature.)
+- **Speaker separation** (0.2, not in the original app — its
+  `diarize_video.py` side utility ran pyannote + whisperx in Python):
+  import takes and captures can be diarized in-process with sherpa-onnx's
+  pyannote pipeline (segmentation-3.0 + WeSpeaker embeddings, CPU ONNX
+  Runtime) and merged onto whisper.cpp word timestamps with whisperx's
+  max-overlap rule. The verbatim text becomes "Speaker N:" paragraphs, the
+  JSONL record gains a `speakers` field (absent on ordinary takes), the
+  Markdown line indents continuation lines, and the GPU worker protocol
+  gains an optional `words` request flag / reply array.
 - **No AC/battery switching** (0.2): the original's power-source policy
   (GPU + the bigger model plugged in, CPU + the lighter one on battery,
   `treat_as_desktop`) is removed. `device` is auto | cpu | cuda, Auto means

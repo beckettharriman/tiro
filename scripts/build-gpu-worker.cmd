@@ -10,7 +10,7 @@ rem under <repo>\src-tauri\target with room to spare.
 setlocal
 set "SHORT=%SystemDrive%\tiro-gpu"
 if not defined CARGO_TARGET_DIR set "CARGO_TARGET_DIR=%~dp0..\src-tauri\target"
-cargo build --release --manifest-path "%~dp0..\src-tauri\Cargo.toml" --bin tiro-gpu-worker --features gpu --target-dir "%SHORT%" || exit /b 1
+cargo build --release --manifest-path "%~dp0..\src-tauri\Cargo.toml" --bin tiro-gpu-worker --no-default-features --features gpu --target-dir "%SHORT%" || exit /b 1
 if not exist "%CARGO_TARGET_DIR%\release\" mkdir "%CARGO_TARGET_DIR%\release\" || exit /b 1
 copy /Y "%SHORT%\release\tiro-gpu-worker.exe" "%CARGO_TARGET_DIR%\release\" >nul || exit /b 1
 echo tiro-gpu-worker.exe: built in %SHORT%, copied to %CARGO_TARGET_DIR%\release\

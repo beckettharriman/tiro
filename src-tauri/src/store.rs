@@ -26,6 +26,15 @@ pub struct Rec {
     pub model: String,
     pub device: String,
     pub secs: f64,
+    /// Speakers in a separated take ("Speaker N:" paragraphs in `text`);
+    /// absent from the line, and 0 here, for an ordinary take — so plain
+    /// records stay byte-identical to the original's.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub speakers: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// `log_dir`: probe the vault with a real write, fall back to
@@ -69,6 +78,8 @@ fn append(path: &PathBuf, content: &str) -> std::io::Result<()> {
 /// text); the record is returned either way for the panel push. With
 /// `save_transcripts = false` no file is touched at all — the record is
 /// still returned so the panel shows the take for the current session.
+/// `speakers` is the speaker count of a separated take, 0 otherwise.
+#[allow(clippy::too_many_arguments)]
 pub fn write_log(
     cfg: &ConfigStore,
     verbatim: &str,
@@ -77,10 +88,22 @@ pub fn write_log(
     model: &str,
     device: &str,
     secs: f64,
+    speakers: usize,
 ) -> Result<(bool, Rec), String> {
-    write_log_at(cfg, verbatim, clean, mic, model, device, secs, Local::now())
+    write_log_full(
+        cfg,
+        verbatim,
+        clean,
+        mic,
+        model,
+        device,
+        secs,
+        speakers,
+        Local::now(),
+    )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn write_log_at(
     cfg: &ConfigStore,
@@ -92,6 +115,21 @@ fn write_log_at(
     secs: f64,
     now: DateTime<Local>,
 ) -> Result<(bool, Rec), String> {
+    write_log_full(cfg, verbatim, clean, mic, model, device, secs, 0, now)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_log_full(
+    cfg: &ConfigStore,
+    verbatim: &str,
+    clean: &str,
+    mic: &str,
+    model: &str,
+    device: &str,
+    secs: f64,
+    speakers: usize,
+    now: DateTime<Local>,
+) -> Result<(bool, Rec), String> {
     let day = now.format("%Y-%m-%d").to_string();
     let rec = Rec {
         ts: now.format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -101,6 +139,7 @@ fn write_log_at(
         model: model.to_string(),
         device: device.to_string(),
         secs: (secs * 100.0).round() / 100.0,
+        speakers,
     };
     if !cfg.get_bool("save_transcripts") {
         // Saving is off: no file (or directory) is created or appended; the
@@ -118,7 +157,10 @@ fn write_log_at(
         if fresh {
             md.push_str(&markdown_header(&day));
         }
-        md.push_str(&format!("- **{}** — {verbatim}\n", now.format("%H:%M")));
+        // A separated take has "Speaker N:" paragraphs; continuation
+        // lines are indented so the whole take stays one list item.
+        let body = verbatim.replace('\n', "\n  ");
+        md.push_str(&format!("- **{}** — {body}\n", now.format("%H:%M")));
         append(&md_path, &md)
     })();
     if let Err(err) = result {
@@ -246,6 +288,8 @@ pub fn entry_from_rec(rec: &Rec, cfg: &ConfigStore) -> Value {
         "device": device,
         "model": model,
         "mic": mic,
+        // Speaker count of a separated take; 0 for an ordinary one.
+        "speakers": rec.speakers,
     })
 }
 
@@ -427,6 +471,45 @@ mod tests {
     }
 
     #[test]
+    fn separated_take_logs_speakers_and_indents_markdown() {
+        let dir = TempDir::new().unwrap();
+        let cfg = cfg_in(&dir);
+        let text = "Speaker 1: hi there\n\nSpeaker 2: hello";
+        let (_, rec) = write_log_full(
+            &cfg,
+            text,
+            text,
+            "file:a.m4a",
+            "m",
+            "cpu",
+            3.0,
+            2,
+            at(9, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(rec.speakers, 2);
+        let vault = dir.path().join("vault");
+        let raw = fs::read_to_string(vault.join("2026-07-27.jsonl")).unwrap();
+        assert!(
+            raw.trim_end().ends_with(r#""secs":3.0,"speakers":2}"#),
+            "{raw}"
+        );
+        let back: Rec = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(back.text, text);
+        assert_eq!(back.speakers, 2);
+        let md = fs::read_to_string(vault.join("2026-07-27.md")).unwrap();
+        assert!(
+            md.ends_with("- **09:00** — Speaker 1: hi there\n  \n  Speaker 2: hello\n"),
+            "{md}"
+        );
+        // a plain take: no speakers field at all, old lines parse
+        let (_, plain) = write_log_at(&cfg, "plain", "", "", "m", "cpu", 1.0, at(9, 1, 0)).unwrap();
+        assert_eq!(plain.speakers, 0);
+        let raw = fs::read_to_string(vault.join("2026-07-27.jsonl")).unwrap();
+        assert!(raw.lines().last().unwrap().ends_with(r#""secs":1.0}"#));
+    }
+
+    #[test]
     fn entry_shape_matches_bridge_contract() {
         let dir = TempDir::new().unwrap();
         let cfg = cfg_in(&dir);
@@ -438,8 +521,10 @@ mod tests {
             model: "small.en".into(),
             device: "cuda".into(),
             secs: 8.0,
+            speakers: 0,
         };
         let e = entry_from_rec(&rec, &cfg);
+        assert_eq!(e["speakers"], 0);
         assert!(e["id"]
             .as_str()
             .unwrap()
@@ -464,9 +549,11 @@ mod tests {
             model: String::new(),
             device: "gpu".into(),
             secs: 130.0,
+            speakers: 2,
         };
         let e = entry_from_rec(&rec, &cfg);
         assert_eq!(e["text"], "raw words");
+        assert_eq!(e["speakers"], 2);
         assert_eq!(e["clock"], "12:05 AM", "midnight hour renders as 12");
         assert_eq!(e["dur"], "2:10");
         assert_eq!(e["device"], "GPU");

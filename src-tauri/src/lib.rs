@@ -10,6 +10,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod config;
 pub mod cues;
+pub mod diarize;
 pub mod flow;
 pub mod gpu;
 pub mod gpu_worker;
@@ -132,11 +133,28 @@ fn list_outputs() -> Value {
 
 // Opening a loopback stream (or spawning the capture tool) blocks for a
 // moment; keep it off the event loop like the other device commands.
+// `diarize` (separate the speakers when the capture is transcribed) and
+// `speakers` (how many, when the user knows; absent = let the clustering
+// decide) are optional so a panel that predates them keeps working.
 #[tauri::command]
-async fn start_capture(app: tauri::AppHandle, output: String, mic: bool) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || api::start_capture(&app, &output, mic))
-        .await
-        .map_err(|e| e.to_string())
+async fn start_capture(
+    app: tauri::AppHandle,
+    output: String,
+    mic: bool,
+    diarize: Option<bool>,
+    speakers: Option<usize>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        api::start_capture(
+            &app,
+            &output,
+            mic,
+            diarize.unwrap_or(false),
+            speakers.filter(|n| *n >= 1),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -149,11 +167,24 @@ async fn stop_capture(app: tauri::AppHandle) -> Result<Value, String> {
 // Import a file as a take. The native picker blocks and the file check
 // touches disk, so it runs off the event loop like the other dialog/disk
 // commands.
+// `diarize` and `speakers` are optional for the same reason.
 #[tauri::command]
-async fn transcribe_file(app: tauri::AppHandle, path: Option<String>) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || api::transcribe_file(&app, path.as_deref()))
-        .await
-        .map_err(|e| e.to_string())
+async fn transcribe_file(
+    app: tauri::AppHandle,
+    path: Option<String>,
+    diarize: Option<bool>,
+    speakers: Option<usize>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        api::transcribe_file(
+            &app,
+            path.as_deref(),
+            diarize.unwrap_or(false),
+            speakers.filter(|n| *n >= 1),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -458,7 +489,8 @@ pub fn run() {
                 use tauri::Manager;
                 let app = window.app_handle();
                 if let Some(path) = paths.first() {
-                    let reply = api::transcribe_file(app, Some(&path.to_string_lossy()));
+                    let reply =
+                        api::transcribe_file(app, Some(&path.to_string_lossy()), false, None);
                     if reply["ok"] != true {
                         eprintln!("drop import refused: {reply}");
                         flow::push_panel(

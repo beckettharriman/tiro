@@ -53,9 +53,33 @@ tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-autostart = "2.5.1"
 auto-launch = "0.5"
+# Speaker separation (diarize.rs): sherpa-onnx's pyannote pipeline on CPU.
+# The safe crate carries the config types; the raw `-sys` crate is used
+# directly for the progress-callback entry point the 1.13.8 wrapper does
+# not bind. Both are optional behind the `diarize` feature (on by default).
+# `shared`, not the crate's default `static`: the prebuilt static archive
+# is compiled with the pre-C++11 libstdc++ ABI and instantiates std::regex
+# templates under the same mangled names whisper.cpp (built here, new ABI)
+# instantiates; statically linked, the linker merges the two and ONNX
+# Runtime aborts in its device discovery (free(): invalid pointer). As
+# shared objects each side keeps its own copies. The .so/.dll files land
+# next to the binary (see build.rs and the bundle resources).
+sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"], optional = true }
+sherpa-onnx-sys = { version = "=1.13.8", default-features = false, optional = true }
+# The segmentation model ships as a .tar.bz2 on the k2-fsa release page.
+bzip2 = { version = "0.6", optional = true }
+tar = { version = "0.4", optional = true }
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "vorbis", "wav", "pcm", "ogg", "mkv", "alac", "adpcm", "aiff"] }
 
 [features]
+default = ["diarize"]
+# Speaker separation for imported files and system-audio captures
+# (diarize.rs). CPU-only ONNX Runtime, so it runs in the main process
+# without touching the GPU. The `sherpa-onnx-sys` build script downloads
+# a prebuilt sherpa-onnx + onnxruntime static archive for the target at
+# BUILD time (see BUILDING.md); the app itself stays offline. The GPU
+# worker never calls it, so its own build passes --no-default-features.
+diarize = ["dep:sherpa-onnx", "dep:sherpa-onnx-sys", "dep:bzip2", "dep:tar"]
 # GPU inference (Vulkan) for `tiro-gpu-worker`. Needs the Vulkan SDK
 # (headers + `glslc`) at build time. Build it with `--bin tiro-gpu-worker`
 # only: enabled for the `tiro` binary too, that binary would refuse to

@@ -186,7 +186,8 @@ pub fn file_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// `tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]`
+/// `tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]
+/// [--diarize [--speakers N]]`
 ///
 /// The headless twin of the panel's Import: decode in-process, run the
 /// configured (or named) model on the chosen device through the SAME
@@ -196,13 +197,23 @@ pub fn file_label(path: &Path) -> String {
 /// `> out.txt` captures exactly the text). Beam follows the live policy
 /// (GPU 5, CPU 1) unless `--beam` says otherwise. Models resolve under
 /// the app dir like everything else (`TIRO_APP_DIR` to relocate), and a
-/// missing model downloads first, exactly as the app would.
+/// missing model downloads first, exactly as the app would. `--diarize`
+/// adds the speaker separation step and prints "Speaker N:" paragraphs;
+/// `--speakers N` fixes the speaker count.
 pub fn transcribe_file_cli(args: &[String], at: usize) {
     let Some(path) = args.get(at + 1).filter(|a| !a.starts_with("--")) else {
         eprintln!(
-            "usage: tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N]"
+            "usage: tiro --transcribe-file <audio> [--model NAME] [--device gpu|cpu] [--beam N] [--diarize [--speakers N]]"
         );
         return;
+    };
+    let diarize = args.iter().any(|a| a == "--diarize");
+    let speakers = match crate::diarize::speakers_arg(args) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
     };
     let opt = |flag: &str| {
         args.iter()
@@ -257,8 +268,16 @@ pub fn transcribe_file_cli(args: &[String], at: usize) {
         secs
     );
     eprintln!(
-        "model {model} ({compute_type}) on {device}, beam {beam}, vocab prompt: {}",
-        vocab.as_deref().unwrap_or("(none)")
+        "model {model} ({compute_type}) on {device}, beam {beam}, vocab prompt: {}{}",
+        vocab.as_deref().unwrap_or("(none)"),
+        if diarize {
+            format!(
+                ", speakers: {}",
+                speakers.map_or("auto".to_string(), |n| n.to_string())
+            )
+        } else {
+            String::new()
+        }
     );
 
     let t1 = Instant::now();
@@ -277,7 +296,12 @@ pub fn transcribe_file_cli(args: &[String], at: usize) {
                     "GPU worker ready (device {gpu_device}) in {:.1}s",
                     t1.elapsed().as_secs_f64()
                 );
-                let r = w.transcribe(&audio, beam, vocab.as_deref());
+                let r = if diarize {
+                    w.transcribe_words(&audio, beam, vocab.as_deref())
+                } else {
+                    w.transcribe(&audio, beam, vocab.as_deref())
+                        .map(crate::transcribe::Transcript::plain)
+                };
                 w.stop();
                 r
             }
@@ -293,25 +317,74 @@ pub fn transcribe_file_cli(args: &[String], at: usize) {
             })
             .and_then(|t| {
                 eprintln!("CPU model loaded in {:.1}s", t1.elapsed().as_secs_f64());
-                t.transcribe(&audio, beam, vocab.as_deref())
+                if diarize {
+                    t.transcribe_words(&audio, beam, vocab.as_deref())
+                } else {
+                    t.transcribe(&audio, beam, vocab.as_deref())
+                        .map(crate::transcribe::Transcript::plain)
+                }
             })
     };
-    match result {
-        Ok(text) => {
+    let transcript = match result {
+        Ok(t) => {
             let took = t1.elapsed().as_secs_f64();
             eprintln!(
-                "transcribed {:.1} s of audio in {took:.1} s ({:.2}x realtime), {} chars",
+                "transcribed {:.1} s of audio in {took:.1} s ({:.2}x realtime), {} chars, {} words",
                 secs,
                 secs / took.max(0.001),
-                text.chars().count()
+                t.text.chars().count(),
+                t.words.len()
             );
-            println!("{text}");
+            t
         }
         Err(e) => {
             eprintln!("ERROR: {e}");
             std::process::exit(1);
         }
+    };
+    if !diarize || transcript.text.is_empty() {
+        println!("{}", transcript.text);
+        return;
     }
+    // Speaker separation, then the merge — the same two calls the app
+    // makes after Whisper on an import take.
+    let t2 = Instant::now();
+    if !crate::diarize::models_installed(&models_dir) {
+        eprintln!(
+            "downloading speaker separation models ({} MB)",
+            crate::diarize::DOWNLOAD_BYTES / 1_000_000
+        );
+    }
+    let mut last = -1i32;
+    let turns = match crate::diarize::diarize_in(&models_dir, &audio, speakers, |p| {
+        let pct = (p * 100.0) as i32;
+        if pct / 10 > last / 10 {
+            last = pct;
+            eprintln!(
+                "  separating speakers {pct}% ({:.1}s)",
+                t2.elapsed().as_secs_f64()
+            );
+        }
+    }) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ERROR: speaker separation failed: {e}");
+            println!("{}", transcript.text);
+            std::process::exit(1);
+        }
+    };
+    let took = t2.elapsed().as_secs_f64();
+    let labelled = crate::diarize::speaker_text(&transcript.words, &turns);
+    eprintln!(
+        "separated {} turns, {} speakers in {took:.1} s ({:.3}x realtime); whole run {:.1} s ({:.2}x realtime), peak RSS {}",
+        turns.len(),
+        labelled.speakers,
+        took / secs.max(0.001),
+        t1.elapsed().as_secs_f64(),
+        secs / t1.elapsed().as_secs_f64().max(0.001),
+        crate::diarize::peak_rss_mib().map_or("n/a".to_string(), |m| format!("{m:.0} MiB"))
+    );
+    println!("{}", labelled.text);
 }
 
 #[cfg(test)]

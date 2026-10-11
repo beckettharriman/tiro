@@ -162,6 +162,11 @@ fn main() {
         tiro_lib::import::transcribe_file_cli(&args, i);
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--diarize-test") {
+        // Speaker separation alone on a WAV: turns, speaker count, timing.
+        tiro_lib::diarize::diarize_test(&args, i);
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--transcribe-test") {
         match args.get(i + 1) {
             Some(wav) => tiro_lib::transcribe::transcribe_test(wav),
