@@ -646,6 +646,10 @@ impl Recording {
         crate::macos::ensure_microphone_access().map_err(AudioError)?;
         match Self::try_candidates(mic_name_substr) {
             Ok(recording) => Ok(recording),
+            // No input device at all: a second walk cannot find one, and
+            // it would only double the silence before the "No microphone"
+            // pill while the user is holding the key.
+            Err(first) if candidates(mic_name_substr).is_empty() => Err(first),
             Err(first) => {
                 // A device that has only just arrived (a USB mic replugged)
                 // can refuse every format for a moment; one more walk after
