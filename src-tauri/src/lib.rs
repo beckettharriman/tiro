@@ -489,20 +489,14 @@ pub fn run() {
                 use tauri::Manager;
                 let app = window.app_handle();
                 if let Some(path) = paths.first() {
-                    let reply =
-                        api::transcribe_file(app, Some(&path.to_string_lossy()), false, None);
-                    if reply["ok"] != true {
-                        eprintln!("drop import refused: {reply}");
-                        flow::push_panel(
-                            app,
-                            "tiroSetImport",
-                            serde_json::json!({
-                                "phase": "error",
-                                "name": reply["name"],
-                                "error": reply["error"],
-                            }),
-                        );
-                    }
+                    // Hand the path to the page (`window.tiroDropFile`), which
+                    // imports it through the same call as Choose file..., so
+                    // the Speaker separation switch applies to drops too.
+                    flow::push_panel(
+                        app,
+                        "tiroDropFile",
+                        serde_json::json!(path.to_string_lossy()),
+                    );
                 }
                 return;
             }
