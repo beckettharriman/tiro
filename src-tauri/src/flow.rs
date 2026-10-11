@@ -1128,8 +1128,14 @@ pub struct Separate {
 /// a file must never cost a live take. Decoding runs on the spawned
 /// thread (a long file takes a second or two); the panel follows along
 /// through `push_import`. With `diarize` the take is separated into
-/// speakers after Whisper (see `diarize.rs`).
-pub fn transcribe_file(app: &AppHandle, path: PathBuf, diarize: bool) -> Result<(), String> {
+/// speakers after Whisper (see `diarize.rs`); `speakers` fixes their
+/// number when the user knows it, `None` lets the clustering decide.
+pub fn transcribe_file(
+    app: &AppHandle,
+    path: PathBuf,
+    diarize: bool,
+    speakers: Option<usize>,
+) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     refuse_if_busy(&ctx)?;
     if !path.is_file() {
@@ -1150,6 +1156,7 @@ pub fn transcribe_file(app: &AppHandle, path: PathBuf, diarize: bool) -> Result<
             "file",
             "Import failed",
             diarize,
+            speakers,
         );
     });
     Ok(())
@@ -1188,7 +1195,9 @@ fn begin_import(app: &AppHandle, ctx: &AppCtx) -> u64 {
 /// there are none) through `transcribe_worker` under `session`, report
 /// every phase to the panel, and release the lane. `marker` is the mic
 /// column prefix ("file" or "capture"); `fail_label` the pill text when
-/// there is nothing to transcribe; `diarize` asks for speaker separation.
+/// there is nothing to transcribe; `diarize` asks for speaker separation
+/// with `speakers` of them when known.
+#[allow(clippy::too_many_arguments)]
 fn run_import_take(
     app: &AppHandle,
     session: u64,
@@ -1197,6 +1206,7 @@ fn run_import_take(
     marker: &str,
     fail_label: &str,
     diarize: bool,
+    speakers: Option<usize>,
 ) {
     let ctx = app.state::<AppCtx>();
     let samples = samples.and_then(|s| {
@@ -1235,7 +1245,7 @@ fn run_import_take(
     };
     let separate = diarize.then(|| Separate {
         name: name.to_string(),
-        speakers: None,
+        speakers,
     });
     // The log's mic column carries the source behind a marker, which is
     // also how the panel knows to tag the entry.
@@ -1269,8 +1279,10 @@ pub struct CaptureSession {
     sys: crate::capture::SystemCapture,
     with_mic: bool,
     started: Instant,
-    /// Separate the speakers when the capture is transcribed.
+    /// Separate the speakers when the capture is transcribed, and how
+    /// many there are when the user said.
     diarize: bool,
+    speakers: Option<usize>,
 }
 
 /// Panel-side capture state (`window.tiroSetCapture`).
@@ -1303,6 +1315,7 @@ pub fn start_system_capture(
     output: &str,
     with_mic: bool,
     diarize: bool,
+    speakers: Option<usize>,
 ) -> Result<(), String> {
     let ctx = app.state::<AppCtx>();
     refuse_if_busy(&ctx)?;
@@ -1334,6 +1347,7 @@ pub fn start_system_capture(
         with_mic: mic_ok,
         started: Instant::now(),
         diarize,
+        speakers,
     });
     ctx.capturing.store(true, Ordering::SeqCst);
     play(&ctx, "start");
@@ -1364,7 +1378,7 @@ pub fn stop_system_capture(app: &AppHandle) -> Result<(), String> {
         None
     };
     let secs = session.started.elapsed().as_secs_f64();
-    let diarize = session.diarize;
+    let (diarize, speakers) = (session.diarize, session.speakers);
     push_capture(app, &ctx);
     let import_session = begin_import(app, &ctx);
     push_import(app, json!({ "phase": "decoding", "name": name }));
@@ -1390,6 +1404,7 @@ pub fn stop_system_capture(app: &AppHandle) -> Result<(), String> {
             "capture",
             "Capture failed",
             diarize,
+            speakers,
         );
     });
     Ok(())

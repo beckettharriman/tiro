@@ -155,7 +155,15 @@ path with the app's serving engine: see `docs/mp3-upload-idea.md`.
 `--diarize [--speakers N]` separates the speakers after Whisper and
 prints "Speaker N:" paragraphs (`src/diarize.rs`); `tiro --diarize-test
 <wav> [--speakers N]` runs the separation alone and prints the turns,
-the speaker count, timing and peak memory.
+the speaker count, timing and peak memory. Give the speaker count when
+you know it: left to the clustering threshold (0.7, cosine distance,
+complete linkage) a two-person phone call came out as three or four
+speakers. For tuning runs `TIRO_DIARIZE_THRESHOLD` and
+`TIRO_DIARIZE_THREADS` override the threshold and the ONNX thread count,
+and `TIRO_SEGMENT_DEBUG=<file>` logs every word with its timestamps.
+Expect the separation to run at roughly half of real time on a laptop
+CPU (a 28-minute call took 14-18 minutes here; the embedding passes
+dominate) and about 350 MB of memory.
 
 ## Speaker separation (the `diarize` feature)
 

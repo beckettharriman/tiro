@@ -717,6 +717,35 @@ fn push_token(words: &mut Vec<Word>, piece: &str, t0: i64, t1: i64) {
     }
 }
 
+/// Put a segment's words on the segment's own timeline. With VAD on,
+/// whisper.cpp decodes the speech-only audio and maps the SEGMENT
+/// timestamps back to the original recording, but hands token timestamps
+/// out unmapped (the processed timeline, which runs ahead of the real one
+/// by every cut of silence). The tokens' span is the segment's processed
+/// span, so a linear fit of that span onto the mapped `t0..t1` restores
+/// the real times; without VAD both spans coincide and nothing moves.
+fn fit_words_to_segment(words: &mut [Word], t0: i64, t1: i64) {
+    let Some(p0) = words.iter().map(|w| w.t0).min() else {
+        return;
+    };
+    let p1 = words.iter().map(|w| w.t1).max().unwrap_or(p0);
+    let span = t1 - t0;
+    if p1 <= p0 || span <= 0 {
+        for w in words.iter_mut() {
+            w.t0 = t0;
+            w.t1 = t1.max(t0);
+        }
+        return;
+    }
+    let scale = span as f64 / (p1 - p0) as f64;
+    for w in words.iter_mut() {
+        let a = t0 + ((w.t0 - p0) as f64 * scale).round() as i64;
+        let b = t0 + ((w.t1 - p0) as f64 * scale).round() as i64;
+        w.t0 = a.clamp(t0, t1);
+        w.t1 = b.clamp(w.t0, t1);
+    }
+}
+
 /// A loaded CPU whisper model.
 pub struct Transcriber {
     ctx: WhisperContext,
@@ -845,10 +874,12 @@ impl Transcriber {
                             push_token(&mut seg_words, &piece, data.t0, data.t1);
                         }
                     }
+                    let (t0, t1) = (segment.start_timestamp(), segment.end_timestamp());
+                    fit_words_to_segment(&mut seg_words, t0, t1);
                     let seg = Segment {
                         text: text.trim().to_string(),
-                        t0: segment.start_timestamp(),
-                        t1: segment.end_timestamp(),
+                        t0,
+                        t1,
                         avg_p: if cnt > 0 { sum / cnt as f32 } else { 0.0 },
                         words: seg_words,
                     };
@@ -864,6 +895,11 @@ impl Transcriber {
                                 "seg {i}: t0={} t1={} avg_p={:.3} toks={} text={:?}",
                                 seg.t0, seg.t1, seg.avg_p, n_tok, seg.text
                             );
+                            // word mode: one line per word for tuning the
+                            // speaker merge against diarization turns
+                            for w in &seg.words {
+                                let _ = writeln!(f, "  word t0={} t1={} {:?}", w.t0, w.t1, w.text);
+                            }
                         }
                     }
                     if !seg.text.is_empty() {
@@ -1048,6 +1084,43 @@ mod tests {
         assert_eq!(texts, ["Hello,", "world!", "ok"]);
         assert_eq!((words[1].t0, words[1].t1), (30, 56));
         assert_eq!((words[2].t0, words[2].t1), (70, 80));
+    }
+
+    #[test]
+    fn words_are_fitted_onto_the_mapped_segment() {
+        // processed timeline 100..200, segment really at 1000..1200
+        let mut words = vec![
+            Word {
+                text: "a".into(),
+                t0: 100,
+                t1: 150,
+            },
+            Word {
+                text: "b".into(),
+                t0: 150,
+                t1: 200,
+            },
+        ];
+        fit_words_to_segment(&mut words, 1000, 1200);
+        assert_eq!((words[0].t0, words[0].t1), (1000, 1100));
+        assert_eq!((words[1].t0, words[1].t1), (1100, 1200));
+        // identical spans: nothing moves
+        let mut same = vec![Word {
+            text: "x".into(),
+            t0: 40,
+            t1: 70,
+        }];
+        fit_words_to_segment(&mut same, 40, 70);
+        assert_eq!((same[0].t0, same[0].t1), (40, 70));
+        // degenerate token span: words take the segment's bounds
+        let mut flat = vec![Word {
+            text: "y".into(),
+            t0: 5,
+            t1: 5,
+        }];
+        fit_words_to_segment(&mut flat, 300, 360);
+        assert_eq!((flat[0].t0, flat[0].t1), (300, 360));
+        fit_words_to_segment(&mut [], 0, 10);
     }
 
     #[test]

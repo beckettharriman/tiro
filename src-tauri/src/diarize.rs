@@ -60,6 +60,7 @@ const SEG_TAR: &str = "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2";
 const SEG_TAR_BYTES: u64 = 6_958_444;
 /// Files kept from the tarball: the int8 model, its MIT license, the
 /// README. The fp32 model and the export/demo scripts are not extracted.
+#[cfg(feature = "diarize")]
 const SEG_KEEP: &[&str] = &[SEG_FILE, "LICENSE", "README.md"];
 
 /// The speaker embedding model (one file on the release page).
@@ -215,8 +216,22 @@ fn threads() -> i32 {
 }
 
 /// Clustering distance threshold when the speaker count is not given
-/// (sherpa-onnx's default; cosine distance, complete linkage).
-const CLUSTER_THRESHOLD: f32 = 0.5;
+/// (cosine distance, complete linkage). sherpa-onnx's default of 0.5 split
+/// a two-person phone call into 10 speakers; 0.7 is what the pyannote 3.1
+/// pipeline uses with this same embedder, and on a 5-minute excerpt of
+/// that call 0.7 and 0.8 both found exactly the two (0.9 merged them).
+/// `TIRO_DIARIZE_THRESHOLD` overrides it for tuning runs.
+#[cfg(feature = "diarize")]
+const CLUSTER_THRESHOLD: f32 = 0.7;
+
+#[cfg(feature = "diarize")]
+fn cluster_threshold() -> f32 {
+    std::env::var("TIRO_DIARIZE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|t| *t > 0.0)
+        .unwrap_or(CLUSTER_THRESHOLD)
+}
 
 /// Separate the speakers in `samples_16k` (16 kHz mono f32). `num_speakers`
 /// fixes the cluster count when the caller knows it (a two-person call);
@@ -256,7 +271,7 @@ mod engine {
 
     use sherpa_onnx_sys as sys;
 
-    use super::{ModelPaths, Turn, CLUSTER_THRESHOLD};
+    use super::{ModelPaths, Turn};
 
     // The 1.13.8 safe wrapper exposes `process` without a progress
     // callback; the C API has one. Same C library, same ABI.
@@ -347,7 +362,7 @@ mod engine {
             },
             clustering: sys::FastClusteringConfig {
                 num_clusters,
-                threshold: CLUSTER_THRESHOLD,
+                threshold: super::cluster_threshold(),
                 compute_confidence: 0,
             },
             min_duration_on: 0.3,

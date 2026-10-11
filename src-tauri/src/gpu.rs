@@ -381,7 +381,10 @@ impl GpuWorker {
                                 .join(" ")
                         })
                         .unwrap_or_default();
-                    let words = if words {
+                    // A worker from before the `words` flag answers without
+                    // the array: no timing, and the take stays unseparated
+                    // rather than failing.
+                    let words = if words && !v["words"].is_null() {
                         serde_json::from_value::<Vec<Word>>(v["words"].clone())
                             .map_err(|e| format!("bad words in worker reply: {e}"))?
                     } else {

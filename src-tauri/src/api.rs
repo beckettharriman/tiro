@@ -808,10 +808,16 @@ pub fn pick_folder(app: &AppHandle) -> Option<Value> {
 /// `transcribe_file`: the panel's Import button. Without a path, open the
 /// native file picker (audio and video first, any file allowed — the decoder
 /// decides what it can decode); then hand the file to the take pipeline
-/// (`flow::transcribe_file`), separating the speakers when `diarize`.
-/// Replies `{ok, name, path}`, `{ok: false, cancelled: true}` for a
-/// dismissed picker, or `{ok: false, error}`.
-pub fn transcribe_file(app: &AppHandle, path: Option<&str>, diarize: bool) -> Value {
+/// (`flow::transcribe_file`), separating the speakers when `diarize`
+/// (`speakers` of them when known). Replies `{ok, name, path}`,
+/// `{ok: false, cancelled: true}` for a dismissed picker, or
+/// `{ok: false, error}`.
+pub fn transcribe_file(
+    app: &AppHandle,
+    path: Option<&str>,
+    diarize: bool,
+    speakers: Option<usize>,
+) -> Value {
     use tauri_plugin_dialog::DialogExt;
     let path = match path {
         Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
@@ -836,7 +842,7 @@ pub fn transcribe_file(app: &AppHandle, path: Option<&str>, diarize: bool) -> Va
         }
     };
     let name = crate::import::file_label(&path);
-    match flow::transcribe_file(app, path.clone(), diarize) {
+    match flow::transcribe_file(app, path.clone(), diarize, speakers) {
         Ok(()) => json!({ "ok": true, "name": name, "path": path.to_string_lossy() }),
         Err(e) => json!({ "ok": false, "name": name, "error": e }),
     }
@@ -849,9 +855,15 @@ pub fn list_outputs() -> Value {
 
 /// `start_capture`: begin recording system audio from `output`, with the
 /// microphone mixed in when `mic`, separating the speakers at Stop when
-/// `diarize`.
-pub fn start_capture(app: &AppHandle, output: &str, mic: bool, diarize: bool) -> Value {
-    match flow::start_system_capture(app, output, mic, diarize) {
+/// `diarize` (`speakers` of them when known).
+pub fn start_capture(
+    app: &AppHandle,
+    output: &str,
+    mic: bool,
+    diarize: bool,
+    speakers: Option<usize>,
+) -> Value {
+    match flow::start_system_capture(app, output, mic, diarize, speakers) {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
