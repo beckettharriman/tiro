@@ -92,6 +92,10 @@
     };
   })();
   const MOCK_ENTRIES = [
+    /* a speaker-separated capture: paragraphs split by blank lines, each
+       opening with its speaker label (rendered pre-line, tagged "2 speakers") */
+    { id: "m0", day: MOCK_DAYS.today, clock: "10:55 PM", dur: "1:35", source: "Speakers", speakers: 2,
+      text: "Speaker 1: Okay, so the plan is we ship the import path first and then look at the call capture.\n\nSpeaker 2: Right, because the two share the whole pipeline after the audio comes in.\n\nSpeaker 1: Exactly. Let's get the file side in this week and the capture the week after." },
     { id: "m1", day: MOCK_DAYS.today, clock: "10:42 PM", dur: "0:11", text: "Remind me to swap the joycon shells on the OLED before I list it, and check whether the back plate screws are stripped." },
     { id: "m2", day: MOCK_DAYS.today, clock: "10:31 PM", dur: "0:29", text: "Okay so for the vault entry tonight: I spent most of the day on the Tiro redesign, mostly arguing with myself about whether the advanced panel should slide or grow in place. Growing in place feels right because the panel never loses its anchor point, and the whole identity of the app is that it stays where you put it and never surprises you. Also need to remember to file the receipt from Micro Center." },
     { id: "m3", day: MOCK_DAYS.today, clock: "9:58 PM", dur: "0:05", text: "Add vulkan headers to the build docs." },
@@ -151,8 +155,17 @@
   }
   const MOCK_HW = mockHardware();
 
+  /* the shape the backend sends for one take (the day is implied by the
+     file it came from) */
+  function mockTake(e) {
+    const t = { id: e.id, clock: e.clock, dur: e.dur, text: e.text };
+    if (e.file) t.file = e.file;
+    if (e.source) t.source = e.source;
+    if (e.speakers) t.speakers = e.speakers;
+    return t;
+  }
   const MOCK_STATE = {
-    entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })),
+    entries: MOCK_ENTRIES.filter((e) => e.day === MOCK_DAYS.today).map(mockTake),
     hardware: MOCK_HW.hw,
     settings: {
       powerMode: "auto", model: "small.en",
@@ -253,27 +266,39 @@
     },
     cancel_record() { return Promise.resolve(null); },
     list_outputs() { return Promise.resolve(this._state.outputs.slice()); },
-    start_capture(output, mic) {
-      this._state.capture = { active: true, source: String(output || "").replace(/ \(system default\)$/, ""), mic: !!mic, secs: 0 };
+    /* speaker-labelled paragraphs, the shape the backend produces when
+       diarize was asked for */
+    _diarized(plain) {
+      return {
+        speakers: 2,
+        text: "Speaker 1: " + plain.split(". ")[0] + ".\n\nSpeaker 2: " + plain.split(". ").slice(1).join(". ")
+      };
+    },
+    start_capture(output, mic, diarize) {
+      this._state.capture = { active: true, source: String(output || "").replace(/ \(system default\)$/, ""), mic: !!mic, diarize: !!diarize, secs: 0 };
       if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
       return Promise.resolve({ ok: true });
     },
     stop_capture() {
-      const src = (this._state.capture || {}).source || "Speakers";
+      const cap = this._state.capture || {};
+      const src = cap.source || "Speakers";
+      const diarize = !!cap.diarize;
       this._state.capture = { active: false };
       if (window.tiroSetCapture) window.tiroSetCapture(this._state.capture);
       const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
       push({ phase: "transcribing", name: src, secs: 95 });
       setTimeout(() => {
         if (window.tiroAddEntry) {
-          window.tiroAddEntry({ id: "c" + Date.now(), clock: "4:20 PM", dur: "1:35", source: src,
-            text: "Yeah so the plan is we ship the import path first and then look at the call capture, because the two share the whole pipeline after the audio comes in." });
+          const plain = "Yeah so the plan is we ship the import path first and then look at the call capture. The two share the whole pipeline after the audio comes in, so the second one is mostly plumbing.";
+          const entry = { id: "c" + Date.now(), clock: "4:20 PM", dur: "1:35", source: src, text: plain };
+          if (diarize) Object.assign(entry, this._diarized(plain));
+          window.tiroAddEntry(entry);
         }
         push({ phase: "done", name: src, secs: 95 });
       }, 1800);
       return Promise.resolve({ ok: true });
     },
-    transcribe_file(path) {
+    transcribe_file(path, diarize) {
       // preview: a "picked" file walks the same phases the backend pushes
       const name = path ? String(path).split(/[\\/]/).pop() : "standup-2026-09-23.m4a";
       const push = (p) => { if (window.tiroSetImport) window.tiroSetImport(p); };
@@ -284,14 +309,17 @@
         let hh = now.getHours();
         const ap = hh >= 12 ? "PM" : "AM"; hh = hh % 12 || 12;
         if (window.tiroAddEntry) {
-          window.tiroAddEntry({
+          const plain = "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers.";
+          const entry = {
             id: "f" + Date.now(),
             clock: hh + ":" + String(now.getMinutes()).padStart(2, "0") + " " + ap,
             dur: "12:04",
             mic: name,
             file: name,
-            text: "Okay, quick standup. Yesterday I finished the import path so a dropped file goes through the same take pipeline as the mic. Today I want to look at progress feedback for long files, because a half-hour recording sits on the transcribing pill for minutes with nothing moving. No blockers."
-          });
+            text: plain
+          };
+          if (diarize) Object.assign(entry, this._diarized(plain));
+          window.tiroAddEntry(entry);
         }
         push({ phase: "done", name: name, secs: 724 });
       }, 2600);
@@ -319,8 +347,7 @@
       return Promise.resolve(days);
     },
     history_entries(day) {
-      return Promise.resolve(MOCK_ENTRIES.filter((e) => e.day === day)
-        .map((e) => ({ id: e.id, clock: e.clock, dur: e.dur, text: e.text })));
+      return Promise.resolve(MOCK_ENTRIES.filter((e) => e.day === day).map(mockTake));
     },
     list_vocab() { return Promise.resolve(clone(this._state.vocab)); },
     set_vocab(hotwords, corrections) {
@@ -419,18 +446,23 @@
     const el = document.createElement("div");
     el.className = "entry" + (landing ? " landing" : "");
     el.dataset.id = e.id;
+    /* speaker-separated takes: text is "Speaker N: …" paragraphs split by
+       blank lines — keep the breaks and say how many voices were found */
+    const speakers = Number(e.speakers) || 0;
     el.innerHTML =
       '<div class="meta">' + (showDay && e.dayIso ? '<span class="day"></span><span class="dot">·</span>' : "") +
       '<span class="time"></span><span class="dot">·</span><span class="dur"></span>' +
       (e.file ? '<span class="dot">·</span><span class="file"></span>' : "") +
       (e.source ? '<span class="dot">·</span><span class="source">System audio</span>' : "") +
+      (speakers > 0 ? '<span class="dot">·</span><span class="speakers"></span>' : "") +
       '<span class="copied-chip">' + checkSvg + "Copied</span></div>" +
-      '<div class="txt clamped"></div>' +
+      '<div class="txt clamped' + (speakers > 0 ? " speakers" : "") + '"></div>' +
       '<button class="showmore">Show more</button>';
     if (showDay && e.dayIso) el.querySelector(".day").textContent = dayLabel(e.dayIso);
     el.querySelector(".time").textContent = e.clock;
     el.querySelector(".dur").textContent = e.dur;
     if (e.file) el.querySelector(".file").textContent = e.file;
+    if (speakers > 0) el.querySelector(".speakers").textContent = speakers + (speakers === 1 ? " speaker" : " speakers");
     el.querySelector(".txt").textContent = e.text;
     const more = el.querySelector(".showmore");
     more.addEventListener("click", (ev) => {

@@ -299,14 +299,18 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   font-variant-numeric: tabular-nums;
   color:rgba(var(--ink),.45);
   margin-bottom:var(--s-1);
-  min-height:16px;
+  /* the row is the Copied chip's height, text 3px down its baseline —
+     the chip sits out of flow (below) so a row full of tags never wraps */
+  min-height:22px; padding-top:3px;
 }
+.meta .time, .meta .dur{ white-space:nowrap; }
 .meta .dot{ font-weight:400; color:rgba(var(--ink),.28); }
 .meta .dur{ font-weight:500; color:rgba(var(--ink),.38); }
-.meta .source{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; }
+.meta .source{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; min-width:0; overflow:hidden; text-overflow:ellipsis; }
 .meta .file{ font-weight:500; color:rgba(var(--ink),.38); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.meta .speakers{ font-weight:500; color:rgba(var(--ink),.38); white-space:nowrap; flex:none; }
 .copied-chip{
-  margin-left:auto;
+  position:absolute; top:var(--s-3); right:var(--s-3);
   display:inline-flex; align-items:center; gap:5px;
   font-size:11px; font-weight:600; letter-spacing:.03em;
   color:rgba(var(--ink),.85);
@@ -336,6 +340,8 @@ a{ color:rgba(var(--ink),.92); } a:hover{ color:rgba(var(--ink),1); }
   font-weight:400;
   text-wrap:pretty;
 }
+/* speaker-separated text keeps its paragraph breaks ("Speaker 1: …") */
+.txt.speakers{ white-space:pre-line; }
 .txt.clamped{ max-height: calc(6 * 1.46em); overflow:hidden; }
 .entry.clampable .txt.clamped{
   -webkit-mask-image:linear-gradient(180deg,#000 62%, transparent 98%);
